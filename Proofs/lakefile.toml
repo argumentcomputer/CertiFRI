@@ -1,0 +1,21 @@
+# The mathematical model of the verifier and the theorems about it. Mathlib is
+# confined to this package; its release matches the toolchain in
+# `lean-toolchain`, which must stay equal to the root package's.
+name = "certifri-proofs"
+version = "0.1.0"
+defaultTargets = ["CertiFriProofs"]
+
+[leanOptions]
+autoImplicit = false
+
+[[require]]
+name = "mathlib"
+git = "https://github.com/leanprover-community/mathlib4"
+rev = "v4.34.1"
+
+[[require]]
+name = "certifri"
+path = ".."
+
+[[lean_lib]]
+name = "CertiFriProofs"

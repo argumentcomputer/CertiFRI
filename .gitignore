@@ -1,0 +1,5 @@
+# Lake build output and fetched dependencies (root and Proofs/)
+.lake/
+
+# Cargo build output
+target/

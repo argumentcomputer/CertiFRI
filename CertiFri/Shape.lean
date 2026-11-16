@@ -113,8 +113,9 @@ theorem deriveShape_pairwise {EF Commitment : Type} (params : FriParams)
     (deriveShape params claims).inputLogHeights.Pairwise (· > ·) :=
   distinctDesc_pairwise _
 
-/-- The derived schedule folds from the tallest claimed height exactly down to
-the final height. -/
+/-- The total reduction is the tallest claimed log-height minus the final
+log-height, truncated at zero. Inputs already at or below the final height
+produce no rounds. Requires a positive arity cap. -/
 theorem deriveShape_sum {EF Commitment : Type} (params : FriParams)
     (claims : Array (CommitmentOpening EF Commitment)) (hcap : 0 < params.maxLogArity) :
     (deriveShape params claims).logArities.sum

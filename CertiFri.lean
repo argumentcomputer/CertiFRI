@@ -12,7 +12,9 @@ import CertiFri.Shape
 /-!
 # CertiFri
 
-A FRI polynomial commitment verifier, written to be proved correct.
+Definitions and supporting proofs for a planned FRI polynomial commitment
+verifier. Transcript replay, opening checks and the complete verifier are not
+implemented yet.
 
 This package is the executable side. It depends on nothing beyond the Lean
 toolchain. The mathematical model and the theorems that need Mathlib are in the

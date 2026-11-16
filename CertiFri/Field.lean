@@ -5,8 +5,9 @@ The verifier is generic over the base field `F` and the extension field `EF`
 its challenges live in. These classes carry operations only. They state no
 laws: a law about machine arithmetic is a theorem, and theorems about field
 structure need Mathlib. The proofs package relates an instance to a
-mathematical field through an abstraction map (`CertiFri.Refines`) and proves
-the laws there.
+mathematical field through an abstraction map (`CertiFri.Refines`). A concrete
+instance must supply proofs that its operations and equality test refine the
+model; no concrete machine-field instance is certified here yet.
 -/
 
 namespace CertiFri

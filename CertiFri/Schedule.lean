@@ -6,8 +6,7 @@ Port of `compute_log_arity_for_round` and `fold_schedule` from Plonky3
 
 The schedule is the list of log-arities of the commit rounds. Both sides derive
 it from the parameters and the claimed heights, so it is never read from a
-proof. The verifier relies on two properties of the derivation and has no
-runtime check for either:
+proof. Plonky3's verifier relies on two properties of the derivation:
 
 * the arities sum to the distance from the tallest input to the final height
   (`foldSchedule_sum`);
@@ -15,7 +14,7 @@ runtime check for either:
   (`foldSchedule_bounds`).
 
 Plonky3 checks both by sweeping every height set below `2 ^ 10`. Here they are
-theorems for all inputs.
+theorems for strictly decreasing input heights and a positive arity cap.
 -/
 
 namespace CertiFri
@@ -54,8 +53,8 @@ decreasing. Folding starts at the tallest and stops at `logFinalHeight`.
 
 Plonky3 panics when the heights are not strictly decreasing or `maxLogArity` is
 zero. This function is total, and its value on such inputs is unspecified: the
-theorems below assume both preconditions, and the verifier establishes them
-before it calls. -/
+theorems below assume both preconditions. `deriveShape` establishes sortedness;
+the future verifier must also validate the arity cap. -/
 def foldSchedule (inputLogHeights : List Nat) (logFinalHeight maxLogArity : Nat) : List Nat :=
   match inputLogHeights with
   | [] => []

@@ -1,0 +1,25 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+#pragma once
+#include <cstddef>
+#include <cstdint>
+
+// Borrowed from the Rust plan; its host constants outlive the synchronous
+// prover entry that uploads them. All sizes and groups are fixed at admission.
+struct CertiFriNttPlan {
+    size_t height;
+    size_t width;
+    size_t extended_height;
+    size_t columns;
+    size_t inverse_group;
+    size_t forward_group;
+    size_t scratch_bytes;
+    const uint64_t* shift_powers;
+};
+
+extern "C" int certifri_sppark_forward(int device, uint64_t* values,
+                                          const CertiFriNttPlan* plan) noexcept;
+extern "C" int certifri_sppark_coset_lde(int device, const uint64_t* trace,
+                                            uint64_t* values, const CertiFriNttPlan* plan,
+                                            const uint64_t* device_shift_powers) noexcept;
+extern "C" int certifri_sppark_parallel_memcpy(int device, void* destination,
+                                                 const void* source, size_t bytes) noexcept;

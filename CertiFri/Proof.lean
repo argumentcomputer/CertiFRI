@@ -3,11 +3,12 @@ import CertiFri.Mmcs
 /-!
 # Opening proofs
 
-Port of `FriProof`, `CommitPhaseMultiStep` and `BatchMultiOpening` from Plonky3
-(`fri/src/proof.rs`).
+Proof structures for input openings, folding commitments and the final polynomial.
+These structures do not define a wire encoding.
 
-No length in a proof is trusted. Every length is fixed by the parameters and
-the claims, and the verifier compares the proof against it before reading.
+No length in a proof should be trusted. The planned verifier must compare each
+proof-supplied length against the parameters and claims before indexing it.
+These structures do not enforce those checks.
 -/
 
 namespace CertiFri

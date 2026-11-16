@@ -1,6 +1,6 @@
-# The executable verifier. It has no dependency beyond the Lean toolchain, so a
+# The executable Lean verifier scaffold. It depends only on the toolchain, so a
 # consumer can `require certifri` without inheriting Mathlib. Everything that
-# needs Mathlib (the mathematical model, refinement and security theorems)
+# needs Mathlib (currently the field model and polynomial refinement proofs)
 # lives in the separate package under `Proofs/`.
 name = "certifri"
 version = "0.1.0"

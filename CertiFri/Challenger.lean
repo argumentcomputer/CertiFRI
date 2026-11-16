@@ -21,7 +21,7 @@ class ChallengerOps (C : Type) (F : outParam Type) where
   sampleBits : C → (bits : Nat) → Nat × C
 
 /-- Check a grinding witness: absorb it, then require the next `bits` sampled
-bits to be zero. Port of `GrindingChallenger::check_witness`.
+bits to be zero.
 
 At zero difficulty nothing is absorbed and every witness passes, so a verifier
 must separately pin the witness to its canonical value there. -/

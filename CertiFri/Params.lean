@@ -1,9 +1,8 @@
 /-!
 # FRI parameters
 
-Port of `FriParameters` from Plonky3 (`fri/src/config.rs`), without the
-commitment-scheme handle: here the commitment scheme is a type-class argument of
-the verifier, not a field of the parameters.
+Folding, query and grinding parameters. Commitment schemes are separate
+`Mmcs` values, not fields of these parameters.
 -/
 
 namespace CertiFri

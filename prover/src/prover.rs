@@ -1,0 +1,953 @@
+//! Multi-circuit STARK prover, constraint-IR version.
+//!
+//! The composition polynomial is built by running the compiled circuit's
+//! dense sweep in `PackedVal` on the quotient domain and folding the
+//! constraint values with the constraint challenge. Stage-2 columns are
+//! treated as ordinary base columns (they were committed flattened), so no
+//! extension packing is needed here.
+//!
+//! The proving protocol proceeds in several stages sharing one Fiat-Shamir
+//! transcript. The challenger starts from a seed binding a domain tag and all
+//! protocol parameters (see the transcript contract on
+//! [`ProofConfig::initialise_challenger`]), and the system shape
+//! (circuit count, widths, constraint counts, degrees)
+//! is observed before any commitment.
+//!
+//! 0. **Sparse activation**: circuits whose stage-1 trace is empty are
+//!    deactivated for this proof — skipped by every stage below — and the
+//!    activation bitmap over the canonical circuit set is observed
+//!    immediately after the shape, before any commitment or challenge. See
+//!    [`Proof::active`] for the soundness contract.
+//!
+//! 1. **Stage 1 — Main traces**: Each circuit's execution trace is committed via the
+//!    configuration's PCS. The preprocessed commitment (if any), stage-1 commitment,
+//!    trace heights, and length-prefixed claims are observed into the challenger.
+//!    Claims must be observed before lookup challenges are sampled; otherwise the
+//!    prover could choose claims adaptively to balance the lookup accumulator.
+//!
+//! 2. **Lookup challenges**: The challenger samples two independent challenges:
+//!    `lookup_argument_challenge` (β) and `fingerprint_challenge` (γ). An initial
+//!    accumulator is computed from the claims:
+//!    `acc = Σ (β + fingerprint(γ, claim_i))⁻¹`.
+//!
+//! 3. **Stage 2 — Lookup traces**: For each circuit, the lookup traces are computed
+//!    (one chained partial accumulator per lookup group; no message inverses are
+//!    committed) and committed via PCS. Each
+//!    circuit produces an intermediate accumulator value recording where its running
+//!    sum ended up; these are observed into the challenger, and the verifier will
+//!    check that the last one is zero.
+//!
+//! 4. **Quotient polynomial**: A constraint challenge (α) is sampled and used to fold
+//!    all constraints via powers of α. The folded constraint polynomial is divided by
+//!    the vanishing polynomial, split into degree-bounded chunks, and committed.
+//!
+//! 5. **Opening**: An out-of-domain point (ζ) is sampled. Requested polynomials open
+//!    at ζ and, where required, ζ·g (where g is the trace domain generator) via
+//!    the PCS. Quotient slices open only at ζ. The reference PCS produces a FRI proof.
+//!
+//! The resulting [`Proof`] can be serialized with [`Proof::to_bytes`] and deserialized
+//! with [`Proof::from_bytes`] for transport or storage.
+//!
+//! # Prover cost model
+//!
+//! The following describes the reference FRI backend. Other implementations of
+//! [`ProofConfig`] can use different commitments and acceleration strategies.
+//! These are asymptotic estimates, not operation counts or performance guarantees.
+//! The benchmark in `prover/benches/certifri.rs` measures the complete pipeline.
+//!
+//! For each active circuit i, let:
+//! - n_i be its trace height (a power of two);
+//! - L_i and s_i be its lookup count and lookup group size;
+//! - d_i be its maximum constraint degree multiple;
+//! - q_i = next_pow2(max(d_i, 2) - 1) be its quotient degree multiple.
+//!
+//! Let D be the challenge extension degree and B = 2^log_blowup the FRI blowup.
+//! The stage-2 width is `max(ceil(L_i / s_i), 1) * D` base columns. The quotient
+//! is committed as one matrix with `q_i * D` columns and `n_i * B` LDE rows.
+//! Grouping reduces stage-2 width but can raise q_i. The reference configuration
+//! rejects circuits with q_i > B during setup.
+//!
+//! ## Commitments and lookup construction
+//!
+//! Main and lookup commitments require coset LDEs and Merkle hashing. For a
+//! matrix of n rows and w columns, FFT work scales as `O(w * n * B * log(n * B))`;
+//! leaf hashing processes `n * B * w` field elements. Mixed-height matrices share
+//! a commitment tree, so counting one independent tree per column is inaccurate.
+//!
+//! Lookup construction evaluates fingerprints, batch-inverts message
+//! denominators and scans the signed contributions into chained accumulators.
+//! Its work scales with the number of trace rows, lookup messages and arguments.
+//! A circuit without lookups still has one pass-through accumulator column.
+//!
+//! Quotient evaluation runs the compiled constraints and direct logUp checks at
+//! `n_i * q_i` points. The FRI adapter recovers quotient coefficients and slices
+//! them into q_i polynomials of degree below n_i. A fused gather incorporates
+//! the LDE coset shift, and a padded DFT builds the committed evaluations. This
+//! avoids materializing trace-domain evaluations only to invert them again.
+//!
+//! ## Openings and FRI
+//!
+//! Barycentric opening work scales with the committed LDE elements and distinct
+//! opening points. Preprocessed LDEs are built at setup, but their openings still
+//! contribute to each proof. Optional next-row and inactive-preprocessing
+//! omissions are backend capabilities bound into the transcript.
+//!
+//! Folding ends at log-height `log_blowup + log_final_poly_len`.
+//! The actual round count depends on all
+//! distinct input heights: the schedule may shorten a round to incorporate a
+//! smaller input. It cannot generally be obtained by dividing the total height
+//! reduction by `max_log_arity` and rounding up.
+//!
+//! Folding work scales with the codewords processed. Query authentication
+//! depends on query count, tree heights and shared Merkle paths. Positive-bit
+//! grinding has expected search cost proportional to `2^commit_bits` per fold
+//! round plus `2^query_bits` before query sampling; zero-bit grinding skips the
+//! search. The deterministic challenger selects the lowest passing witness.
+//!
+//! For fixed widths and protocol parameters, FFT work grows roughly as
+//! `n * log(n)`. Constraint evaluation, hashing and lookup construction can
+//! dominate for other circuit shapes. CUDA residency, spilling, SIMD and
+//! parallel execution change runtime and memory use without changing the proof
+//! format; measure the intended workload to choose a backend.
+
+use crate::config::{
+    Com, Domain, EvaluationsOnDomain, PackedChallenge, PackedVal, PcsData, PcsProof, ProofConfig,
+    Val,
+};
+use crate::eval::VarValues;
+use crate::lookup::{LookupValues, try_claims_accumulator};
+use crate::system::{ProverKey, System, SystemWitness};
+use crate::traits::{
+    Algebra, EvaluationDomain, ExtensionOf, Field, LagrangeSelectors, OpenedValuesForRound, Packed,
+    PackedExtension, Pcs, Transcript, TwoAdicField, flatten_to_base,
+};
+
+use bincode::config::{Configuration, Fixint, LittleEndian, standard};
+use bincode::error::{DecodeError, EncodeError};
+use bincode::serde::{decode_from_slice, encode_to_vec};
+use p3_matrix::{Matrix, dense::RowMajorMatrix};
+use p3_maybe_rayon::prelude::*;
+use p3_util::log2_strict_usize;
+use serde::{Deserialize, Serialize};
+
+/// Polynomial commitments included in the proof.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Commitments<Com> {
+    /// Commitment to the stage 1 (main) execution traces.
+    pub stage_1_trace: Com,
+    /// Commitment to the stage 2 (lookup) execution traces.
+    pub stage_2_trace: Com,
+    /// Commitment to the quotient polynomial chunks.
+    pub quotient_chunks: Com,
+}
+
+/// A STARK proof for a multi-circuit system.
+#[derive(Serialize, Deserialize)]
+#[serde(bound = "")]
+pub struct Proof<SC: ProofConfig> {
+    /// Activation bitmap over the system's canonical circuit set: circuit i
+    /// is covered by this proof iff `active[i]`. Inactive circuits (empty
+    /// execution traces) have no main/lookup commitments, accumulator entries
+    /// or constraint checks. Fixed matrices still belong to the shared
+    /// preprocessed commitment and may require openings. Lookup balance detects omission only if
+    /// it leaves unmatched messages; callers must require needed circuits
+    /// through their statement or activation policy. Bound into
+    /// the Fiat-Shamir transcript before any commitment or challenge.
+    /// Accumulators, log degrees, main/lookup openings and quotient openings
+    /// use active position. Preprocessed openings instead use the system's
+    /// canonical preprocessed-matrix order, including inactive circuits.
+    pub active: Vec<bool>,
+    pub commitments: Commitments<Com<SC>>,
+    /// Per-active-circuit intermediate accumulator values for the lookup
+    /// argument.
+    pub intermediate_accumulators: Vec<SC::Challenge>,
+    /// Log2 of the trace degree for each active circuit.
+    pub log_degrees: Vec<u8>,
+    /// PCS opening proof covering all rounds.
+    pub opening_proof: PcsProof<SC>,
+    pub quotient_opened_values: OpenedValuesForRound<SC::Challenge>,
+    pub preprocessed_opened_values: Option<OpenedValuesForRound<SC::Challenge>>,
+    pub stage_1_opened_values: OpenedValuesForRound<SC::Challenge>,
+    pub stage_2_opened_values: OpenedValuesForRound<SC::Challenge>,
+}
+
+impl<SC: ProofConfig> Clone for Proof<SC> {
+    fn clone(&self) -> Self {
+        Self {
+            active: self.active.clone(),
+            commitments: self.commitments.clone(),
+            intermediate_accumulators: self.intermediate_accumulators.clone(),
+            log_degrees: self.log_degrees.clone(),
+            opening_proof: self.opening_proof.clone(),
+            quotient_opened_values: self.quotient_opened_values.clone(),
+            preprocessed_opened_values: self.preprocessed_opened_values.clone(),
+            stage_1_opened_values: self.stage_1_opened_values.clone(),
+            stage_2_opened_values: self.stage_2_opened_values.clone(),
+        }
+    }
+}
+
+/// Round-one state of a proof: the stage-1 (main) trace commitment together
+/// with everything the remaining rounds need. Produced by
+/// [`System::prove_stage_1`], consumed by [`System::prove_after_challenges`].
+///
+/// Holding a `Stage1` across a batch's challenge barrier retains its PCS data
+/// (LDEs and Merkle tree in the reference backend). A caller may instead drop it
+/// after reading [`Stage1::active`], [`Stage1::log_degrees`] and
+/// [`Stage1::stage_1_trace_commit`], and recommit the same witness later —
+/// this requires a backend that reproduces the same commitment.
+pub struct Stage1<SC: ProofConfig> {
+    /// Activation bitmap over the canonical circuit set (see [`Proof::active`]).
+    pub active: Vec<bool>,
+    /// Canonical index of each active circuit, in order.
+    pub active_indices: Vec<usize>,
+    /// Log2 trace height of each active circuit.
+    pub log_degrees: Vec<usize>,
+    /// The stage-1 commitment.
+    pub stage_1_trace_commit: Com<SC>,
+    /// PCS prover data behind the commitment (LDEs and Merkle tree for FRI).
+    pub stage_1_trace_data: PcsData<SC>,
+    /// Lookup witness of each active circuit, in active order.
+    pub lookups: Vec<LookupValues<Val<SC>>>,
+}
+
+/// Observes length-prefixed claims: the claim count, then each claim's
+/// length and elements, so distinct claim structures (e.g. `[[a, b]]` vs
+/// `[[a], [b]]`) yield distinct transcripts.
+pub fn observe_claims<SC: ProofConfig>(challenger: &mut SC::Challenger, claims: &[&[Val<SC>]]) {
+    challenger.observe_field(Val::<SC>::from_usize(claims.len()));
+    for claim in claims {
+        challenger.observe_field(Val::<SC>::from_usize(claim.len()));
+        challenger.observe_field_slice(claim);
+    }
+}
+
+/// Samples the lookup argument challenge β and the fingerprint challenge γ,
+/// observing each back into the transcript.
+pub fn sample_lookup_challenges<SC: ProofConfig>(
+    challenger: &mut SC::Challenger,
+) -> (SC::Challenge, SC::Challenge) {
+    let lookup_argument_challenge: SC::Challenge = challenger.sample_challenge();
+    challenger.observe_challenge(lookup_argument_challenge);
+    let fingerprint_challenge: SC::Challenge = challenger.sample_challenge();
+    challenger.observe_challenge(fingerprint_challenge);
+    (lookup_argument_challenge, fingerprint_challenge)
+}
+
+impl<SC: ProofConfig> Proof<SC> {
+    pub(crate) fn serde_config() -> Configuration<LittleEndian, Fixint> {
+        standard().with_little_endian().with_fixed_int_encoding()
+    }
+
+    #[inline]
+    pub fn to_bytes(&self) -> Result<Vec<u8>, EncodeError> {
+        let mut proof = self.clone();
+        SC::canonicalize_proof(&mut proof);
+        encode_to_vec(&proof, Self::serde_config())
+    }
+
+    #[inline]
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let (proof, _num_bytes) = decode_from_slice(bytes, Self::serde_config())?;
+        Ok(proof)
+    }
+}
+
+impl<SC> System<SC>
+where
+    SC: ProofConfig,
+    // Two-adicity is needed to slice the quotient into coefficient slices
+    // and rebuild their committed LDE from those coefficients; every
+    // FRI-based config is two-adic anyway.
+    Val<SC>: TwoAdicField + Ord,
+{
+    /// Generates a STARK proof for the system with a single claim.
+    ///
+    /// This is a convenience wrapper around [`Self::prove_multiple_claims`].
+    pub fn prove(
+        &self,
+        key: &ProverKey<SC>,
+        claim: &[Val<SC>],
+        witness: SystemWitness<Val<SC>>,
+    ) -> Proof<SC> {
+        self.prove_multiple_claims(key, &[claim], witness)
+    }
+
+    /// Generates a STARK proof for the system with multiple claims.
+    ///
+    /// Each claim is a slice of field elements that is observed by the challenger
+    /// before lookup challenges are sampled, binding the proof to the claimed values.
+    ///
+    /// Circuits whose stage-1 trace is empty are deactivated for this proof:
+    /// they are neither committed, opened, accumulated, nor
+    /// constraint-evaluated, and the activation bitmap is recorded in
+    /// [`Proof::active`].
+    ///
+    /// # Panics
+    /// Panics if every circuit's trace is empty (nothing to prove), or if the
+    /// sampled lookup challenge makes a public claim denominator zero.
+    #[tracing::instrument(level = "info", skip_all, name = "stark/prove")]
+    pub fn prove_multiple_claims(
+        &self,
+        key: &ProverKey<SC>,
+        claims: &[&[Val<SC>]],
+        witness: SystemWitness<Val<SC>>,
+    ) -> Proof<SC> {
+        let stage_1 = self.prove_stage_1(witness);
+        self.prove_committed(key, claims, stage_1)
+    }
+
+    /// Continue an ordinary proof from independently prepared stage-one data.
+    ///
+    /// # Panics
+    /// Panics if the sampled lookup challenge makes a public claim denominator zero.
+    pub fn prove_committed(
+        &self,
+        key: &ProverKey<SC>,
+        claims: &[&[Val<SC>]],
+        stage_1: Stage1<SC>,
+    ) -> Proof<SC> {
+        let mut challenger = self.config.initialise_challenger();
+
+        // Bind the system shape into the transcript. The protocol parameters
+        // are already bound via the challenger seed.
+        self.observe_shape(&mut challenger);
+
+        // The activation bitmap is bound into the transcript before any
+        // commitment or challenge (see `Stage1::active`).
+        for &is_active in &stage_1.active {
+            challenger.observe_field(Val::<SC>::from_bool(is_active));
+        }
+
+        if let Some(commit) = &self.preprocessed_commit {
+            challenger.observe_commitment(commit.clone());
+        }
+        challenger.observe_commitment(stage_1.stage_1_trace_commit.clone());
+
+        // Observe the traces' heights. This binds the proof to specific domain
+        // sizes; the verifier reads these from the (untrusted) proof, so they
+        // must influence every subsequent challenge.
+        for log_degree in &stage_1.log_degrees {
+            challenger.observe_field(Val::<SC>::from_usize(*log_degree));
+        }
+
+        // Observe the claims, length-prefixed so that distinct claim
+        // structures (e.g. [[a, b]] vs [[a], [b]]) yield distinct transcripts.
+        // This has to be done before generating the lookup argument challenge,
+        // otherwise the lookup argument can be attacked.
+        observe_claims::<SC>(&mut challenger, claims);
+
+        let (lookup_argument_challenge, fingerprint_challenge) =
+            sample_lookup_challenges::<SC>(&mut challenger);
+        let acc = try_claims_accumulator(lookup_argument_challenge, &fingerprint_challenge, claims)
+            .expect("lookup challenge makes a claim denominator zero");
+
+        self.prove_after_challenges(
+            key,
+            stage_1,
+            challenger,
+            lookup_argument_challenge,
+            fingerprint_challenge,
+            acc,
+        )
+    }
+
+    /// Round one of a proof: commits the stage-1 (main) traces and retains
+    /// what the remaining rounds need. No transcript is touched here — the
+    /// caller decides which transcript the commitment enters (a single
+    /// proof's own, or a batch's shared one — see [`crate::batch`]).
+    ///
+    /// # Panics
+    /// Panics if every circuit's trace is empty (nothing to prove).
+    #[tracing::instrument(level = "info", skip_all, name = "stark/stage1_commit")]
+    pub fn prove_stage_1(
+        &self,
+        witness: impl Into<crate::witness::PreparedWitness<Val<SC>>>,
+    ) -> Stage1<SC> {
+        let witness = witness.into();
+        let pcs = self.config.pcs();
+
+        // Empty main traces deactivate their circuits for this proof.
+        // They contribute no main/lookup rows or constraint checks, but
+        // their fixed matrices remain in the shared preprocessed commitment.
+        // Required activation must follow from the application's statement;
+        // lookup balance detects omissions only when messages become unmatched.
+        let active: Vec<bool> = witness.traces.iter().map(|t| t.height() > 0).collect();
+        // Canonical index of each active circuit, in order; matrix position
+        // within every per-proof commitment == position in this list.
+        let active_indices: Vec<usize> = active
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &a)| a.then_some(i))
+            .collect();
+        assert!(
+            !active_indices.is_empty(),
+            "cannot prove with every circuit deactivated (all traces empty)"
+        );
+
+        // The reference PCS expands main traces by the blowup factor and
+        // commits their LDE rows with a mixed-height Merkle tree.
+        let mut log_degrees = vec![];
+        let evaluations = witness
+            .traces
+            .into_iter()
+            .zip(active.clone())
+            .filter_map(|(trace, is_active)| is_active.then_some(trace))
+            .map(|trace| {
+                let degree = trace.height();
+                let log_degree = log2_strict_usize(degree);
+                let trace_domain = pcs.natural_domain_for_degree(degree);
+                log_degrees.push(log_degree);
+                (trace_domain, trace)
+            });
+        let (stage_1_trace_commit, stage_1_trace_data) =
+            self.config.commit_main(evaluations.collect());
+
+        // Only active circuits enter the accumulator chain; the chain (and
+        // `intermediate_accumulators`) is indexed by active position.
+        let lookups: Vec<_> = witness
+            .lookups
+            .into_iter()
+            .zip(&active)
+            .filter_map(|(l, &is_active)| is_active.then_some(l))
+            .collect();
+
+        Stage1 {
+            active,
+            active_indices,
+            log_degrees,
+            stage_1_trace_commit,
+            stage_1_trace_data,
+            lookups,
+        }
+    }
+
+    /// Rounds two onward: given a committed [`Stage1`], a transcript that has
+    /// just sampled the lookup challenges, and the initial accumulator the
+    /// verifier will derive, builds the stage-2 traces, the quotient and the
+    /// PCS opening proof. Shared by the single-proof protocol and the batch
+    /// protocol, which differ only in how the transcript reached this point.
+    pub fn prove_after_challenges(
+        &self,
+        key: &ProverKey<SC>,
+        stage_1: Stage1<SC>,
+        mut challenger: SC::Challenger,
+        lookup_argument_challenge: SC::Challenge,
+        fingerprint_challenge: SC::Challenge,
+        mut acc: SC::Challenge,
+    ) -> Proof<SC> {
+        let pcs = self.config.pcs();
+        let Stage1 {
+            active,
+            active_indices,
+            log_degrees,
+            stage_1_trace_commit,
+            stage_1_trace_data,
+            lookups: active_lookups,
+        } = stage_1;
+        // Canonical index -> active position (None = inactive).
+        let mut active_pos: Vec<Option<usize>> = vec![None; active.len()];
+        for (pos, &ci) in active_indices.iter().enumerate() {
+            active_pos[ci] = Some(pos);
+        }
+
+        // Lookup construction fingerprints messages, batch-inverts their
+        // denominators and scans contributions into accumulators.
+        let _g = tracing::info_span!("stark/lookup_construction").entered();
+        let group_sizes: Vec<usize> = active_indices
+            .iter()
+            .map(|&ci| self.circuits[ci].lookup_group_size)
+            .collect();
+        let lookup_inputs: Vec<_> = active_indices
+            .iter()
+            .enumerate()
+            .zip(&active_lookups)
+            .map(
+                |((position, &circuit_index), lookup_values)| crate::config::LookupCommitInput {
+                    circuit: &self.circuits[circuit_index],
+                    lookup_values,
+                    preprocessed: key
+                        .preprocessed_data
+                        .as_ref()
+                        .zip(self.preprocessed_indices[circuit_index]),
+                    stage_1: (&stage_1_trace_data, position),
+                },
+            )
+            .collect();
+        let accelerated_lookup_commit = self.config.accelerated_lookup_commit(
+            &lookup_inputs,
+            lookup_argument_challenge,
+            fingerprint_challenge,
+            acc,
+        );
+        let (stage_2_trace_commit, stage_2_trace_data, intermediate_accumulators) =
+            if let Some(result) = accelerated_lookup_commit {
+                drop(active_lookups);
+                drop(_g);
+                result
+            } else {
+                let (stage_2_traces, intermediate_accumulators) = self
+                    .config
+                    .accelerated_lookup_traces(
+                        &active_lookups,
+                        &group_sizes,
+                        lookup_argument_challenge,
+                        fingerprint_challenge,
+                        acc,
+                    )
+                    .unwrap_or_else(|| {
+                        LookupValues::stage_2_traces(
+                            &active_lookups,
+                            &group_sizes,
+                            lookup_argument_challenge,
+                            &fingerprint_challenge,
+                            acc,
+                        )
+                    });
+                // The lookup witness can be as large as the traces themselves; free it
+                // now instead of holding it through the commit/quotient/FRI stages.
+                drop(active_lookups);
+                drop(_g);
+
+                // Commit the lookup traces after flattening extension elements
+                // into base-field coordinates.
+                let _g = tracing::info_span!("stark/stage2_commit").entered();
+                let evaluations = stage_2_traces.into_iter().map(|trace| {
+                    let degree = trace.height();
+                    let trace_domain = pcs.natural_domain_for_degree(degree);
+                    (trace_domain, flatten_to_base(trace))
+                });
+                let (commitment, data) = pcs.commit(evaluations.collect());
+                drop(_g);
+                (commitment, data, intermediate_accumulators)
+            };
+        challenger.observe_commitment(stage_2_trace_commit.clone());
+
+        // Observe the intermediate accumulators. They enter the constraints as
+        // public values, so later challenges (α, ζ) must depend on them
+        // directly rather than only through the quotient commitment.
+        for acc in &intermediate_accumulators {
+            challenger.observe_challenge(*acc);
+        }
+
+        // Constraint challenge.
+        let constraint_challenge: SC::Challenge = challenger.sample_challenge();
+
+        // Evaluate folded constraints on each quotient domain. The backend
+        // slices the quotient polynomial and commits the resulting matrices.
+        let _g = tracing::info_span!("stark/quotient").entered();
+        debug_assert_eq!(intermediate_accumulators.len(), active_indices.len());
+        debug_assert_eq!(log_degrees.len(), active_indices.len());
+        let mut quotient_inputs = Vec::with_capacity(active_indices.len());
+        for (pos, ((&ci, log_degree), next_acc)) in active_indices
+            .iter()
+            .zip(log_degrees.iter())
+            .zip(intermediate_accumulators.iter())
+            .enumerate()
+        {
+            let circuit = &self.circuits[ci];
+            let quotient_degree = circuit.quotient_degree();
+            let log_quotient_degree = log2_strict_usize(quotient_degree);
+            let trace_domain = pcs.natural_domain_for_degree(1 << log_degree);
+            let quotient_domain =
+                trace_domain.create_disjoint_domain(1 << (log_degree + log_quotient_degree));
+            // The four lookup publics (β, γ, acc, next_acc) as flat base
+            // coordinates, in the layout the direct logUp evaluator reads.
+            let mut lookup_publics: Vec<Val<SC>> = Vec::new();
+            for ef in [
+                lookup_argument_challenge,
+                fingerprint_challenge,
+                acc,
+                *next_acc,
+            ] {
+                lookup_publics.extend_from_slice(ef.as_basis_coefficients_slice());
+            }
+
+            quotient_inputs.push(crate::config::QuotientCommitInput {
+                circuit,
+                lookup_publics,
+                trace_domain,
+                quotient_domain,
+                preprocessed: key
+                    .preprocessed_data
+                    .as_ref()
+                    .zip(self.preprocessed_indices[ci]),
+                stage_1: (&stage_1_trace_data, pos),
+                stage_2: (&stage_2_trace_data, pos),
+                constraint_count: circuit.constraint_count(),
+            });
+            acc = *next_acc;
+        }
+
+        let (quotient_commit, quotient_data) = if let Some(committed) = self
+            .config
+            .accelerated_quotient_commit(&quotient_inputs, constraint_challenge)
+        {
+            committed
+        } else {
+            let quotient_ldes: Vec<_> = quotient_inputs
+                .into_iter()
+                .map(|input| {
+                    let circuit = input.circuit;
+                    let quotient_degree = circuit.quotient_degree();
+
+                    // compute the quotient values which are elements of the extension field and flatten it to the base field
+                    let quotient_values = self
+                        .config
+                        .accelerated_quotient_values(
+                            circuit,
+                            &input.lookup_publics,
+                            input.trace_domain,
+                            input.quotient_domain,
+                            input.preprocessed,
+                            input.stage_1,
+                            input.stage_2,
+                            constraint_challenge,
+                            input.constraint_count,
+                        )
+                        .unwrap_or_else(|| {
+                            let preprocessed_trace_on_quotient_domain =
+                                input.preprocessed.map(|(data, idx)| {
+                                    pcs.get_evaluations_on_domain(data, idx, input.quotient_domain)
+                                });
+                            let stage_1_trace_on_quotient_domain = pcs.get_evaluations_on_domain(
+                                input.stage_1.0,
+                                input.stage_1.1,
+                                input.quotient_domain,
+                            );
+                            let stage_2_trace_on_quotient_domain = pcs.get_evaluations_on_domain(
+                                input.stage_2.0,
+                                input.stage_2.1,
+                                input.quotient_domain,
+                            );
+                            quotient_values::<SC>(
+                                circuit,
+                                &input.lookup_publics,
+                                input.trace_domain,
+                                input.quotient_domain,
+                                &preprocessed_trace_on_quotient_domain,
+                                &stage_1_trace_on_quotient_domain,
+                                &stage_2_trace_on_quotient_domain,
+                                constraint_challenge,
+                                input.constraint_count,
+                            )
+                        });
+                    let quotient_flat =
+                        flatten_to_base::<Val<SC>, _>(RowMajorMatrix::new_col(quotient_values));
+                    (input.quotient_domain, quotient_flat, quotient_degree)
+                })
+                .collect();
+            pcs.commit_quotient(quotient_ldes)
+        };
+        challenger.observe_commitment(quotient_commit.clone());
+        drop(_g);
+
+        let commitments = Commitments {
+            stage_1_trace: stage_1_trace_commit,
+            stage_2_trace: stage_2_trace_commit,
+            quotient_chunks: quotient_commit,
+        };
+
+        // Open the requested polynomials. The reference PCS performs
+        // barycentric interpolation followed by FRI folding and queries.
+        let _g = tracing::info_span!("stark/fri_open").entered();
+        let zeta: SC::Challenge = challenger.sample_challenge();
+        let mut round0_openings = vec![];
+        let mut round1_openings = vec![];
+        let mut round2_openings = vec![];
+        let mut round3_openings = vec![];
+        for (&ci, &log_degree) in active_indices.iter().zip(&log_degrees) {
+            let trace_domain = pcs.natural_domain_for_degree(1 << log_degree);
+            let zeta_next = trace_domain.next_point(zeta);
+            round1_openings.push(if self.opens_next_row(ci, crate::expr::Source::Main) {
+                vec![zeta, zeta_next]
+            } else {
+                vec![zeta]
+            });
+            round2_openings.push(vec![zeta, zeta_next]);
+            // One wide matrix per circuit holds all its quotient slices.
+            round3_openings.push(vec![zeta]);
+        }
+        // The preprocessed commitment is built once over ALL preprocessed
+        // traces at system construction, so its round must carry one entry
+        // per preprocessed matrix regardless of activation. An inactive
+        // circuit's preprocessed matrix is normally opened at ζ alone: no constraint
+        // reads the value, but the PCS pins every matrix's width to the
+        // claimed values at its first opening point (the leaf hash flattens
+        // same-height rows into one stream, so a matrix opened nowhere would
+        // leave its row boundary unauthenticated) and rejects a matrix with
+        // no opening points. A PCS with independent column commitments can
+        // explicitly opt out of these otherwise-unused openings.
+        for (ci, (prep_index, &pos)) in self
+            .preprocessed_indices
+            .iter()
+            .zip(&active_pos)
+            .enumerate()
+        {
+            if prep_index.is_some() {
+                match pos {
+                    Some(pos) => {
+                        let trace_domain = pcs.natural_domain_for_degree(1 << log_degrees[pos]);
+                        let zeta_next = trace_domain.next_point(zeta);
+                        round0_openings.push(
+                            if self.opens_next_row(ci, crate::expr::Source::Preprocessed) {
+                                vec![zeta, zeta_next]
+                            } else {
+                                vec![zeta]
+                            },
+                        );
+                    }
+                    None => {
+                        round0_openings.push(if self.config.omit_inactive_preprocessed_openings() {
+                            vec![]
+                        } else {
+                            vec![zeta]
+                        })
+                    }
+                }
+            }
+        }
+        let mut rounds = vec![
+            (&stage_1_trace_data, round1_openings),
+            (&stage_2_trace_data, round2_openings),
+            (&quotient_data, round3_openings),
+        ];
+        if self.preprocessed_commit.is_some() {
+            rounds.push((key.preprocessed_data.as_ref().unwrap(), round0_openings));
+        }
+        let (opened_values, opening_proof) = pcs.open(rounds, &mut challenger);
+        drop(_g);
+        let mut opened_values_iter = opened_values.into_iter();
+        let stage_1_opened_values = opened_values_iter.next().unwrap();
+        let stage_2_opened_values = opened_values_iter.next().unwrap();
+        let quotient_opened_values = opened_values_iter.next().unwrap();
+        let preprocessed_opened_values = opened_values_iter.next();
+        debug_assert!(opened_values_iter.next().is_none());
+        let log_degrees = log_degrees
+            .into_iter()
+            .map(|n| n.try_into().unwrap())
+            .collect();
+        Proof {
+            active,
+            commitments,
+            intermediate_accumulators,
+            log_degrees,
+            opening_proof,
+            quotient_opened_values,
+            preprocessed_opened_values,
+            stage_1_opened_values,
+            stage_2_opened_values,
+        }
+    }
+}
+
+/// Evaluates the folded constraints on the quotient domain and divides by
+/// the vanishing polynomial, producing the quotient values.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn quotient_values<SC>(
+    circuit: &crate::system::Circuit<Val<SC>>,
+    lookup_publics: &[Val<SC>],
+    trace_domain: Domain<SC>,
+    quotient_domain: Domain<SC>,
+    preprocessed_on_quotient_domain: &Option<EvaluationsOnDomain<'_, SC>>,
+    stage_1_on_quotient_domain: &EvaluationsOnDomain<'_, SC>,
+    stage_2_on_quotient_domain: &EvaluationsOnDomain<'_, SC>,
+    alpha: SC::Challenge,
+    constraint_count: usize,
+) -> Vec<SC::Challenge>
+where
+    SC: ProofConfig,
+    Val<SC>: TwoAdicField + Ord,
+{
+    let quotient_size = quotient_domain.size();
+    let main_width = circuit.main_width;
+    let stage_2_width = circuit.stage_2_width;
+    let preprocessed_width = circuit.preprocessed_width;
+    let mut sels = trace_domain.selectors_on_coset(quotient_domain);
+    // The logUp wrap constraint consumes the last-row selector ADDITIVELY,
+    // so its normalization matters — but the selector multiplies Δ, which
+    // is constant across the domain, so the normalization constant
+    // 1/(n·g) is absorbed into Δ once per circuit instead of rescaling
+    // the selector vectors (p3's unnormalized L_last has value n·g at the
+    // last row; see the selector-normalization pin test).
+    let n_val = Val::<SC>::from_usize(trace_domain.size());
+    let g = Val::<SC>::two_adic_generator(log2_strict_usize(trace_domain.size()));
+    let inj_norm = (n_val * g).inverse();
+
+    let qdb = log2_strict_usize(quotient_domain.size()) - log2_strict_usize(trace_domain.size());
+    let next_step = 1 << qdb;
+
+    for _ in quotient_size..PackedVal::<SC>::WIDTH {
+        sels.is_first_row.push(Val::<SC>::ZERO);
+        sels.is_last_row.push(Val::<SC>::ZERO);
+        sels.is_transition.push(Val::<SC>::ZERO);
+        sels.inv_vanishing.push(Val::<SC>::ZERO);
+    }
+
+    // α powers in reverse (constraint i of k weighted by α^{k-1-i}),
+    // decomposed per basis coordinate for the batched base-field fold.
+    let mut alpha_powers: Vec<SC::Challenge> = alpha.powers().take(constraint_count).collect();
+    alpha_powers.reverse();
+    let decomposed_alpha_powers: Vec<Vec<Val<SC>>> = (0
+        ..<SC::Challenge as ExtensionOf<Val<SC>>>::D)
+        .map(|i| {
+            alpha_powers
+                .iter()
+                .map(|x| x.as_basis_coefficients_slice()[i])
+                .collect()
+        })
+        .collect();
+
+    // Public coordinates broadcast to packed base values.
+    let publics_packed: Vec<PackedVal<SC>> = lookup_publics
+        .iter()
+        .map(|&c| PackedVal::<SC>::from(c))
+        .collect();
+
+    // Δ/(n·g) per coordinate, broadcast: the logUp boundary injection with
+    // the last-row selector's normalization constant pre-absorbed.
+    let ext_d = <SC::Challenge as ExtensionOf<Val<SC>>>::D;
+    let delta_scaled: Vec<PackedVal<SC>> = (0..ext_d)
+        .map(|k| {
+            PackedVal::<SC>::from(
+                (lookup_publics[3 * ext_d + k] - lookup_publics[2 * ext_d + k]) * inj_norm,
+            )
+        })
+        .collect();
+
+    let ext_params = crate::system::extension_params::<SC>();
+    let inner = |i_start: usize| {
+        quotient_values_inner::<SC>(
+            circuit,
+            &sels,
+            quotient_size,
+            preprocessed_on_quotient_domain,
+            stage_1_on_quotient_domain,
+            stage_2_on_quotient_domain,
+            main_width,
+            stage_2_width,
+            preprocessed_width,
+            &publics_packed,
+            &delta_scaled,
+            &decomposed_alpha_powers,
+            next_step,
+            i_start,
+            ext_params.w,
+            ext_params.degree,
+        )
+    };
+    #[cfg(feature = "parallel")]
+    {
+        (0..quotient_size)
+            .into_par_iter()
+            .step_by(PackedVal::<SC>::WIDTH)
+            .flat_map_iter(inner)
+            .collect()
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        (0..quotient_size)
+            .step_by(PackedVal::<SC>::WIDTH)
+            .flat_map_iter(inner)
+            .collect()
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn quotient_values_inner<SC>(
+    circuit: &crate::system::Circuit<Val<SC>>,
+    sels: &LagrangeSelectors<Vec<Val<SC>>>,
+    quotient_size: usize,
+    preprocessed_on_quotient_domain: &Option<EvaluationsOnDomain<'_, SC>>,
+    stage_1_on_quotient_domain: &EvaluationsOnDomain<'_, SC>,
+    stage_2_on_quotient_domain: &EvaluationsOnDomain<'_, SC>,
+    main_width: usize,
+    stage_2_width: usize,
+    preprocessed_width: usize,
+    publics_packed: &[PackedVal<SC>],
+    delta_scaled: &[PackedVal<SC>],
+    decomposed_alpha_powers: &[Vec<Val<SC>>],
+    next_step: usize,
+    i_start: usize,
+    ext_w: Val<SC>,
+    ext_degree: usize,
+) -> impl Iterator<Item = SC::Challenge>
+where
+    SC: ProofConfig,
+    Val<SC>: TwoAdicField + Ord,
+{
+    let i_range = i_start..i_start + PackedVal::<SC>::WIDTH;
+    let is_first_row = *PackedVal::<SC>::from_slice(&sels.is_first_row[i_range.clone()]);
+    let is_last_row = *PackedVal::<SC>::from_slice(&sels.is_last_row[i_range.clone()]);
+    let is_transition = *PackedVal::<SC>::from_slice(&sels.is_transition[i_range.clone()]);
+    let inv_vanishing = *PackedVal::<SC>::from_slice(&sels.inv_vanishing[i_range]);
+
+    // Packed two-row windows of each trace, as base columns.
+    let preprocessed_pair: Option<Vec<PackedVal<SC>>> = preprocessed_on_quotient_domain
+        .as_ref()
+        .map(|m| PackedVal::<SC>::packed_row_pair(m, i_start, next_step));
+    let stage_1_pair =
+        PackedVal::<SC>::packed_row_pair(stage_1_on_quotient_domain, i_start, next_step);
+    let stage_2_pair =
+        PackedVal::<SC>::packed_row_pair(stage_2_on_quotient_domain, i_start, next_step);
+
+    let (stage_1_cur, stage_1_next) = stage_1_pair.split_at(main_width);
+    let (stage_2_cur, stage_2_next) = stage_2_pair.split_at(stage_2_width);
+    let (preprocessed_cur, preprocessed_next): (&[PackedVal<SC>], &[PackedVal<SC>]) =
+        match &preprocessed_pair {
+            Some(pair) => pair.split_at(preprocessed_width),
+            None => (&[], &[]),
+        };
+
+    let view = VarValues {
+        preprocessed: [preprocessed_cur, preprocessed_next],
+        main: [stage_1_cur, stage_1_next],
+        stage2: [stage_2_cur, stage_2_next],
+        publics: publics_packed,
+        is_first_row,
+        is_last_row,
+        is_transition,
+    };
+    let mut buf = Vec::new();
+    circuit.graph.sweep(&view, &mut buf);
+    let mut constraint_values = circuit.graph.constraint_values(&buf);
+    // The logUp constraint values are evaluated directly (they are not
+    // compiled into the graph), appended after the user roots in the
+    // canonical protocol order. Coordinate-expanded logUp constraints are
+    // base-field-only, so they evaluate in `PackedVal` like everything else;
+    // the lookup expressions are read straight out of the sweep buffer.
+    crate::lookup::logup_constraint_values(
+        &circuit.graph.lookups,
+        &buf,
+        stage_2_cur,
+        stage_2_next,
+        publics_packed,
+        delta_scaled,
+        // p3's (unnormalized) last-row selector; the normalization
+        // constant is pre-absorbed into `delta_scaled`.
+        is_last_row,
+        ext_w,
+        ext_degree,
+        circuit.lookup_group_size,
+        &mut constraint_values,
+    );
+    debug_assert_eq!(constraint_values.len(), circuit.constraint_count());
+
+    // Fold the base constraint values with α through the decomposed path,
+    // reassembling one packed extension accumulator.
+    let accumulator = PackedChallenge::<SC>::from_basis_coefficients_fn(|coeff_idx| {
+        PackedVal::<SC>::batched_linear_combination(
+            &constraint_values,
+            &decomposed_alpha_powers[coeff_idx],
+        )
+    });
+    let quotient = accumulator * inv_vanishing;
+
+    (0..quotient_size.min(PackedVal::<SC>::WIDTH)).map(move |idx_in_packing| {
+        SC::Challenge::from_basis_coefficients_fn(|coeff_idx| {
+            PackedExtension::<Val<SC>, SC::Challenge>::as_basis_coefficients_slice(&quotient)
+                [coeff_idx]
+                .as_slice()[idx_in_packing]
+        })
+    })
+}

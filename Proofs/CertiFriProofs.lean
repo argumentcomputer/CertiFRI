@@ -38,3 +38,7 @@ import CertiFriProofs.Exec.TwoAttempts
 import CertiFriProofs.Exec.Binding
 import CertiFriProofs.Merkle.Tree
 import CertiFriProofs.Merkle.TreeExamples
+import CertiFriProofs.Exec.Honest
+import CertiFriProofs.Exec.HonestArith
+import CertiFriProofs.Exec.CompletenessChecks
+import CertiFriProofs.Exec.Completeness

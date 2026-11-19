@@ -17,9 +17,11 @@ scope, not the STARK built on it. The protocol is not zero-knowledge.
   (`Exec.soundness_uniqueDecoding` in
   `Proofs/CertiFriProofs/Exec/SoundnessUnconditional.lean`), and from that
   **knowledge-sound** (`Exec.knowledge_soundness`) and **binding**
-  (`Exec.binding`). All on `propext`, `Classical.choice` and `Quot.sound`, with
-  no `sorry`. The theorems are about the verifier with ideal primitives; see
-  [What the theorems assume](#what-the-theorems-assume).
+  (`Exec.binding`). It is also **complete** (`Exec.completeness`): it accepts
+  every proof that follows the protocol, for any hash functions and any
+  challenger. All on `propext`, `Classical.choice` and `Quot.sound`, with no
+  `sorry`. The security theorems are about the verifier with ideal primitives;
+  see [What the theorems assume](#what-the-theorems-assume).
 - **It accepts proofs made by Plonky3**: with the Goldilocks, BLAKE3 and
   challenger code of `CertiFriP3`, it accepts the opening proofs that Plonky3
   produces and derives the same challenges, and it rejects tampered ones
@@ -111,6 +113,20 @@ the bound, one more than an honest polynomial. The extractor is a mathematical
 choice read from the final log of the experiment: it is not computable as
 defined, and its efficiency is not addressed.
 
+**Completeness** (`Exec.completeness`, `Exec/Completeness.lean`). If the
+statement is honest and the proof follows the protocol, `Fri.verify` returns
+`true`. `Exec/Honest.lean` says what that means: behind the commitments are
+polynomials of the allowed degree whose evaluations are the committed rows, the
+claimed values are their values at the opening points, and, for the challenges
+the verifier derives from the proof, each round commits to the fold of the
+round before, the openings are the committed rows with Merkle paths that
+verify, and the final polynomial is the last fold. `Merkle/Tree.lean` defines
+the Merkle tree and proves that its openings verify. The hash functions and the
+challenger are arbitrary: no random oracle is involved. Four conditions are
+part of the statement: no opening point lies on the coset its matrix is
+committed on; the proof-of-work witnesses pass; every field element has one
+executable representation; the challenger returns indices of the first domain.
+
 The theory behind it:
 
 | Module | Contents |
@@ -127,7 +143,8 @@ The theory behind it:
 | `Theory/Compiled` | The model of the non-interactive protocol and its soundness. |
 | `Theory/PcsRbr/Decode` | The polynomial a committed function decodes to, and that claims which hold are its evaluations. |
 | `Theory/Compiled/TwoAttempts` | Soundness for two attempts on one oracle. |
-| `Exec` | The executable verifier refines the model; soundness of the executable verifier, with the proximity hypotheses and with them proved; knowledge soundness; binding. |
+| `Merkle/Tree` | The Merkle tree of a batch of matrices, and that the opening check accepts its openings. |
+| `Exec` | The executable verifier refines the model; soundness of the executable verifier, with the proximity hypotheses and with them proved; knowledge soundness; binding; completeness. |
 
 Also proved, about executable code: the Merkle opening check is binding up to a
 hash collision (`CertiFri/Merkle.lean`), and Horner's rule computes the
@@ -166,7 +183,9 @@ evaluation of the final polynomial (`Proofs/CertiFriProofs/Poly.lean`).
   unpacked and then checked by the certified Merkle check
   (`P3.prunedMmcs_accepts`), but the soundness theorem is stated for one path
   per query.
-- Completeness. That honest proofs are accepted is tested, not proved.
+- That an honest prover can always produce a proof that follows the protocol:
+  completeness is about proofs that do, and the round-by-round construction of
+  one is not written. Completeness with Plonky3's pruned Merkle proofs.
 - An efficient extractor, binding for two openings of different shapes, and
   knowledge soundness or binding for columns on cosets too small for the
   margin above.

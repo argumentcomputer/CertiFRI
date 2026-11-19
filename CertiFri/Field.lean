@@ -42,4 +42,16 @@ class ExtensionOps (F EF : Type) [FieldOps F] [FieldOps EF] where
   assembled from sampled base-field elements. -/
   ofBasis : Array F → EF
 
+/-- `x ^ n` for an exponent below `2 ^ bits`, by squaring: the exponent is read
+from its lowest bit, and `x ^ n = (x ^ (n / 2)) ^ 2 * x ^ (n % 2)`. -/
+def fieldPowBits {F : Type} [FieldOps F] (x : F) : (bits n : Nat) → F
+  | 0, _ => 1
+  | bits + 1, n =>
+    let half := fieldPowBits x bits (n / 2)
+    if n % 2 = 0 then half * half else half * half * x
+
+/-- `x ^ n`, by squaring. -/
+def fieldPow {F : Type} [FieldOps F] (x : F) (n : Nat) : F :=
+  fieldPowBits x (Nat.log2 n + 1) n
+
 end CertiFri

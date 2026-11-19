@@ -436,8 +436,7 @@ end Merkle
 
 /-- The Merkle commitment scheme over a hasher, as the interface the verifier
 is written against. A commitment is a root; a proof is one path per query. -/
-def merkleMmcs {T D : Type} [DecidableEq D] (H : MerkleHasher T D) : Mmcs T where
-  Commitment := D
+def merkleMmcs {T D : Type} [DecidableEq D] (H : MerkleHasher T D) : Mmcs T D where
   MultiProof := Array (List D)
   verifyMultiBatch := Merkle.verifyOpenings H
 

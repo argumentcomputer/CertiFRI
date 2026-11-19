@@ -9,6 +9,7 @@ import CertiFri.Claims
 import CertiFri.Proof
 import CertiFri.Schedule
 import CertiFri.Shape
+import CertiFri.Verifier
 
 /-!
 # CertiFri

@@ -8,7 +8,8 @@ shared proof. Port of the part of Plonky3's `Mmcs` trait the FRI verifier uses
 
 The scheme is a value, not a type class, because the verifier holds two of
 them: one over the base field for the input commitments, and one over the
-extension field for the commit-phase codewords.
+extension field for the commit-phase codewords. Both commit to digests of the
+same type `D`, which is what the transcript absorbs.
 -/
 
 namespace CertiFri
@@ -24,10 +25,9 @@ structure Dimensions where
   logHeight : Nat
   deriving Repr, DecidableEq
 
-/-- The verifying side of a commitment scheme over rows of `T`. -/
-structure Mmcs (T : Type) where
-  /-- A commitment to a batch of matrices. -/
-  Commitment : Type
+/-- The verifying side of a commitment scheme over rows of `T`, whose
+commitments are digests in `D`. -/
+structure Mmcs (T D : Type) where
   /-- One proof authenticating the rows opened at several indices. -/
   MultiProof : Type
   /-- Check that, for each query `q`, `openedValues[q][m]` is the row of matrix
@@ -35,7 +35,7 @@ structure Mmcs (T : Type) where
   `dimensions`. An index addresses the tallest matrix; a shorter matrix is
   opened at the index shifted right by the difference in log-heights.
   Port of `Mmcs::verify_multi_batch`. -/
-  verifyMultiBatch : Commitment → (dimensions : Array Dimensions) → (indices : Array Nat) →
+  verifyMultiBatch : D → (dimensions : Array Dimensions) → (indices : Array Nat) →
     (openedValues : Array (Array (Array T))) → MultiProof → Bool
 
 end CertiFri

@@ -2,8 +2,8 @@
 # FRI parameters
 
 Port of `FriParameters` from Plonky3 (`fri/src/config.rs`), without the
-commitment-scheme handle: here the commitment scheme is a type-class argument of
-the verifier, not a field of the parameters.
+commitment-scheme handle: here the commitment scheme is an argument of the
+verifier, not a field of the parameters.
 -/
 
 namespace CertiFri
@@ -14,12 +14,12 @@ structure FriParams where
   logBlowup : Nat
   /-- Log of the coefficient count of the final polynomial. -/
   logFinalPolyLen : Nat
-  /-- Largest log-arity a single folding round may use; `1` is binary folding. -/
+  /-- Largest log-arity a single folding round may use; `1` is binary folding.
+  The verifier accepts only proofs whose rounds all fold by two, whatever this
+  cap is. -/
   maxLogArity : Nat
   /-- Number of query indices drawn in the query phase. -/
   numQueries : Nat
-  /-- Grinding bits before the challenge that batches the claimed openings. -/
-  batchPowBits : Nat
   /-- Grinding bits before each folding challenge. -/
   commitPowBits : Nat
   /-- Grinding bits before the query indices. -/

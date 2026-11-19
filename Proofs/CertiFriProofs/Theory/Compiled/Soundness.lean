@@ -42,6 +42,8 @@ is read as it is.
 * `Params.soundness_of_relDist`: `Params.soundness` at `θ = 1 - δ` with the
   folding hypothesis proved, in Plonky3's parameters, under
   `4 * δ + (1 / 2) ^ logBlowup ≤ 1`. Only the batching hypothesis remains.
+  `Compiled/SoundnessUD.lean` reaches `2 * δ + (1 / 2) ^ logBlowup ≤ 1` with
+  neither hypothesis.
 
 `soundness_grind` is the case `view := id` of `Params.soundness_grind_view`
 (`Compiled/SoundnessView.lean`), which is proved first. That file also has the

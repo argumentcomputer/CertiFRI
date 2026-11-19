@@ -23,8 +23,10 @@ errors `e` with `(m + 1) * e < dist`.
 
 Both hold for every linear code and are proved here in full, with no
 hypothesis beyond the minimum distance. The price is the radius: `e` stays
-below `dist / (m + 1)`, well inside the unique-decoding radius `dist / 2`. The
-stronger regimes (up to the Johnson bound) are not covered.
+below `dist / (m + 1)`, well inside the unique-decoding radius `dist / 2`. For
+Reed–Solomon codes the unique-decoding radius is reached in
+`ProximityGap/UniqueDecoding.lean`; larger radii (up to the Johnson bound) are
+not covered.
 
 The proof is elementary. From `m` close points of the curve, with close
 codewords `c i` at parameters `b i`, interpolation (the Vandermonde matrix of

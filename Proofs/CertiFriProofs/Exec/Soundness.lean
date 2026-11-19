@@ -20,6 +20,9 @@ soundness in the random-oracle model.
   that fail is at most the bound of `Compiled.Params.soundness_grind`.
 * `soundness_of_relDist`: the same with the folding hypothesis proved, under
   `4 * δ + (1 / 2) ^ logBlowup ≤ 1`.
+* `Exec.soundness_uniqueDecoding` (`Exec/SoundnessUnconditional.lean`): the
+  same with both proximity hypotheses proved, under
+  `2 * δ + (1 / 2) ^ logBlowup ≤ 1`.
 
 ## The experiment
 

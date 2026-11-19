@@ -23,10 +23,12 @@ elementary argument works: agreement sets that miss fewer than a
 The proof instantiates `curve_mca_of_minDist`, which holds for every linear
 code, with the code of restrictions to `D` of polynomials of degree below `d`.
 
-Not covered: larger radii. With rate `ρ = d / D.card` the results here reach
-`δ ≤ (1 - ρ) / (m + 1)`; the unique-decoding radius is `(1 - ρ) / 2` and the
-Johnson radius is `1 - √ρ`. For those the hypothesis `CurveMCA` stays a
-hypothesis.
+Not covered here: larger radii. With rate `ρ = d / D.card` the results of this
+file reach `δ ≤ (1 - ρ) / (m + 1)`. The unique-decoding radius `(1 - ρ) / 2` is
+reached, for every `m`, by another argument specific to Reed–Solomon codes, in
+`ProximityGap/UniqueDecoding.lean` and `ProximityGap/UniqueDecodingMCA.lean`,
+with a larger error. Beyond it (towards the Johnson radius `1 - √ρ`) the
+hypothesis `CurveMCA` stays a hypothesis.
 -/
 
 namespace CertiFri

@@ -24,3 +24,9 @@ import CertiFriProofs.Exec.MerkleMap
 import CertiFriProofs.Exec.Checks
 import CertiFriProofs.Exec.Transcript
 import CertiFriProofs.Exec.Soundness
+import CertiFriProofs.Theory.ProximityGap.CorrelatedAgreement
+import CertiFriProofs.Theory.ProximityGap.UniqueDecoding
+import CertiFriProofs.Theory.ProximityGap.UniqueDecodingMCA
+import CertiFriProofs.Theory.Compiled.SoundnessUD
+import CertiFriProofs.Exec.SoundnessUD
+import CertiFriProofs.Exec.SoundnessUnconditional

@@ -12,10 +12,12 @@ scope, not the STARK built on it. The protocol is not zero-knowledge.
 - **The verifier** is `Fri.verify` in `CertiFri/Verifier.lean`: executable,
   generic over the two fields, the two commitment schemes and the challenger,
   with no dependency beyond the Lean toolchain.
-- **It is proved sound** in the random-oracle model
-  (`Exec.soundness` in `Proofs/CertiFriProofs/Exec/Soundness.lean`), on
-  `propext`, `Classical.choice` and `Quot.sound`, with no `sorry`. The theorem
-  is about the verifier with ideal primitives; see
+- **It is proved sound** in the random-oracle model, up to the unique-decoding
+  radius, with no hypothesis about Reed–Solomon codes
+  (`Exec.soundness_uniqueDecoding` in
+  `Proofs/CertiFriProofs/Exec/SoundnessUnconditional.lean`), on `propext`,
+  `Classical.choice` and `Quot.sound`, with no `sorry`. The theorem is about
+  the verifier with ideal primitives; see
   [What the theorems assume](#what-the-theorems-assume).
 - **It accepts proofs made by Plonky3**: with the Goldilocks, BLAKE3 and
   challenger code of `CertiFriP3`, it accepts the opening proofs that Plonky3
@@ -65,8 +67,27 @@ every round (divided by `2 ^ bits` where the round has a proof-of-work check),
 and `D` is the digest type. "The claims fail" is about the functions that the
 adversary's hash queries commit to under the commitments: at some height they
 do not agree, on a `θ` fraction of the domain, with polynomials of the degree
-bound that take the claimed values. `Exec.soundness_of_relDist` is the same
-with the folding hypothesis proved, under `4 * δ + ρ ≤ 1`.
+bound that take the claimed values.
+
+`Exec.soundness` takes two proximity hypotheses about Reed–Solomon codes, at
+any agreement `θ`. `Exec.soundness_uniqueDecoding` proves both, for agreement
+`θ = 1 - δ` with `2 * δ + ρ ≤ 1`, where `ρ = 2 ^ (-logBlowup)` is the rate:
+every distance up to the unique-decoding radius. Its round errors are, with `n`
+the log of the size of the first domain and `c = 2 ^ n * (δ * 2 ^ n + 1) + 1`,
+
+- batching: `(number of claimed values) * c / |K|`,
+- each folding round: `2 * c / |K| / 2 ^ commitPowBits`,
+- queries: `(1 - δ) ^ numQueries / 2 ^ queryPowBits`,
+
+for an extension field `K`, and `εmax` is their maximum.
+
+For example, with blowup 4 the radius is `δ = 3/8`, so each query contributes
+`log₂ (8/5) ≈ 0.68` bits: 100 queries give a query error of about `2 ^ -68`,
+or `2 ^ -88` with 20 bits of proof of work. Over the quadratic extension of
+Goldilocks (`|K| ≈ 2 ^ 128`), a trace of `2 ^ 20` rows (`n = 22`) with a
+thousand claimed values has a batching error of about `2 ^ -75`, which is then
+the largest of the three. These figures are arithmetic on the bound above, not
+separate theorems.
 
 The theory behind it:
 
@@ -77,11 +98,12 @@ The theory behind it:
 | `Theory/Fold`, `Completeness` | Even and odd parts of a polynomial; honest codewords pass every query. |
 | `Theory/Soundness`, `SoundnessCount` | Oracle-model soundness of the low-degree test, relative to the folding hypothesis. |
 | `Theory/ProximityGap`, `StepMCA`, `Unconditional` | The proximity hypotheses proved by an elementary argument for `δ ≤ (1 - ρ) / (m + 1)` with `m` terms, and the low-degree test with no hypothesis under `4 * δ + ρ ≤ 1`. |
+| `Theory/ProximityGap/UniqueDecoding`, `UniqueDecodingMCA` | The proximity hypotheses proved up to the unique-decoding radius `δ ≤ (1 - ρ) / 2`, for any number of terms: correlated agreement by the Berlekamp–Welch decoder with the challenge as an indeterminate, then the mutual form. |
 | `Theory/Quotient`, `Pcs` | From the low-degree test to the evaluation claims. |
 | `Theory/PcsRbr` | The whole check as one round-by-round sound protocol, with grinding. |
 | `Theory/Oracle` | The random-oracle model: bad-event and collision bounds, Fiat–Shamir, Merkle binding and frozen trees against the query log. |
 | `Theory/Compiled` | The model of the non-interactive protocol and its soundness. |
-| `Exec` | The executable verifier refines the model; soundness of the executable verifier. |
+| `Exec` | The executable verifier refines the model; soundness of the executable verifier, with the proximity hypotheses and with them proved. |
 
 Also proved, about executable code: the Merkle opening check is binding up to a
 hash collision (`CertiFri/Merkle.lean`), and Horner's rule computes the
@@ -96,11 +118,13 @@ evaluation of the final polynomial (`Proofs/CertiFriProofs/Poly.lean`).
   (`Exec.freeChallenger`). The oracle answers the three kinds of query
   independently. Plonky3's BLAKE3 instantiation does not separate them: a leaf
   hash, a compression and a transcript hash are the same function on bytes.
-- **Two proximity hypotheses** about Reed–Solomon codes, `CurveMCA` (batching
-  the claims) and `StepMCA` (folding). They are arguments of the theorems, not
-  axioms. The folding hypothesis is proved here for `4 * δ + ρ ≤ 1`. The
-  batching hypothesis is proved only in a regime that shrinks with the number
-  of claims, so in practice it stays a hypothesis.
+- **Proximity gaps, beyond the unique-decoding radius only.** The theorems
+  need two facts about Reed–Solomon codes, `CurveMCA` (batching the claims) and
+  `StepMCA` (folding). Up to the unique-decoding radius, `2 * δ + ρ ≤ 1`, both
+  are proved here and `Exec.soundness_uniqueDecoding` assumes nothing about
+  the code. For a larger radius (towards the Johnson bound or capacity) they
+  are hypotheses of `Exec.soundness`: arguments of the theorem, not axioms.
+  The proved error is quadratic in the size of the domain.
 - **The fields.** The two executable fields implement one mathematical field,
   every element of which is represented (`Exec.FieldModel`), the generator of
   the first domain is a primitive root of unity, and the coset shift is not

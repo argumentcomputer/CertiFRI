@@ -36,9 +36,11 @@ What is not covered. The radius is small: with rate `ρ`, the theorems reach
 relative distance `δ ≤ (1 - ρ) / 4`, or `(1 - ρ) / 3` with a single input, so
 `δ < 1 / 4` and `δ < 1 / 3` whatever the blowup. Each query then contributes a
 factor `1 - δ > 3 / 4` (`> 2 / 3`) to the bound. The unique-decoding radius
-`(1 - ρ) / 2` and the Johnson radius `1 - √ρ` need proximity gaps that are not
-proved here; for those, `interactive_soundness` keeps `StepMCAFor` as a
-hypothesis. The challenge error is of the order `δ * 2 ^ n / |F|`, so the
+`(1 - ρ) / 2` needs the proximity gap of `ProximityGap/UniqueDecodingMCA.lean`
+(`stepMCA_of_curveCA`), which is used for the compiled protocol in
+`Compiled/SoundnessUD.lean` but not in this file. The Johnson radius `1 - √ρ`
+needs gaps that are not proved in this repository; for it,
+`interactive_soundness` keeps `StepMCAFor` as a hypothesis. The challenge error is of the order `δ * 2 ^ n / |F|`, so the
 bounds say something only when the field is much larger than the first domain.
 -/
 

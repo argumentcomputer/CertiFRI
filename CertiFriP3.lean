@@ -1,3 +1,5 @@
+import CertiFriP3.Hashers
+import CertiFriP3.Challenger
 import CertiFriP3.Pruned
 
 /-!

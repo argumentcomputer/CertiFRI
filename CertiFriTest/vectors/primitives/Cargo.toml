@@ -1,0 +1,21 @@
+[package]
+name = "certifri-primitive-vectors"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Generator of the known-answer values pinned in the Lean tests of the Plonky3 primitives."
+
+# This package is its own workspace: it is not a member of any enclosing one.
+[workspace]
+
+# Plonky3 is pinned to the revision the verifier is a port of.
+[dependencies]
+p3-field = { git = "https://github.com/Plonky3/Plonky3", rev = "3152b14a89067c83775a8076cc262ffc48a1fd7c" }
+p3-goldilocks = { git = "https://github.com/Plonky3/Plonky3", rev = "3152b14a89067c83775a8076cc262ffc48a1fd7c" }
+p3-blake3 = { git = "https://github.com/Plonky3/Plonky3", rev = "3152b14a89067c83775a8076cc262ffc48a1fd7c" }
+p3-symmetric = { git = "https://github.com/Plonky3/Plonky3", rev = "3152b14a89067c83775a8076cc262ffc48a1fd7c" }
+p3-challenger = { git = "https://github.com/Plonky3/Plonky3", rev = "3152b14a89067c83775a8076cc262ffc48a1fd7c" }
+p3-commit = { git = "https://github.com/Plonky3/Plonky3", rev = "3152b14a89067c83775a8076cc262ffc48a1fd7c" }
+p3-merkle-tree = { git = "https://github.com/Plonky3/Plonky3", rev = "3152b14a89067c83775a8076cc262ffc48a1fd7c" }
+p3-matrix = { git = "https://github.com/Plonky3/Plonky3", rev = "3152b14a89067c83775a8076cc262ffc48a1fd7c" }
+blake3 = { version = "1.8", default-features = false }

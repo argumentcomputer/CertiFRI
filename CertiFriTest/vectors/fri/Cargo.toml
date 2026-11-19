@@ -1,0 +1,25 @@
+[package]
+name = "certifri-fri-vectors"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Generator of the Plonky3 FRI opening proofs and primitive known-answer values that the Lean tests read."
+
+# This package is its own workspace: it is not a member of any enclosing one.
+[workspace]
+
+# Plonky3 is pinned to the revision the verifier is a port of. The `parallel`
+# features stay off: with them the proof-of-work search returns whichever
+# witness a thread finds first, and the vectors would differ from run to run.
+[dependencies]
+p3-blake3 = { git = "https://github.com/Plonky3/Plonky3", rev = "3152b14a89067c83775a8076cc262ffc48a1fd7c" }
+p3-challenger = { git = "https://github.com/Plonky3/Plonky3", rev = "3152b14a89067c83775a8076cc262ffc48a1fd7c" }
+p3-commit = { git = "https://github.com/Plonky3/Plonky3", rev = "3152b14a89067c83775a8076cc262ffc48a1fd7c" }
+p3-dft = { git = "https://github.com/Plonky3/Plonky3", rev = "3152b14a89067c83775a8076cc262ffc48a1fd7c" }
+p3-field = { git = "https://github.com/Plonky3/Plonky3", rev = "3152b14a89067c83775a8076cc262ffc48a1fd7c" }
+p3-fri = { git = "https://github.com/Plonky3/Plonky3", rev = "3152b14a89067c83775a8076cc262ffc48a1fd7c" }
+p3-goldilocks = { git = "https://github.com/Plonky3/Plonky3", rev = "3152b14a89067c83775a8076cc262ffc48a1fd7c" }
+p3-matrix = { git = "https://github.com/Plonky3/Plonky3", rev = "3152b14a89067c83775a8076cc262ffc48a1fd7c" }
+p3-merkle-tree = { git = "https://github.com/Plonky3/Plonky3", rev = "3152b14a89067c83775a8076cc262ffc48a1fd7c" }
+p3-symmetric = { git = "https://github.com/Plonky3/Plonky3", rev = "3152b14a89067c83775a8076cc262ffc48a1fd7c" }
+p3-util = { git = "https://github.com/Plonky3/Plonky3", rev = "3152b14a89067c83775a8076cc262ffc48a1fd7c" }

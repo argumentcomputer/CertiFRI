@@ -30,3 +30,5 @@ import CertiFriProofs.Theory.ProximityGap.UniqueDecodingMCA
 import CertiFriProofs.Theory.Compiled.SoundnessUD
 import CertiFriProofs.Exec.SoundnessUD
 import CertiFriProofs.Exec.SoundnessUnconditional
+import CertiFriProofs.Theory.PcsRbr.Decode
+import CertiFriProofs.Exec.Extract

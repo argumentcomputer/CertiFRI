@@ -54,4 +54,25 @@ def fieldPowBits {F : Type} [FieldOps F] (x : F) : (bits n : Nat) → F
 def fieldPow {F : Type} [FieldOps F] (x : F) (n : Nat) : F :=
   fieldPowBits x (Nat.log2 n + 1) n
 
+
+/-- The image in the field of a natural number below `2 ^ bits`, by doubling:
+`n = 2 * (n / 2) + n % 2`. -/
+def fieldOfNatBits {F : Type} [FieldOps F] : (bits n : Nat) → F
+  | 0, _ => 0
+  | bits + 1, n =>
+    let half := fieldOfNatBits bits (n / 2)
+    if n % 2 = 0 then half + half else half + half + 1
+
+/-- The image of a natural number in the field: `1 + ⋯ + 1`, `n` times
+(Plonky3's `from_usize`). -/
+def fieldOfNat {F : Type} [FieldOps F] (n : Nat) : F :=
+  fieldOfNatBits (Nat.log2 n + 1) n
+
+/-- `x ^ (2 ^ k)`, by squaring `k` times (Plonky3's `exp_power_of_2`). -/
+def fieldPowTwo {F : Type} [FieldOps F] (x : F) : (k : Nat) → F
+  | 0 => x
+  | k + 1 =>
+    let y := fieldPowTwo x k
+    y * y
+
 end CertiFri

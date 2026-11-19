@@ -17,3 +17,10 @@ import CertiFriProofs.Theory.PcsRbr.Grinding
 import CertiFriProofs.Theory.Oracle.MerkleAccept
 import CertiFriProofs.Theory.Oracle.MerkleCommitted
 import CertiFriProofs.Theory.Compiled.Soundness
+import CertiFriProofs.Exec.Setup
+import CertiFriProofs.Exec.Field
+import CertiFriProofs.Exec.Arith
+import CertiFriProofs.Exec.MerkleMap
+import CertiFriProofs.Exec.Checks
+import CertiFriProofs.Exec.Transcript
+import CertiFriProofs.Exec.Soundness

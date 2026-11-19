@@ -10,6 +10,7 @@ import CertiFri.Proof
 import CertiFri.Schedule
 import CertiFri.Shape
 import CertiFri.Verifier
+import CertiFri.Pcs
 
 /-!
 # CertiFri

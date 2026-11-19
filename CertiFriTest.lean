@@ -1,4 +1,5 @@
 import CertiFriTest.Merkle
+import CertiFriTest.Fri
 
 /-!
 # Tests

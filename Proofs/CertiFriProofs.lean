@@ -32,3 +32,7 @@ import CertiFriProofs.Exec.SoundnessUD
 import CertiFriProofs.Exec.SoundnessUnconditional
 import CertiFriProofs.Theory.PcsRbr.Decode
 import CertiFriProofs.Exec.Extract
+import CertiFriProofs.Theory.Oracle.Replay
+import CertiFriProofs.Theory.Compiled.TwoAttempts
+import CertiFriProofs.Exec.TwoAttempts
+import CertiFriProofs.Exec.Binding

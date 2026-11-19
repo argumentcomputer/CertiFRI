@@ -15,9 +15,10 @@ scope, not the STARK built on it. The protocol is not zero-knowledge.
 - **It is proved sound** in the random-oracle model, up to the unique-decoding
   radius, with no hypothesis about Reed–Solomon codes
   (`Exec.soundness_uniqueDecoding` in
-  `Proofs/CertiFriProofs/Exec/SoundnessUnconditional.lean`), on `propext`,
-  `Classical.choice` and `Quot.sound`, with no `sorry`. The theorem is about
-  the verifier with ideal primitives; see
+  `Proofs/CertiFriProofs/Exec/SoundnessUnconditional.lean`), and from that
+  **knowledge-sound** (`Exec.knowledge_soundness`) and **binding**
+  (`Exec.binding`). All on `propext`, `Classical.choice` and `Quot.sound`, with
+  no `sorry`. The theorems are about the verifier with ideal primitives; see
   [What the theorems assume](#what-the-theorems-assume).
 - **It accepts proofs made by Plonky3**: with the Goldilocks, BLAKE3 and
   challenger code of `CertiFriP3`, it accepts the opening proofs that Plonky3
@@ -89,6 +90,27 @@ thousand claimed values has a batching error of about `2 ^ -75`, which is then
 the largest of the three. These figures are arithmetic on the bound above, not
 separate theorems.
 
+**Knowledge soundness** (`Exec.knowledge_soundness`, `Exec/Extract.lean`).
+`Exec.extractColumn` reads a polynomial for every committed column off the
+commitments and the oracle query log, and nothing else: the function the hash
+queries commit to under the commitment of the column's batch, decoded. The
+probability that the verifier accepts while some claimed value is not the value
+of the extracted polynomial at the opening point is at most the soundness
+bound.
+
+**Binding** (`Exec.binding`, `Exec/Binding.lean`). An adversary outputs two
+statements with proofs, and both are verified. The probability that both are
+accepted while they claim two different values for one column of the same
+commitment at the same opening point is at most twice the soundness bound, with
+the queries of both verifications counted.
+
+Both need the extracted polynomial to be unique, which takes a margin inside
+the radius: `2 * δ + ρ + 3 / n ≤ 1` at every level that has a claim, where `n`
+is the size of that level's coset. The extracted polynomial has degree at most
+the bound, one more than an honest polynomial. The extractor is a mathematical
+choice read from the final log of the experiment: it is not computable as
+defined, and its efficiency is not addressed.
+
 The theory behind it:
 
 | Module | Contents |
@@ -103,7 +125,9 @@ The theory behind it:
 | `Theory/PcsRbr` | The whole check as one round-by-round sound protocol, with grinding. |
 | `Theory/Oracle` | The random-oracle model: bad-event and collision bounds, Fiat–Shamir, Merkle binding and frozen trees against the query log. |
 | `Theory/Compiled` | The model of the non-interactive protocol and its soundness. |
-| `Exec` | The executable verifier refines the model; soundness of the executable verifier, with the proximity hypotheses and with them proved. |
+| `Theory/PcsRbr/Decode` | The polynomial a committed function decodes to, and that claims which hold are its evaluations. |
+| `Theory/Compiled/TwoAttempts` | Soundness for two attempts on one oracle. |
+| `Exec` | The executable verifier refines the model; soundness of the executable verifier, with the proximity hypotheses and with them proved; knowledge soundness; binding. |
 
 Also proved, about executable code: the Merkle opening check is binding up to a
 hash collision (`CertiFri/Merkle.lean`), and Horner's rule computes the
@@ -143,6 +167,9 @@ evaluation of the final polynomial (`Proofs/CertiFriProofs/Poly.lean`).
   (`P3.prunedMmcs_accepts`), but the soundness theorem is stated for one path
   per query.
 - Completeness. That honest proofs are accepted is tested, not proved.
+- An efficient extractor, binding for two openings of different shapes, and
+  knowledge soundness or binding for columns on cosets too small for the
+  margin above.
 - Zero knowledge. The protocol is not zero-knowledge.
 - That the verifier accepts exactly what Plonky3's accepts. The tests compare
   the two on a few proofs.

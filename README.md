@@ -9,7 +9,7 @@ not the STARK built on it.
 
 ## Status
 
-This is a scaffold. There is no verifier yet.
+This is a scaffold. There is no FRI verifier yet.
 
 What exists, and is proved on `propext`, `Quot.sound` and (in `Proofs/` only)
 `Classical.choice`, with no `sorry`:
@@ -22,15 +22,22 @@ What exists, and is proved on `propext`, `Quot.sound` and (in `Proofs/` only)
 - Evaluation of the final polynomial by Horner's rule, and a proof that it
   computes the evaluation of a polynomial of degree below the coefficient
   count (`Proofs/CertiFriProofs/Poly.lean`).
+- Merkle commitments to a batch of matrices of different heights
+  (`CertiFri/Merkle.lean`): the check of an opening, and binding. Two accepted
+  openings under one root that address the same row of a matrix open the same
+  row, or one of the two hash functions has a collision. The hash functions
+  are parameters; no concrete hash is implemented. The tree layout is checked
+  against openings produced by Plonky3 (`CertiFriTest/Merkle.lean`).
 
-The parameters, claims, proof, field, challenger and commitment-scheme modules
-are interface definitions with no theorems yet.
+The parameters, claims, proof, field and challenger modules are interface
+definitions with no theorems yet.
 
 ## Layout
 
 | Path | Contents |
 | --- | --- |
 | `CertiFri/` | The executable verifier. No dependency beyond the Lean toolchain. Proofs that need only core Lean sit next to the code. |
+| `CertiFriTest/` | Executable checks of the verifier against reference code. They run as part of the build. |
 | `Proofs/` | A separate Lake package that depends on Mathlib and on `CertiFri`: the mathematical model, the refinement theorems relating the executable code to it, and the security theorems. |
 | `plonky3/` | Submodule: the Plonky3 revision this port is read against. Reference only; nothing builds from it yet. |
 
@@ -40,7 +47,7 @@ without inheriting it.
 ## Build
 
 ```sh
-lake build --wfail                 # the verifier
+lake build --wfail                 # the verifier and its tests
 (cd Proofs && lake build --wfail)  # the proofs; fetches Mathlib on first use
 ```
 

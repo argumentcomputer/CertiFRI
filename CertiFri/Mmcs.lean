@@ -13,12 +13,15 @@ extension field for the commit-phase codewords.
 
 namespace CertiFri
 
-/-- The dimensions of one committed matrix. -/
+/-- The dimensions of one committed matrix.
+
+Plonky3 records the number of rows. Every matrix this verifier commits to has a
+power-of-two number of rows, so the log is recorded instead. -/
 structure Dimensions where
   /-- Number of columns. -/
   width : Nat
-  /-- Number of rows. -/
-  height : Nat
+  /-- Log of the number of rows. -/
+  logHeight : Nat
   deriving Repr, DecidableEq
 
 /-- The verifying side of a commitment scheme over rows of `T`. -/

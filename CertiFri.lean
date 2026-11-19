@@ -4,6 +4,7 @@ import CertiFri.Field
 import CertiFri.Poly
 import CertiFri.Challenger
 import CertiFri.Mmcs
+import CertiFri.Merkle
 import CertiFri.Claims
 import CertiFri.Proof
 import CertiFri.Schedule

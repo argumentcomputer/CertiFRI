@@ -30,8 +30,8 @@ arbitrary.
 
 ## Not covered
 
-* That an honest prover can produce an honest proof: the construction, round
-  by round, of commitments that agree with the challenges derived from them.
+* That an honest proof exists. `Exec/HonestProver.lean` constructs one, round
+  by round, and proves it honest (`completeness_honestProver`).
 * Completeness for Plonky3's pruned Merkle proofs, and for the instantiation of
   `CertiFriP3`, whose fields are not proved to be a `FieldModel`.
 -/

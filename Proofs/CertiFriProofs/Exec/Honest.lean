@@ -33,8 +33,8 @@ properties of what it produces.
 
 * The challenges in `HonestProof` are those of `Fri.transcript` on the proof
   itself. A prover that commits to each round after deriving the challenges of
-  the rounds before it produces such a proof; that construction is not in this
-  file.
+  the rounds before it produces such a proof; that construction is in
+  `Exec/HonestProver.lean`.
 * That the proof-of-work checks pass is part of honesty. A witness is found by
   search and need not exist.
 * `HonestProof` asks that the Merkle openings verify. That the openings of a

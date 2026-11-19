@@ -42,3 +42,6 @@ import CertiFriProofs.Exec.Honest
 import CertiFriProofs.Exec.HonestArith
 import CertiFriProofs.Exec.CompletenessChecks
 import CertiFriProofs.Exec.Completeness
+import CertiFriProofs.Exec.HonestProver.Prover
+import CertiFriProofs.Exec.HonestProver.Fields
+import CertiFriProofs.Exec.HonestProver

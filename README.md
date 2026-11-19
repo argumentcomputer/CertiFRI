@@ -127,6 +127,12 @@ part of the statement: no opening point lies on the coset its matrix is
 committed on; the proof-of-work witnesses pass; every field element has one
 executable representation; the challenger returns indices of the first domain.
 
+`Exec/HonestProver.lean` constructs such a proof: a prover, as a mathematical
+function, that commits to each round after deriving the challenges of the
+rounds before it. `Exec.completeness_honestProver`: for every honest statement
+of a well-formed shape, the proof this prover builds is accepted, provided its
+proof-of-work witness search succeeded.
+
 The theory behind it:
 
 | Module | Contents |
@@ -183,9 +189,10 @@ evaluation of the final polynomial (`Proofs/CertiFriProofs/Poly.lean`).
   unpacked and then checked by the certified Merkle check
   (`P3.prunedMmcs_accepts`), but the soundness theorem is stated for one path
   per query.
-- That an honest prover can always produce a proof that follows the protocol:
-  completeness is about proofs that do, and the round-by-round construction of
-  one is not written. Completeness with Plonky3's pruned Merkle proofs.
+- That a proof-of-work witness exists: completeness assumes the search
+  succeeded. Completeness with Plonky3's pruned Merkle proofs. Anything about
+  the Rust prover: the honest prover of the completeness theorem is a
+  mathematical definition.
 - An efficient extractor, binding for two openings of different shapes, and
   knowledge soundness or binding for columns on cosets too small for the
   margin above.

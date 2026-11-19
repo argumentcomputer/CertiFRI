@@ -30,6 +30,17 @@ also writes a vector of production size to `<file>` (about 1.8 MB, which is why
 it is not kept here). `--out <dir>` sends the other files to another directory.
 
 ```
+cargo run --release -- --bench <dir> <runs>
+```
+
+writes three vectors for timing to `<dir>` (`bench-12.json`, `bench-16.json`,
+`bench-20.json`: blowup 4, 100 queries, 16 bits of grinding, first domains of
+`2^12`, `2^16` and `2^20` points) and prints the mean time of Plonky3's
+verifier on each over `<runs>` runs. Nothing else is written in this mode. The
+Lean side is `lake exe certifri-bench <dir>/bench-16.json <runs>`, run from the
+repository root.
+
+```
 cargo run --release --example find_rejection
 ```
 

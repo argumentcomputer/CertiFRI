@@ -21,3 +21,9 @@ name = "CertiFriP3"
 # default so that a failing check fails the build.
 [[lean_lib]]
 name = "CertiFriTest"
+
+# Times the verifier, as compiled code, on a vector written by
+# `CertiFriTest/vectors/fri`. Not built by default.
+[[lean_exe]]
+name = "certifri-bench"
+root = "CertiFriTest.Bench"

@@ -294,6 +294,10 @@ fn p3_verify(
         .map_err(|e| format!("{e:?}"))
 }
 
+/// The number of timed runs of Plonky3's verifier per vector; zero outside
+/// benchmark mode.
+pub static BENCH_RUNS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 pub fn generate(spec: &CaseSpec) -> Vector {
     let params = spec.params;
     let pcs = fri_pcs(&params);
@@ -354,6 +358,24 @@ pub fn generate(spec: &CaseSpec) -> Vector {
     // value is changed.
     p3_verify(&pcs, &commitments, &points, p3_claims.clone(), &p3_proof)
         .expect("Plonky3 rejects its own proof");
+
+    // In benchmark mode, time Plonky3's verifier on this proof. Each run
+    // starts from a fresh challenger and replays the preamble, as the Lean
+    // verifier does; the claims are cloned before the clock starts.
+    let runs = BENCH_RUNS.load(std::sync::atomic::Ordering::Relaxed);
+    if runs > 0 {
+        let inputs: Vec<P3Claims> = (0..runs).map(|_| p3_claims.clone()).collect();
+        let start = std::time::Instant::now();
+        for claims in inputs {
+            p3_verify(&pcs, &commitments, &points, claims, &p3_proof)
+                .expect("Plonky3 rejects its own proof");
+        }
+        let millis = start.elapsed().as_secs_f64() * 1e3 / runs as f64;
+        println!(
+            "{}: Plonky3 verifier, {millis:.3} ms per run over {runs} runs",
+            spec.name
+        );
+    }
     let mut tampered_claims = p3_claims.clone();
     tampered_claims[0].1[0].1[0].1[0] += Challenge::ONE;
     p3_verify(

@@ -173,6 +173,28 @@ They run as part of the build: a failing `#guard` fails the build.
 The JSON format of the vectors is this repository's own. Decoding the bytes a
 Plonky3 prover serializes is not written.
 
+## Benchmark
+
+```sh
+(cd CertiFriTest/vectors/fri && cargo run --release -- --bench /tmp/bench 200)  # Plonky3's verifier
+lake exe certifri-bench /tmp/bench/bench-16.json 50                             # this verifier, compiled
+```
+
+Both verify the same proofs (blowup 4, 100 queries, 16 bits of grinding), on
+one thread, without the time to decode the proof. On the machine these were
+last run on (AMD Ryzen 7 8845HS), per verification:
+
+| First domain | Plonky3 | This verifier, one path per query | This verifier, pruned proofs |
+| --- | --- | --- | --- |
+| `2^12` | 1.3 ms | 3.9 ms | 4.9 ms |
+| `2^16` | 2.2 ms | 5.8 ms | 8.0 ms |
+| `2^20` | 3.2 ms | 7.4 ms | 10.3 ms |
+
+Plonky3 verifies pruned proofs, so the last column is the like-for-like one.
+More than half of this verifier's time with one path per query is the
+arithmetic of the queries, which inverts one extension-field element per
+claimed value; Plonky3 inverts one per opening point, in a batch.
+
 ## Layout
 
 | Path | Contents |

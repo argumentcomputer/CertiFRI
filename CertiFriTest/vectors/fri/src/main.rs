@@ -8,6 +8,8 @@
 //! `cargo run --release` rewrites the checked-in files in this directory.
 //! `cargo run --release -- --prod <file>` also writes the large
 //! production-sized vector to `<file>`.
+//! `cargo run --release -- --bench <dir> <runs>` writes three vectors for
+//! timing to `<dir>` and prints the time of Plonky3's verifier on each.
 
 mod config;
 mod json;
@@ -140,6 +142,46 @@ fn prod_case() -> CaseSpec {
     }
 }
 
+/// Vectors for timing the verifiers: production parameters (blowup 4, 100
+/// queries, 16 bits of grinding before the queries) at three sizes of the
+/// first domain. Too large to keep in the repository.
+fn bench_cases() -> Vec<CaseSpec> {
+    let params = Params {
+        log_blowup: 2,
+        log_final_poly_len: 0,
+        max_log_arity: 1,
+        num_queries: 100,
+        commit_proof_of_work_bits: 0,
+        query_proof_of_work_bits: 16,
+    };
+    vec![
+        CaseSpec {
+            name: "bench-12",
+            ..prod_case()
+        },
+        CaseSpec {
+            name: "bench-16",
+            seed: 7,
+            params,
+            num_points: 2,
+            batches: vec![
+                vec![matrix(14, 40, &[0, 1]), matrix(13, 16, &[0, 1])],
+                vec![matrix(14, 8, &[0]), matrix(12, 6, &[0])],
+            ],
+        },
+        CaseSpec {
+            name: "bench-20",
+            seed: 8,
+            params,
+            num_points: 2,
+            batches: vec![
+                vec![matrix(18, 40, &[0, 1]), matrix(17, 16, &[0, 1])],
+                vec![matrix(18, 8, &[0]), matrix(16, 6, &[0])],
+            ],
+        },
+    ]
+}
+
 fn write(path: &Path, value: &Json, max_bytes: Option<usize>) {
     let text = value.to_file_text();
     if let Some(max_bytes) = max_bytes {
@@ -157,13 +199,36 @@ fn write(path: &Path, value: &Json, max_bytes: Option<usize>) {
 fn main() {
     let mut out_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let mut prod_path: Option<PathBuf> = None;
+    let mut bench: Option<(PathBuf, usize)> = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--out" => out_dir = PathBuf::from(args.next().expect("--out takes a directory")),
             "--prod" => prod_path = Some(PathBuf::from(args.next().expect("--prod takes a file"))),
-            other => panic!("unknown argument {other}; usage: [--out <dir>] [--prod <file>]"),
+            "--bench" => {
+                let dir = PathBuf::from(args.next().expect("--bench takes a directory"));
+                let runs: usize = args
+                    .next()
+                    .and_then(|s| s.parse().ok())
+                    .expect("--bench takes a directory and a number of runs");
+                bench = Some((dir, runs));
+            }
+            other => panic!(
+                "unknown argument {other}; usage: [--out <dir>] [--prod <file>] [--bench <dir> <runs>]"
+            ),
         }
+    }
+
+    // Benchmark mode: write the benchmark vectors, timing Plonky3's verifier
+    // on each, and nothing else.
+    if let Some((dir, runs)) = bench {
+        vector::BENCH_RUNS.store(runs, std::sync::atomic::Ordering::Relaxed);
+        for spec in bench_cases() {
+            let vector = vector::generate(&spec);
+            println!("{}", vector::summary(&vector));
+            write(&dir.join(format!("{}.json", spec.name)), &vector.to_json(), None);
+        }
+        return;
     }
 
     for spec in cases() {

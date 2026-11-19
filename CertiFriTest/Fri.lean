@@ -329,4 +329,34 @@ def setArity (inst : Instance) (i arity : Nat) : Instance :=
 -- More queries than the proof answers.
 #guard !accepts { mixed with params := { mixed.params with numQueries := 5 } }
 
+/-! ## The degree bound has one unit of slack
+
+A column declared with `2 ^ logDegree` rows is honestly a polynomial of degree
+below `d = 2 ^ logDegree`. The verifier also accepts a column of degree exactly
+`d`. The check of a claim is that the quotient `(y - f x) / (z - x)` is of
+degree below `d`, where an honest quotient has degree below `d - 1`; a column of
+degree `d` has a quotient of degree `d - 1`, which passes. Plonky3's verifier
+behaves the same way. This is why the soundness theorems say "degree at most
+the bound". -/
+
+/-- The polynomial with `count` coefficients `seed + 3 * i + i ^ 2`. -/
+def polyOfSize (seed count : Nat) : Poly :=
+  Array.ofFn (n := count) fun i => Fp.of (seed + 3 * i.val + i.val * i.val)
+
+/-- One column, declared with `2 ^ 3` rows, that is the polynomial with `count`
+coefficients. -/
+def withCoefficients (count : Nat) : Instance :=
+  prove { logBlowup := 1, logFinalPolyLen := 0, maxLogArity := 1, numQueries := 4,
+          commitPowBits := 0, queryPowBits := 0 }
+    #[#[⟨3, #[polyOfSize 7 count], #[⟨40⟩]⟩]]
+
+-- An honest column: degree below 8.
+#guard accepts (withCoefficients 8)
+
+-- Degree exactly 8: accepted.
+#guard accepts (withCoefficients 9)
+
+-- Degree 9: rejected.
+#guard !accepts (withCoefficients 10)
+
 end CertiFriTest.Fri

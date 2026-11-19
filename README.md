@@ -4,8 +4,11 @@ A FRI polynomial commitment verifier in Lean 4, with a proof of soundness.
 Only the verifier is certified. The prover is an ordinary Rust program.
 
 The protocol is Plonky3's `TwoAdicFriPcs` at revision `3152b14a`, the revision
-the Rust prover pins, with folding by two. Only the commitment scheme is in
-scope, not the STARK built on it. The protocol is not zero-knowledge.
+the Rust prover pins, with folding by two. The theorems are about the
+commitment scheme. The STARK built on it, multi-stark, has a verifier here too
+(`CertiFri/Stark/`), which is tested and not yet proved: see
+[The multi-stark verifier](#the-multi-stark-verifier). The protocol is not
+zero-knowledge.
 
 ## Status
 
@@ -28,6 +31,11 @@ scope, not the STARK built on it. The protocol is not zero-knowledge.
   (`CertiFriTest/P3/Fri.lean`). This is a test on a handful of proofs, not a
   theorem. The primitives of `CertiFriP3` are tested against Plonky3, not
   proved.
+- **The multi-stark verifier** (`Stark.verify`, `Stark.verifyBatch` in
+  `CertiFri/Stark/`) is a port of the STARK verifier that runs on this
+  commitment scheme. It accepts proofs made by multi-stark and derives the
+  same challenges (`CertiFriTest/Stark/MultiStark.lean`). **Nothing is proved
+  about it.**
 
 ## The verifier
 
@@ -204,6 +212,37 @@ evaluation of the final polynomial (`Proofs/CertiFriProofs/Poly.lean`).
   asked at the claim's own opening point. The committed functions take values
   in the extension field.
 
+## The multi-stark verifier
+
+`CertiFri/Stark/` is a port of the verifier of
+[multi-stark](https://github.com/argumentcomputer/multi-stark) at revision
+`3515632`: a STARK for systems of several circuits connected by lookups, over
+Plonky3's FRI. Nothing is proved about it yet.
+
+```lean
+Stark.verify      inputMmcs friMmcs chal init sys claims proof : Bool   -- System::verify_multiple_claims
+Stark.verifyBatch inputMmcs friMmcs chal init sys batch        : Bool   -- System::verify_batch
+```
+
+`sys` is the verifying key: for each circuit its constraint graph, its lookups
+and its widths, the commitment to the fixed traces, and the parameters. The
+verifier checks the shape of the proof, derives the lookup challenges, the
+constraint challenge and the out-of-domain point with the challenger, checks
+the opened values with `Fri.verifyFrom` (the FRI verifier above, started from
+the challenger state the STARK transcript reaches, as Plonky3's `pcs.verify`
+is), and evaluates the constraints of every active circuit, the logUp
+constraints among them, on the opened values.
+
+| File | Content |
+| --- | --- |
+| `Stark/Graph.lean` | Constraint graphs and their evaluation |
+| `Stark/Logup.lean` | The values of the lookup constraints, in coordinates of the extension |
+| `Stark/System.lean` | Systems, proofs, batch preambles |
+| `Stark/Verifier.lean` | The shape check, the transcript, the opening claims, the constraint check, `verify`, `verifyBatch` |
+
+What a soundness theorem for it would say, and what it needs beyond the
+theorems above, is not written down in this repository yet.
+
 ## Tests
 
 They run as part of the build: a failing `#guard` fails the build.
@@ -222,6 +261,17 @@ They run as part of the build: a failing `#guard` fails the build.
   by Plonky3.
 - `CertiFriTest/Merkle.lean`: the Merkle tree layout against openings produced
   by Plonky3.
+- `CertiFriTest/Stark/MultiStark.lean`: `Stark.verify` on three proofs and
+  `Stark.verifyBatch` on a batch of two shards, all made by multi-stark in its
+  production configuration (`CertiFriTest/vectors/stark`, a Rust program that
+  also checks each proof with multi-stark's verifier). Between them the
+  systems have circuits of different heights, fixed traces, an inactive
+  circuit with and without a fixed trace, lookups in groups, extension
+  constraints and quotients of up to four chunks. Each proof is accepted, the
+  derived challenges equal multi-stark's, and changed opened values,
+  accumulators, commitments, bitmaps, claims, messages, constraints and
+  parameters are rejected. `CertiFriTest/Stark/Arith.lean` checks the
+  coordinate arithmetic of the lookup constraints.
 
 The JSON format of the vectors is this repository's own. Decoding the bytes a
 Plonky3 prover serializes is not written.
@@ -252,7 +302,7 @@ claimed value; Plonky3 inverts one per opening point, in a batch.
 
 | Path | Contents |
 | --- | --- |
-| `CertiFri/` | The certified verifier. No dependency beyond the Lean toolchain. Proofs that need only core Lean sit next to the code. |
+| `CertiFri/` | The certified FRI verifier, and the port of the multi-stark verifier (`Stark/`, not proved). No dependency beyond the Lean toolchain. Proofs that need only core Lean sit next to the code. |
 | `CertiFriP3/` | The Plonky3 instantiation: Goldilocks, BLAKE3, the challenger, pruned Merkle proofs. Tested, not proved. |
 | `CertiFriTest/` | Executable checks against reference code and against Plonky3, and the generators of their vectors. |
 | `Proofs/` | A separate Lake package that depends on Mathlib and on `CertiFri`: the security theory, and the refinement of the executable verifier to it. |

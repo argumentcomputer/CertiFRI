@@ -25,21 +25,29 @@ oracle for every hash evaluation. It follows Plonky3's `verify_fri`
    reconstructed in step 2, against the root of the round.
 
 `Params.verifyWith` is the verifier on the values it reads off a transcript:
-the messages, `α`, the folding challenges and the query indices. It does not
-depend on the challenge types, so it serves the protocol with and without
-proof of work.
+the messages, `α`, the folding challenges and the query indices. It only makes
+hash queries, so it runs against an oracle with any challenge types and any
+type of messages in its challenge queries: it serves the protocol with and
+without proof of work, and a transcript whose messages are of another type
+than `Msg`.
 
 * `Params.verify` is the verifier on a transcript of the protocol without
   proof of work.
 * `Params.verifyGrind` is the verifier on a transcript with proof-of-work
   samples: it rejects unless every sample is zero (`check_witness`), and then
   runs the same checks.
+* `Params.verifyGrindView` is `verifyGrind` on a transcript of raw messages of
+  any type `M`, each read as a `Msg` through a function `view`. The challenge
+  queries of the oracle then carry the raw messages. `verifyGrind` is the case
+  `view := id` (`Params.verifyGrind_eq_verifyGrindView`).
 * `Params.queryBound_verifyWith`: the verifier makes at most
   `P.verifierQueries = (batches + rounds) * (queries * (3 * n + 1))` queries.
 * `Params.run_verifyWith`: against a total answer function `f`, the verifier
   returns the conjunction of the executable Merkle checks
   (`Merkle.verifyOpenings` for the hasher `hasherOf f`) and of the comparison
   with the final polynomial.
+* `Params.run_verifyGrindView`: against `f`, the verifier with proof of work
+  accepts exactly when every sample is zero and `verifyWith` accepts.
 
 ## Query indices
 
@@ -198,8 +206,9 @@ variable (P : Params F)
 all queries against the root of the batch in the message of round `0`. The
 index of a query is shifted to the tallest matrix of the batch, as
 `reduced_indices` in `open_inputs`. -/
-def inputChecks {C : ℕ → Type} (pf : Proof F D P.batches P.queries) (msg₀ : Msg F D P.batches)
-    (index : Fin P.queries → ℕ) : List (OracleComp (MerkleAnswer (Msg F D P.batches) C F D) Bool) :=
+def inputChecks {M : Type} {C : ℕ → Type} (pf : Proof F D P.batches P.queries)
+    (msg₀ : Msg F D P.batches) (index : Fin P.queries → ℕ) :
+    List (OracleComp (MerkleAnswer M C F D) Bool) :=
   (List.finRange P.batches).map fun b =>
     verifyOpeningsM (msg₀.inputRoots b) (P.dims b)
       (Array.ofFn fun t => index t >>> (P.n - Merkle.maxLogHeight (P.dims b).toList))
@@ -209,9 +218,9 @@ def inputChecks {C : ℕ → Type} (pf : Proof F D P.batches P.queries) (msg₀ 
 all queries, as reconstructed by the fold chain, against the root in the
 message of round `1 + i`. The row of a query is at its index shifted by
 `i + 1`. In `verify_fri` these are `rows_by_round` and `group_indices_by_round`. -/
-def commitChecks {C : ℕ → Type} (pf : Proof F D P.batches P.queries)
+def commitChecks {M : Type} {C : ℕ → Type} (pf : Proof F D P.batches P.queries)
     (msg : ℕ → Msg F D P.batches) (α : F) (β : ℕ → F) (index : Fin P.queries → ℕ) :
-    List (OracleComp (MerkleAnswer (Msg F D P.batches) C F D) Bool) :=
+    List (OracleComp (MerkleAnswer M C F D) Bool) :=
   (List.range P.rounds).map fun i =>
     verifyOpeningsM (msg (i + 1)).commitRoot (P.commitDims i)
       (Array.ofFn fun t => index t >>> (i + 1))
@@ -242,10 +251,12 @@ the prover message of round `j`, `α` the batching challenge, `β i` the folding
 challenge of round `i`, and `index t` the index of the query `t`. It runs the
 Merkle checks of the input batches, compares every fold chain with the final
 polynomial, and runs the Merkle checks of the folding rounds; it accepts when
-all of them pass. Every hash evaluation is a query to the oracle. -/
-def verifyWith {C : ℕ → Type} (pf : Proof F D P.batches P.queries) (msg : ℕ → Msg F D P.batches)
-    (α : F) (β : ℕ → F) (index : Fin P.queries → ℕ) :
-    OracleComp (MerkleAnswer (Msg F D P.batches) C F D) Bool :=
+all of them pass. Every hash evaluation is a query to the oracle. It makes no
+challenge query, so the oracle may have any type `M` of messages and any
+challenge types `C` in its challenge queries. -/
+def verifyWith {M : Type} {C : ℕ → Type} (pf : Proof F D P.batches P.queries)
+    (msg : ℕ → Msg F D P.batches) (α : F) (β : ℕ → F) (index : Fin P.queries → ℕ) :
+    OracleComp (MerkleAnswer M C F D) Bool :=
   (allM (P.inputChecks pf (msg 0) index)).bind fun ok =>
     if ok && decide (P.FinalCheck pf msg α β index) then allM (P.commitChecks pf msg α β index)
     else .pure false
@@ -257,22 +268,22 @@ def verifierQueries : ℕ :=
   (P.batches + P.rounds) * (P.queries * (3 * P.n + 1))
 
 /-- **Query bound of the verifier.** -/
-theorem queryBound_verifyWith {C : ℕ → Type} (pf : Proof F D P.batches P.queries)
+theorem queryBound_verifyWith {M : Type} {C : ℕ → Type} (pf : Proof F D P.batches P.queries)
     (msg : ℕ → Msg F D P.batches) (α : F) (β : ℕ → F) (index : Fin P.queries → ℕ) :
-    (P.verifyWith (C := C) pf msg α β index).QueryBound P.verifierQueries := by
-  have hin : (allM (P.inputChecks (C := C) pf (msg 0) index)).QueryBound
+    (P.verifyWith (M := M) (C := C) pf msg α β index).QueryBound P.verifierQueries := by
+  have hin : (allM (P.inputChecks (M := M) (C := C) pf (msg 0) index)).QueryBound
       (P.batches * (P.queries * (3 * P.n + 1))) := by
     have h := queryBound_allM (n := P.queries * (3 * P.n + 1))
-      (P.inputChecks (C := C) pf (msg 0) index) fun c hc => by
+      (P.inputChecks (M := M) (C := C) pf (msg 0) index) fun c hc => by
         obtain ⟨b, -, rfl⟩ := List.mem_map.mp hc
         refine (queryBound_verifyOpeningsM _ _ _ _ _).mono ?_
         rw [Array.size_ofFn]
         exact Nat.mul_le_mul_left _ (by have := P.height_le b; omega)
     rwa [inputChecks, List.length_map, List.length_finRange] at h
-  have hcommit : (allM (P.commitChecks (C := C) pf msg α β index)).QueryBound
+  have hcommit : (allM (P.commitChecks (M := M) (C := C) pf msg α β index)).QueryBound
       (P.rounds * (P.queries * (3 * P.n + 1))) := by
     have h := queryBound_allM (n := P.queries * (3 * P.n + 1))
-      (P.commitChecks (C := C) pf msg α β index) fun c hc => by
+      (P.commitChecks (M := M) (C := C) pf msg α β index) fun c hc => by
         obtain ⟨i, -, rfl⟩ := List.mem_map.mp hc
         refine (queryBound_verifyOpeningsM _ _ _ _ _).mono ?_
         rw [Array.size_ofFn]
@@ -292,9 +303,8 @@ function `f`, the verifier returns the conjunction of the executable Merkle
 checks of the input batches, of the comparison with the final polynomial, and
 of the executable Merkle checks of the folding rounds, for the hasher
 `hasherOf f`. -/
-theorem run_verifyWith {C : ℕ → Type}
-    (f : ∀ x : FSQuery (Msg F D P.batches) C (HashQuery F D),
-      MerkleAnswer (Msg F D P.batches) C F D x)
+theorem run_verifyWith {M : Type} {C : ℕ → Type}
+    (f : ∀ x : FSQuery M C (HashQuery F D), MerkleAnswer M C F D x)
     (pf : Proof F D P.batches P.queries) (msg : ℕ → Msg F D P.batches) (α : F) (β : ℕ → F)
     (index : Fin P.queries → ℕ) :
     (P.verifyWith pf msg α β index).run f =
@@ -379,6 +389,27 @@ def verifyGrind (bits : ℕ → ℕ) (pf : Proof F D P.batches P.queries)
       P.indexOf (queriesOf (ungrind t) k)
   else .pure false
 
+/-- **The model verifier with proof of work, on raw messages.** The messages of
+the transcript, and of the challenge queries of the oracle, are of a type `M`,
+and `view` reads such a message as a message of the model. The verifier rejects
+unless every proof-of-work sample is zero, and then runs the checks of
+`verifyWith` on the messages read through `view` and on the challenges of the
+transcript without the samples. -/
+def verifyGrindView {M : Type} (bits : ℕ → ℕ) (view : M → Msg F D P.batches)
+    (pf : Proof F D P.batches P.queries)
+    (t : Transcript M (GrindChal bits (Chal P.ldt P.queries)) (P.rounds + 2)) :
+    OracleComp (MerkleAnswer M (GrindChal bits (Chal P.ldt P.queries)) F D) Bool :=
+  if PowPasses t then
+    P.verifyWith pf (fun j => view (msgAt (ungrind t) j)) (alphaOf (ungrind t))
+      (betasOf (ungrind t)) fun k => P.indexOf (queriesOf (ungrind t) k)
+  else .pure false
+
+/-- The verifier with proof of work is the verifier on raw messages for the
+messages of the model read as they are. -/
+theorem verifyGrind_eq_verifyGrindView (bits : ℕ → ℕ) (pf : Proof F D P.batches P.queries)
+    (t : Transcript (Msg F D P.batches) (GrindChal bits (Chal P.ldt P.queries)) (P.rounds + 2)) :
+    P.verifyGrind bits pf t = P.verifyGrindView bits id pf t := rfl
+
 /-- The verifier without proof of work makes at most `P.verifierQueries` queries. -/
 theorem queryBound_verify (pf : Proof F D P.batches P.queries)
     (t : Transcript (Msg F D P.batches) (Chal P.ldt P.queries) (P.rounds + 2)) :
@@ -390,6 +421,37 @@ theorem queryBound_verifyGrind (bits : ℕ → ℕ) (pf : Proof F D P.batches P.
     (t : Transcript (Msg F D P.batches) (GrindChal bits (Chal P.ldt P.queries)) (P.rounds + 2)) :
     (P.verifyGrind bits pf t).QueryBound P.verifierQueries := by
   unfold verifyGrind
+  split
+  · exact P.queryBound_verifyWith pf _ _ _ _
+  · exact queryBound_pure _ _
+
+/-- **The verifier with proof of work against a fixed hash function.** Against
+a total answer function `f`, the verifier on raw messages accepts exactly when
+every proof-of-work sample of the transcript is zero and `verifyWith` accepts
+against `f` (see `run_verifyWith`). -/
+theorem run_verifyGrindView {M : Type} (bits : ℕ → ℕ) (view : M → Msg F D P.batches)
+    (f : ∀ x : FSQuery M (GrindChal bits (Chal P.ldt P.queries)) (HashQuery F D),
+      MerkleAnswer M (GrindChal bits (Chal P.ldt P.queries)) F D x)
+    (pf : Proof F D P.batches P.queries)
+    (t : Transcript M (GrindChal bits (Chal P.ldt P.queries)) (P.rounds + 2)) :
+    (P.verifyGrindView bits view pf t).run f = true ↔
+      PowPasses t ∧
+        (P.verifyWith pf (fun j => view (msgAt (ungrind t) j)) (alphaOf (ungrind t))
+          (betasOf (ungrind t)) fun k => P.indexOf (queriesOf (ungrind t) k)).run f = true := by
+  unfold verifyGrindView
+  split
+  · next h => exact (and_iff_right h).symm
+  · next h =>
+    rw [run_pure]
+    exact ⟨fun h' => absurd h' (by simp), fun h' => absurd h'.1 h⟩
+
+/-- The verifier with proof of work on raw messages makes at most
+`P.verifierQueries` queries. -/
+theorem queryBound_verifyGrindView {M : Type} (bits : ℕ → ℕ) (view : M → Msg F D P.batches)
+    (pf : Proof F D P.batches P.queries)
+    (t : Transcript M (GrindChal bits (Chal P.ldt P.queries)) (P.rounds + 2)) :
+    (P.verifyGrindView bits view pf t).QueryBound P.verifierQueries := by
+  unfold verifyGrindView
   split
   · exact P.queryBound_verifyWith pf _ _ _ _
   · exact queryBound_pure _ _

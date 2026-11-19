@@ -1,5 +1,4 @@
-import CertiFriProofs.Theory.Compiled.Accepts
-import CertiFriProofs.Theory.Unconditional
+import CertiFriProofs.Theory.Compiled.SoundnessView
 
 /-!
 # Soundness of the compiled protocol in the random-oracle model
@@ -25,6 +24,11 @@ The result is `a` and the verifier's verdict. `Params.experimentGrind` is the
 same with a proof-of-work sample in front of every challenge and the verifier
 `Params.verifyGrind`.
 
+`Compiled/SoundnessView.lean` has the experiment with proof of work for prover
+messages of an arbitrary type, each read as a `Msg` through a function
+(`Params.experimentGrindView`). `experimentGrind` is the case where a message
+is read as it is.
+
 ## Results
 
 * `Params.soundness`: the verifier accepts while the claims fail with
@@ -39,6 +43,11 @@ same with a proof-of-work sample in front of every challenge and the verifier
   folding hypothesis proved, in Plonky3's parameters, under
   `4 * δ + (1 / 2) ^ logBlowup ≤ 1`. Only the batching hypothesis remains.
 
+`soundness_grind` is the case `view := id` of `Params.soundness_grind_view`
+(`Compiled/SoundnessView.lean`), which is proved first. That file also has the
+bound for any event that holds only when the model verifier accepted
+(`Params.soundness_grind_view_of_imp`).
+
 ## Assumptions
 
 They are listed at `Params.soundness`. In short: the random-oracle model with
@@ -50,7 +59,8 @@ chained challenges, the proximity hypotheses `CurveMCA` (batching) and
 
 * The executable verifier. The theorems are about the model verifier; that the
   executable verifier accepts only when the model verifier does is a separate
-  refinement.
+  refinement, to be combined with `Params.soundness_grind_view_of_imp`
+  (`Compiled/SoundnessView.lean`).
 * Completeness, zero knowledge, and knowledge soundness beyond what the
   conclusion says: the committed functions are read off the oracle queries of
   the run, and the theorem bounds the probability that the verifier accepts
@@ -62,50 +72,7 @@ chained challenges, the proximity hypotheses `CurveMCA` (batching) and
 namespace CertiFri.Compiled
 
 open Oracle OracleComp
-open PcsRbr (Chal claimsOf ClaimsFail GrindChal PowPasses ungrind roundError)
-
-/-! ## The messages of the experiment's transcript -/
-
-section Messages
-
-universe u v u' w
-
-variable {M : Type u} {C : ℕ → Type v} {X' : Type u'} {Y' : X' → Type v}
-  [DecidableEq (FSQuery M C X')]
-
-/-- The transcript the verifier derives holds the messages it was given. -/
-theorem msgs_of_outcome_derive {ms : ℕ → M} :
-    ∀ {i : ℕ} {l l' : Log (FSAnswer (Msg := M) C Y')} {t : Transcript M C i},
-      Outcome (derive Y' ms i) l t l' → t.msgs = (List.range i).map ms
-  | 0, _, _, _, h => by
-    obtain ⟨rfl, _⟩ := h
-    rfl
-  | i + 1, l, l', t, h => by
-    rw [derive, outcome_bind] at h
-    obtain ⟨t₀, l₁, h₀, h⟩ := h
-    obtain ⟨c, l₂, hc, rfl, rfl⟩ := outcome_queryBind.mp h
-    rw [List.range_succ, List.map_append, List.map_singleton, ← msgs_of_outcome_derive h₀]
-    rfl
-
-/-- The transcript of the Fiat–Shamir experiment holds the adversary's
-messages. -/
-theorem msgs_of_outcome_fsExperiment {α : Type w} {r : ℕ}
-    {adv : OracleComp (FSAnswer (Msg := M) C Y') α} {msgs : α → ℕ → M}
-    {l l' : Log (FSAnswer (Msg := M) C Y')} {out : α × Transcript M C r}
-    (h : Outcome (fsExperiment r adv msgs) l out l') :
-    out.2.msgs = (List.range r).map (msgs out.1) := by
-  obtain ⟨l₁, -, hd⟩ := outcome_fsExperiment.mp h
-  exact msgs_of_outcome_derive hd
-
-omit [DecidableEq (FSQuery M C X')] in
-/-- Dropping the proof-of-work samples keeps the messages. -/
-theorem msgs_ungrind {bits : ℕ → ℕ} :
-    ∀ {i : ℕ} (t : Transcript M (GrindChal bits C) i), (ungrind t).msgs = t.msgs
-  | _, .nil => rfl
-  | _, .snoc t m c => by
-    rw [PcsRbr.ungrind_snoc, Transcript.msgs_snoc, Transcript.msgs_snoc, msgs_ungrind t]
-
-end Messages
+open PcsRbr (Chal claimsOf ClaimsFail GrindChal roundError)
 
 /-- If `εmax` bounds the error of the batching round, of every folding round
 and of the query round, it bounds every round error. -/
@@ -304,54 +271,10 @@ theorem soundness_grind (bits : ℕ → ℕ) {θ : ℝ} (hθ : 0 ≤ θ) {εα �
       (P.experimentGrind bits adv msgs proofOf) [] ≤
       (Q + (P.rounds + 2) + P.verifierQueries) * εmax +
         ((P.batches + 1) * (P.rounds + 2) + 3) * (Q + (P.rounds + 2) + P.verifierQueries) *
-          (Q + (P.rounds + 2) + P.verifierQueries - 1) / (2 * Fintype.card D) := by
-  have : ∀ i, Nonempty (Chal P.ldt P.queries i) :=
-    PcsRbr.Chal.nonempty P.domain_zero_nonempty P.queries
-  have hε : ∀ i < P.rounds + 2, roundError P.rounds εα εβ θ P.queries i / 2 ^ bits i ≤ εmax := by
-    intro i hi
-    rcases i with _ | k
-    · exact hα
-    · by_cases hk : k < P.rounds
-      · rw [PcsRbr.roundError_succ_of_lt hk]
-        exact hβ k hk
-      · obtain rfl : k = P.rounds := by omega
-        rw [PcsRbr.roundError_last]
-        exact hq
-  have hnd : ∀ t : Transcript (PcsRbr.Msg F P.numClaims) (GrindChal bits (Chal P.ldt P.queries))
-      (P.rounds + 2), PowPasses t → ClaimsFail P.ldt P.shift θ (claimsOf (ungrind t)) →
-        PcsRbr.Accepts P.ldt P.shift (ungrind t) →
-          ¬ PcsRbr.grindDoomed bits (PcsRbr.doomed P.ldt P.shift θ P.queries) (P.rounds + 2) t :=
-    fun t => PcsRbr.not_grindDoomed_of_accepts t
-  have h := prob_fsExperiment_bind_committedRow_le (r := P.rounds + 2)
-    (PcsRbr.rbrSound_grind P.ldt P.shift_ne hθ P.queries hmca hstep bits) hε
-    ((div_nonneg (pow_nonneg hθ _) (by positivity)).trans hq)
-    (PcsRbr.grindDoomed_nil (PcsRbr.doomed_zero P.ldt P.shift θ P.queries _))
-    (digestsOf := digestsOf) (K := P.batches + 1) (fun m => (length_digestsOf m).le)
-    (read := fun j m c => P.read j m c) (fun j m c c' hc => P.read_congr j m c c' hc)
-    hadv msgs
-    (rest := fun out => (P.verifyGrind bits (proofOf out.1) out.2).bind fun b => .pure (out.1, b))
-    (R := P.verifierQueries)
-    (fun out => (P.queryBound_verifyGrind bits _ _).bind (m := 0) fun _ => queryBound_pure _ _)
-    (E := fun res l => res.2 = true ∧
-      ClaimsFail P.ldt P.shift θ (P.claims (msgs res.1 0) (committedRow l)))
-    (fun out l res l' hexp hrun hE hno => by
-      obtain ⟨b, l₁, hver, hpure⟩ := outcome_bind.mp hrun
-      obtain ⟨rfl, rfl⟩ := outcome_pure.mp hpure
-      obtain ⟨hb, hfail⟩ := hE
-      have hb' : b = true := hb
-      subst hb'
-      obtain ⟨hpow, hacc⟩ := P.accepts_of_outcome_verifyGrind hver hno
-      refine hnd _ ((PcsRbr.powPasses_mapIdx _ _).mpr hpow) ?_ ?_
-      · have h0 : (ungrind out.2).msgs[0]? = some (msgs out.1 0) := by
-          rw [msgs_ungrind, msgs_of_outcome_fsExperiment hexp, List.getElem?_map,
-            List.getElem?_range (Nat.succ_pos _)]
-          rfl
-        rw [PcsRbr.ungrind_mapIdx, PcsRbr.claimsOf_mapIdx _ (ungrind out.2) h0]
-        exact hfail
-      · rw [PcsRbr.ungrind_mapIdx]
-        exact hacc)
-  push_cast at h
-  exact h
+          (Q + (P.rounds + 2) + P.verifierQueries - 1) / (2 * Fintype.card D) :=
+  P.soundness_grind_view bits id hθ hmca hstep hα hβ hq hadv msgs proofOf
+
+/-! ## The folding hypothesis proved -/
 
 /-- **Soundness with the folding hypothesis proved.** In Plonky3's parameters,
 `n = rounds + logBlowup + logFinalPolyLen` and `finalDegree = 2 ^ logFinalPolyLen`,
@@ -385,17 +308,8 @@ theorem soundness_of_relDist {logBlowup logFinalPolyLen : ℕ}
   have hθ : (0 : ℝ) ≤ 1 - δ := by
     have := pow_nonneg (by norm_num : (0 : ℝ) ≤ 1 / 2) logBlowup
     linarith
-  refine P.soundness hθ hmca
-    (εβ := fun i => 2 * (δ * (twoAdicDomain P.ω P.n (i + 1)).card + 1) / Fintype.card F)
-    (fun i hi => stepMCA_of_relDist (P.ldt.step i hi) _ hδ ?_) hα (fun i hi => ?_) hq hadv msgs
-    proofOf
-  · have h := Compose.twoAdic_relDist hn P.prim hrate (i := i + 1) hi
-    rwa [← hfinal] at h
-  · have hcard : ((twoAdicDomain P.ω P.n (i + 1)).card : ℝ) ≤ 2 ^ (P.n - 1) := by
-      rw [card_twoAdicDomain P.prim (by have := P.rounds_le; omega)]
-      exact_mod_cast Nat.pow_le_pow_right two_pos (by omega)
-    refine le_trans ?_ hβ
-    gcongr
+  exact P.soundness hθ hmca (fun i hi => P.stepMCA_of_rate hn hfinal hδ hrate hi) hα
+    (fun i hi => (P.stepError_le hδ hi).trans hβ) hq hadv msgs proofOf
 
 end Params
 

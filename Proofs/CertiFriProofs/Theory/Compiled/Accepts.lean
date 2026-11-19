@@ -28,6 +28,11 @@ satisfies `QueryAccepts`.
 * `Params.accepts_of_outcome_verify` and `Params.accepts_of_outcome_verifyGrind`:
   the statement for a transcript, without and with proof of work, for a final
   log without a hit (`Oracle.Hit`).
+* `Params.accepts_of_outcome_verifyGrindView`: the statement for a transcript
+  of raw messages read through a function `view`, with proof of work.
+
+The statements about `Params.verifyWith` hold for an oracle with any challenge
+types and any type of messages in its challenge queries.
 
 ## How the proof goes
 
@@ -112,9 +117,9 @@ variable [Field F] [DecidableEq F] [DecidableEq D]
 
 namespace Params
 
-variable (P : Params F) {C : ℕ → Type} [DecidableEq (FSQuery (Msg F D P.batches) C (HashQuery F D))]
+variable (P : Params F) {M : Type} {C : ℕ → Type} [DecidableEq (FSQuery M C (HashQuery F D))]
   {pf : Proof F D P.batches P.queries} {msg : ℕ → Msg F D P.batches} {α : F} {β : ℕ → F}
-  {index : Fin P.queries → ℕ} {l l' : Log (MerkleAnswer (Msg F D P.batches) C F D)}
+  {index : Fin P.queries → ℕ} {l l' : Log (MerkleAnswer M C F D)}
 
 /-- **An accepting run of the verifier.** The final log holds an opening of the
 opened rows of every input batch at every query, every fold chain ends at the
@@ -293,36 +298,52 @@ end Params
 
 namespace Params
 
-variable (P : Params F) {C : ℕ → Type} [DecidableEq (FSQuery (Msg F D P.batches) C (HashQuery F D))]
-  {pf : Proof F D P.batches P.queries} {l l' : Log (MerkleAnswer (Msg F D P.batches) C F D)}
+variable (P : Params F) {M M' : Type} {C : ℕ → Type} [DecidableEq (FSQuery M C (HashQuery F D))]
+  {pf : Proof F D P.batches P.queries} {l l' : Log (MerkleAnswer M C F D)}
 
-/-- **An accepted transcript is accepted in the oracle model.** Let the
-verifier, run on the messages, the challenges and the indices of the query
-points of a transcript, accept and leave a log without a collision. Then the
-transcript, with every message read from the rows the final log commits to, is
-accepted by the oracle-model protocol. The oracle of the run may have any
-challenge types. -/
-theorem accepts_of_outcome_verifyWith
-    (t : Transcript (Msg F D P.batches) (Chal P.ldt P.queries) (P.rounds + 2))
-    (hrun : Outcome (P.verifyWith (C := C) pf (msgAt t) (alphaOf t) (betasOf t)
-      fun k => P.indexOf (queriesOf t k)) l true l')
+/-- **An accepted transcript of raw messages is accepted in the oracle model.**
+Let `view` read the messages of a transcript as messages of the model. Let the
+verifier, run on the messages read through `view`, the challenges and the
+indices of the query points of the transcript, accept and leave a log without a
+collision. Then the transcript, with every message read through `view` and from
+the rows the final log commits to, is accepted by the oracle-model protocol.
+The oracle of the run may have any challenge types and any type of messages in
+its challenge queries. -/
+theorem accepts_of_outcome_verifyWith_view (view : M' → Msg F D P.batches)
+    (t : Transcript M' (Chal P.ldt P.queries) (P.rounds + 2))
+    (hrun : Outcome (P.verifyWith (M := M) (C := C) pf (fun j => view (msgAt t j)) (alphaOf t)
+      (betasOf t) fun k => P.indexOf (queriesOf t k)) l true l')
     (hl : ¬ LogCollision hashObs l') :
-    Accepts P.ldt P.shift (t.mapIdx fun j m => P.read j m (committedRow l')) := by
+    Accepts P.ldt P.shift (t.mapIdx fun j m => P.read j (view m) (committedRow l')) := by
   have hwords : ∀ i ≤ P.rounds,
-      wordsOf (t.mapIdx fun j m => P.read j m (committedRow l')) i =
-        (P.read (i + 1) (msgAt t (i + 1)) (committedRow l')).word := fun i hi =>
+      wordsOf (t.mapIdx fun j m => P.read j (view m) (committedRow l')) i =
+        (P.read (i + 1) (view (msgAt t (i + 1))) (committedRow l')).word := fun i hi =>
     PcsRbr.wordsOf_mapIdx _ t (getElem?_msgs t (by omega))
-  have hclaims : claimsOf (t.mapIdx fun j m => P.read j m (committedRow l')) =
-      P.claims (msgAt t 0) (committedRow l') :=
+  have hclaims : claimsOf (t.mapIdx fun j m => P.read j (view m) (committedRow l')) =
+      P.claims (view (msgAt t 0)) (committedRow l') :=
     PcsRbr.claimsOf_mapIdx _ t (getElem?_msgs t (Nat.zero_le _))
   refine ⟨?_, fun k => ?_⟩
-  · have h := P.isCodeword_finalWord (msgAt t (P.rounds + 1)).finalCoeffs
+  · have h := P.isCodeword_finalWord (view (msgAt t (P.rounds + 1))).finalCoeffs
     rw [← P.read_word_last _ (committedRow l'), ← hwords _ le_rfl] at h
     exact h
   · have hx : queriesOf t k ∈ twoAdicDomain P.ω P.n 0 := queriesOf_mem (S := P.ldt) t k
     rw [hclaims, PcsRbr.alphaOf_mapIdx, PcsRbr.betasOf_mapIdx, PcsRbr.queriesOf_mapIdx,
       ← P.pointOfIndex_indexOf hx]
     exact P.queryAccepts_of_outcome hrun hl k (P.indexOf_lt _) _ hwords
+
+/-- **An accepted transcript is accepted in the oracle model.** Let the
+verifier, run on the messages, the challenges and the indices of the query
+points of a transcript, accept and leave a log without a collision. Then the
+transcript, with every message read from the rows the final log commits to, is
+accepted by the oracle-model protocol. The oracle of the run may have any
+challenge types and any type of messages in its challenge queries. -/
+theorem accepts_of_outcome_verifyWith
+    (t : Transcript (Msg F D P.batches) (Chal P.ldt P.queries) (P.rounds + 2))
+    (hrun : Outcome (P.verifyWith (M := M) (C := C) pf (msgAt t) (alphaOf t) (betasOf t)
+      fun k => P.indexOf (queriesOf t k)) l true l')
+    (hl : ¬ LogCollision hashObs l') :
+    Accepts P.ldt P.shift (t.mapIdx fun j m => P.read j m (committedRow l')) :=
+  P.accepts_of_outcome_verifyWith_view id t hrun hl
 
 end Params
 
@@ -341,6 +362,30 @@ theorem accepts_of_outcome_verify {pf : Proof F D P.batches P.queries}
     Accepts P.ldt P.shift (t.mapIdx fun j m => P.read j m (committedRow l')) :=
   P.accepts_of_outcome_verifyWith t hrun (not_logCollision_of_not_hasBad_hit hno)
 
+/-- **The key lemma, with proof of work, on raw messages.** Let the messages of
+the transcript be of a type `M`, read as messages of the model through `view`.
+If the model verifier with proof of work accepts the transcript and the final
+log has no hit, for any choice `digests` of the digests of a raw message, then
+every proof-of-work sample of the transcript is zero, and the transcript
+without the samples, with every message read through `view` and from the rows
+the final log commits to, is accepted by the oracle-model protocol. -/
+theorem accepts_of_outcome_verifyGrindView {M : Type} {bits : ℕ → ℕ}
+    [DecidableEq (FSQuery M (GrindChal bits (Chal P.ldt P.queries)) (HashQuery F D))]
+    {view : M → Msg F D P.batches} {pf : Proof F D P.batches P.queries}
+    {t : Transcript M (GrindChal bits (Chal P.ldt P.queries)) (P.rounds + 2)}
+    {l l' : Log (MerkleAnswer M (GrindChal bits (Chal P.ldt P.queries)) F D)}
+    (hrun : Outcome (P.verifyGrindView bits view pf t) l true l') {digests : M → List D} {r : ℕ}
+    (hno : ¬ HasBad (Hit digests r) l') :
+    PowPasses t ∧
+      Accepts P.ldt P.shift
+        ((ungrind t).mapIdx fun j m => P.read j (view m) (committedRow l')) := by
+  unfold verifyGrindView at hrun
+  split at hrun
+  · next hpow =>
+    exact ⟨hpow, P.accepts_of_outcome_verifyWith_view view (ungrind t) hrun
+      (not_logCollision_of_not_hasBad_hit hno)⟩
+  · exact absurd hrun.1 (by simp)
+
 /-- **The key lemma, with proof of work.** If the model verifier with proof of
 work accepts a transcript and the final log has no hit, every proof-of-work
 sample of the transcript is zero, and the transcript without the samples, read
@@ -352,13 +397,8 @@ theorem accepts_of_outcome_verifyGrind {bits : ℕ → ℕ} {pf : Proof F D P.ba
     (hrun : Outcome (P.verifyGrind bits pf t) l true l') {r : ℕ}
     (hno : ¬ HasBad (Hit digestsOf r) l') :
     PowPasses t ∧
-      Accepts P.ldt P.shift ((ungrind t).mapIdx fun j m => P.read j m (committedRow l')) := by
-  unfold verifyGrind at hrun
-  split at hrun
-  · next hpow =>
-    exact ⟨hpow, P.accepts_of_outcome_verifyWith (ungrind t) hrun
-      (not_logCollision_of_not_hasBad_hit hno)⟩
-  · exact absurd hrun.1 (by simp)
+      Accepts P.ldt P.shift ((ungrind t).mapIdx fun j m => P.read j m (committedRow l')) :=
+  P.accepts_of_outcome_verifyGrindView (view := id) hrun hno
 
 end Params
 

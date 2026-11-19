@@ -4,13 +4,18 @@
 # lives in the separate package under `Proofs/`.
 name = "certifri"
 version = "0.1.0"
-defaultTargets = ["CertiFri", "CertiFriTest"]
+defaultTargets = ["CertiFri", "CertiFriP3", "CertiFriTest"]
 
 [leanOptions]
 autoImplicit = false
 
 [[lean_lib]]
 name = "CertiFri"
+
+# The Plonky3 instantiation of the verifier's primitives: Goldilocks, BLAKE3,
+# the challenger, proof decoding. Tested against Plonky3, not proved.
+[[lean_lib]]
+name = "CertiFriP3"
 
 # Executable checks against reference code. Not part of the verifier; built by
 # default so that a failing check fails the build.

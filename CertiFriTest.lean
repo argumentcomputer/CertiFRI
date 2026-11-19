@@ -1,5 +1,6 @@
 import CertiFriTest.Merkle
 import CertiFriTest.Fri
+import CertiFriTest.P3.Pruned
 
 /-!
 # Tests

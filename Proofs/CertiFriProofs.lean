@@ -36,3 +36,5 @@ import CertiFriProofs.Theory.Oracle.Replay
 import CertiFriProofs.Theory.Compiled.TwoAttempts
 import CertiFriProofs.Exec.TwoAttempts
 import CertiFriProofs.Exec.Binding
+import CertiFriProofs.Merkle.Tree
+import CertiFriProofs.Merkle.TreeExamples

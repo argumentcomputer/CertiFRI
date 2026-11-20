@@ -64,9 +64,11 @@ first message, which are read when there is room for one shard.
   the unique-decoding radius.
 * `Covered`: the public claims are within the bounds `B`; the first domain of
   the opening exists in the field and no committed column is shorter than the
-  final height (both also follow from acceptance); and the margin of unique
-  decoding holds at the height of every committed matrix. A proof with a trace
-  too short for the margin is not covered.
+  final height (both also follow from acceptance); the first domain is no
+  larger than the largest trace the system supports, times the blowup (true of
+  an accepted proof unless a fixed trace of the system is taller than that);
+  and the margin of unique decoding holds at the height of every committed
+  matrix. A proof with a trace too short for the margin is not covered.
 * `sys.FixedOk`, and sizes that are distinct as field elements (`hcast`).
 * The system is fixed before the adversary runs: its constraint graphs are not
   absorbed into the transcript.
@@ -145,6 +147,11 @@ structure Covered (a : SAttempt F EF D) : Prop where
   /-- The margin of unique decoding at the height of every committed matrix. -/
   margin : ∀ m ∈ (starkShape sys M.extData.d a.proof.active a.proof.logDegrees).flatten,
     DecodeMargin (M.coset (m.logDegree + sys.fri.logBlowup)) (2 ^ m.logDegree) θ
+  /-- The first domain of the opening is no larger than the largest trace the
+  system supports, times the blowup. -/
+  height : logMaxHeight sys.fri.logBlowup
+    (starkShape sys M.extData.d a.proof.active a.proof.logDegrees) ≤
+      sys.maxLogDegree + sys.fri.logBlowup
 
 /-- **The soundness experiment for `Stark.verify`.** The adversary runs and
 returns `a`; then the queries of the verification of `attempt a` are made. The
@@ -317,7 +324,7 @@ private theorem not_violates_of_goodLog (hfixed : sys.FixedOk) (hshards : 1 ≤ 
     (hdr := ⟨a.proof.active, a.proof.stage1Commit, a.proof.logDegrees, a.claims⟩) rfl rfl rfl rfl
     (by rw [hdigs]; exact List.mem_append_right _ List.mem_cons_self)
     (fun c hc => by rw [hdigs, hc]; exact List.mem_append_left _ List.mem_cons_self)
-    hcov.two hcov.final hcov.margin
+    hcov.two hcov.final hcov.margin hcov.height
     (Nat.add_le_add_left (Nat.add_le_add_right
       (le_trans (Compiled.Params.rounds_le _) hcov.two) 2) 4)
     hshape _ _ _ _ hβ hγ hs rfl hcheck).1

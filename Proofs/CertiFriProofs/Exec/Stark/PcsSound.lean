@@ -12,8 +12,9 @@ radius: for agreement `1 - δ` with `2 * δ + (1 / 2) ^ logBlowup ≤ 1`.
 ## Contents
 
 * `valueBound sys d`: a bound on the number of opened values of a proof.
-* `pcsErr sys d δ`: the bound on the errors. With `n` the two-adicity of the
-  base field and `c = 2 ^ n * (δ * 2 ^ n + 1) + 1`, it is the largest of
+* `pcsErr sys d δ`: the bound on the errors. With `n = maxLogDegree + logBlowup`,
+  the log of the largest domain a supported shard commits on, and
+  `c = 2 ^ n * (δ * 2 ^ n + 1) + 1`, it is the largest of
   `valueBound * c / |K|` (batching), `2 * c / |K| / 2 ^ commitPowBits`
   (folding) and `(1 - δ) ^ numQueries / 2 ^ queryPowBits` (queries).
 * `pcsErr_nonneg`.
@@ -39,7 +40,8 @@ there is nothing to prove.
 ## Assumptions
 
 None beyond those in the statement. The errors use the size `2 ^ n` of the
-largest domain the field supports at every level, and are quadratic in it.
+largest domain a supported shard commits on at every level, and are quadratic
+in it.
 -/
 
 namespace CertiFri.Exec.Stark
@@ -59,14 +61,15 @@ def valueBound (sys : System F D) (d : ℕ) : ℕ :=
 /-- **The bound on the errors of the opening protocol**, at agreement `1 - δ`. -/
 noncomputable def pcsErr [Fintype K] (sys : System F D) (d : ℕ) (δ : ℝ) : ℝ :=
   max (valueBound sys d *
-      ((2 : ℝ) ^ TwoAdicOps.twoAdicity (F := F)
-        * (δ * 2 ^ TwoAdicOps.twoAdicity (F := F) + 1) + 1) / Fintype.card K)
-    (max (2 * ((2 : ℝ) ^ TwoAdicOps.twoAdicity (F := F)
-        * (δ * 2 ^ TwoAdicOps.twoAdicity (F := F) + 1) + 1) / Fintype.card K
+      ((2 : ℝ) ^ (sys.maxLogDegree + sys.fri.logBlowup)
+        * (δ * 2 ^ (sys.maxLogDegree + sys.fri.logBlowup) + 1) + 1) / Fintype.card K)
+    (max (2 * ((2 : ℝ) ^ (sys.maxLogDegree + sys.fri.logBlowup)
+        * (δ * 2 ^ (sys.maxLogDegree + sys.fri.logBlowup) + 1) + 1) / Fintype.card K
         / 2 ^ sys.fri.commitPowBits)
       ((1 - δ) ^ sys.fri.numQueries / 2 ^ sys.fri.queryPowBits))
 
-omit [FieldOps EF] [ExtensionOps F EF] [DecidableEq K] [Inhabited D] [DecidableEq D] in
+omit [FieldOps F] [FieldOps EF] [TwoAdicOps F] [ExtensionOps F EF] [DecidableEq K] [Inhabited D]
+  [DecidableEq D] in
 /-- The bound on the errors is not negative. -/
 theorem pcsErr_nonneg [Fintype K] (sys : System F D) (d : ℕ) {δ : ℝ} (hδ : 0 ≤ δ) :
     0 ≤ pcsErr (K := K) sys d δ := by
@@ -265,11 +268,11 @@ theorem rbrSound_pcs_ud [Fintype K] (M : StarkModel F EF K) (sys : System F D) {
         (hs.params.numClaims j))
       (fun i hi => hs.params.stepMCA_of_rate_of_curveCA hca hn hfinal hδ hrate hi)
       (powBits sys.fri (v.shape M sys))
-    -- The first domain is no larger than the largest the field supports.
+    -- The first domain is no larger than the largest the system supports.
     have hc : (2 : ℝ) ^ hs.params.n * (δ * 2 ^ hs.params.n + 1) + 1 ≤
-        (2 : ℝ) ^ TwoAdicOps.twoAdicity (F := F) *
-          (δ * 2 ^ TwoAdicOps.twoAdicity (F := F) + 1) + 1 := by
-      have htwo : hs.params.n ≤ TwoAdicOps.twoAdicity (F := F) := hs.two
+        (2 : ℝ) ^ (sys.maxLogDegree + sys.fri.logBlowup) *
+          (δ * 2 ^ (sys.maxLogDegree + sys.fri.logBlowup) + 1) + 1 := by
+      have htwo : hs.params.n ≤ sys.maxLogDegree + sys.fri.logBlowup := hs.height
       gcongr <;> norm_num
     intro i hi t msg hd
     refine (h i hi t msg hd).mono_right ?_

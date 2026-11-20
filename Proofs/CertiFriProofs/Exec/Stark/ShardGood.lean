@@ -28,7 +28,9 @@ here.
   holds at the position of the chain.
 * The shape of the proof is supported: its first domain exists in the field,
   no committed column is shorter than the final height, and the margin of
-  unique decoding holds at the height of every committed matrix.
+  unique decoding holds at the height of every committed matrix, and the first
+  domain is no larger than the largest trace the system supports, times the
+  blowup.
 * The commitments to the main traces and to the fixed traces are among the
   digests of the first message that are read (`digestsOf`).
 * `mid` holds base-field elements only.
@@ -896,6 +898,7 @@ private theorem shard_good_aux (M : StarkModel F EF K) (sys : System F D) (V : V
     (hfinal : ∀ m ∈ shape.flatten, sys.fri.logFinalHeight ≤ m.logDegree + sys.fri.logBlowup)
     (hmargin : ∀ m ∈ shape.flatten,
       DecodeMargin (M.coset (m.logDegree + sys.fri.logBlowup)) (2 ^ m.logDegree) θ)
+    (hheight : logMaxHeight sys.fri.logBlowup shape ≤ sys.maxLogDegree + sys.fri.logBlowup)
     {R : ℕ} (hR : R = numRounds sys.fri shape) (hr : 4 + (R + 2) ≤ r)
     (hsup : Supports l₁ (fsTranscript f ms (4 + (R + 2))))
     (hshape : Stark.shapeOk sys proof = true) (β γ acc : EF) (s : UState F EF D) {ζ : EF}
@@ -964,8 +967,14 @@ private theorem shard_good_aux (M : StarkModel F EF K) (sys : System F D) (V : V
     hs h2 h3 h4 h5 hcheck
   obtain rfl : b = true := (hrun.run_eq hf).symm.trans hrunf
   -- The view of the chain.
+  have hactive : proof.active.size = sys.circuits.size := by
+    have h := hshape
+    simp only [Stark.shapeOk, Bool.and_eq_true, List.all_eq_true, beq_iff_eq,
+      decide_eq_true_eq] at h
+    exact h.1.1.1.1.1.1.1.1.1.1.2
   have hsv : Supported M sys θ (viewOf M msgs chals
-      ⟨proof.active, proof.stage1Commit, proof.logDegrees, claims⟩) := ⟨htwo, hfinal, hmargin⟩
+      ⟨proof.active, proof.stage1Commit, proof.logDegrees, claims⟩) :=
+    ⟨htwo, hfinal, hmargin, hactive, hheight⟩
   have hlen' : msgs.length = 4 + (hsv.params.rounds + 2) := hlen
   have hv2 : proof.stage2Commit = (digestsIn (rawAt msgs 2)).getD 0 default := by
     rw [hraw 2 (by omega), h2, digestsIn_second _ hmid proof]
@@ -1115,6 +1124,9 @@ theorem shard_good (M : StarkModel F EF K) (sys : System F D) (V : Variant F EF 
       sys.fri.logFinalHeight ≤ m.logDegree + sys.fri.logBlowup)
     (hmargin : ∀ m ∈ (starkShape sys M.extData.d proof.active proof.logDegrees).flatten,
       DecodeMargin (M.coset (m.logDegree + sys.fri.logBlowup)) (2 ^ m.logDegree) θ)
+    (hheight : logMaxHeight sys.fri.logBlowup
+      (starkShape sys M.extData.d proof.active proof.logDegrees) ≤
+        sys.maxLogDegree + sys.fri.logBlowup)
     (hr : 4 + ((modelParams M.toFieldModel sys.fri
       (starkShape sys M.extData.d proof.active proof.logDegrees)
       (M.wellFormed sys.fri _ htwo)).rounds + 2) ≤ r)
@@ -1168,7 +1180,7 @@ theorem shard_good (M : StarkModel F EF K) (sys : System F D) (V : Variant F EF 
       numRounds sys.fri (starkShape sys M.extData.d proof.active proof.logDegrees) := rfl
   refine shard_good_aux M sys V θ B r hfixed hgood proof m0 mid hmid hl₁ hfl₁ hdec hpre
     (ms := fun j => nextMsg M sys proof m0 mid j (fsTranscriptA f (nextMsg M sys proof m0 mid) j))
-    hhdr hdig hdigFixed rfl htwo hfinal hmargin rfl hr hsup hshape β γ acc s hβ hγ
+    hhdr hdig hdigFixed rfl htwo hfinal hmargin hheight rfl hr hsup hshape β γ acc s hβ hγ
     (congrArg (rep M) (hfield 3 (by omega))) rfl ?_ rfl ?_ (fun j => ?_) hs hacc hcheck
     (hfield 4 (by omega)) (fun i => ite_congr rfl (fun hi => hfield (5 + i) (by omega))
       fun _ => rfl)

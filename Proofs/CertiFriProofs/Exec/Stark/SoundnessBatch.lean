@@ -138,6 +138,11 @@ structure BatchCovered (a : BAttempt F EF D) : Prop where
   margin : ∀ h ∈ a.preamble.headers,
     ∀ m ∈ (starkShape sys M.extData.d h.active h.logDegrees).flatten,
       DecodeMargin (M.coset (m.logDegree + sys.fri.logBlowup)) (2 ^ m.logDegree) θ
+  /-- The first domain of every opening is no larger than the largest trace the
+  system supports, times the blowup. -/
+  height : ∀ h ∈ a.preamble.headers,
+    logMaxHeight sys.fri.logBlowup (starkShape sys M.extData.d h.active h.logDegrees) ≤
+      sys.maxLogDegree + sys.fri.logBlowup
 
 /-- The queries of the verification of the shards `proofs`, the first of them
 at position `i`: those of each shard in turn. -/
@@ -445,7 +450,8 @@ private theorem not_batchViolates_of_goodLog (hfixed : sys.FixedOk) {N : ℕ}
   have htwo := hcov.two hdr hmem
   have hfinal := hcov.final hdr hmem
   have hmargin := hcov.margin hdr hmem
-  rw [hactive, hlogs] at htwo hfinal hmargin
+  have hheight := hcov.height hdr hmem
+  rw [hactive, hlogs] at htwo hfinal hmargin hheight
   -- The chain: the first lookup challenge is absorbed back in round `1`, and the
   -- position of the shard follows the second one in round `2`.
   have a0 : UAt (fun j => nextMsg M sys proof (batchFirstMessage sys a.preamble) [observeNat i] j
@@ -475,7 +481,7 @@ private theorem not_batchViolates_of_goodLog (hfixed : sys.FixedOk) {N : ℕ}
       exact List.mem_append_right _
         (List.mem_map.mpr ⟨hdr, Array.mem_toList_iff.mpr hmem, rfl⟩))
     (fun c hc => by rw [hdigs, hc]; exact List.mem_append_left _ List.mem_cons_self)
-    htwo hfinal hmargin
+    htwo hfinal hmargin hheight
     (Nat.add_le_add_left (Nat.add_le_add_right
       (le_trans (Compiled.Params.rounds_le _) htwo) 2) 4)
     hshape _ _ _ _ hβ hγ hs' rfl hcheck).1 hfail

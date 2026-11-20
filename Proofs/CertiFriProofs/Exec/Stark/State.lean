@@ -132,8 +132,10 @@ def ShardView.shape (v : ShardView F EF D K) : ClaimShape :=
   starkShape sys M.extData.d v.hdr.active v.hdr.logDegrees
 
 /-- The shape of a shard is supported: its first domain exists in the field,
-no committed column is shorter than the final height, and the margin of unique
-decoding holds at the height of every committed matrix. -/
+no committed column is shorter than the final height, the margin of unique
+decoding holds at the height of every committed matrix, its header has one
+activation bit per circuit, and its first domain is no larger than the largest
+trace the system supports, times the blowup. -/
 structure Supported (v : ShardView F EF D K) : Prop where
   /-- The first domain exists in the field. -/
   two : logMaxHeight sys.fri.logBlowup (v.shape M sys) ≤ TwoAdicOps.twoAdicity (F := F)
@@ -142,6 +144,11 @@ structure Supported (v : ShardView F EF D K) : Prop where
   /-- The margin of unique decoding. -/
   margin : ∀ m ∈ (v.shape M sys).flatten,
     DecodeMargin (M.coset (m.logDegree + sys.fri.logBlowup)) (2 ^ m.logDegree) θ
+  /-- The header has one activation bit per circuit. -/
+  active : v.hdr.active.size = sys.circuits.size
+  /-- The first domain is no larger than the largest the system supports. -/
+  height : logMaxHeight sys.fri.logBlowup (v.shape M sys) ≤
+    sys.maxLogDegree + sys.fri.logBlowup
 
 variable {M sys θ}
 
@@ -822,7 +829,8 @@ private theorem fractionLE_zeta_round [Fintype K]
     fun root hroot => baseRows_comOf_append M sys v (le_of_eq hm.symm) m (.inr (.inl hroot))
   by_cases hsup : Supported M sys θ v
   swap
-  · exact hnone.mono_left fun c hc => hc fun hs => absurd ⟨hs.two, hs.final, hs.margin⟩ hsup
+  · exact hnone.mono_left fun c hc => hc fun hs =>
+      absurd ⟨hs.two, hs.final, hs.margin, hs.active, hs.height⟩ hsup
   by_cases hCF : v.CFail M sys θ (M.baseRows (comOf sys v msgs))
   swap
   · refine hnone.mono_left fun c hc => hc fun hs => ?_

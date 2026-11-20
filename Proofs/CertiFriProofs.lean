@@ -54,3 +54,9 @@ import CertiFriProofs.Theory.Stark.Balance
 import CertiFriProofs.Theory.Stark.Air
 import CertiFriProofs.Theory.Stark.Uniform
 import CertiFriProofs.Exec.Stark.Free
+import CertiFriProofs.Theory.Stark.Check
+import CertiFriProofs.Exec.Stark.Model
+import CertiFriProofs.Exec.Stark.Arith
+import CertiFriProofs.Exec.Stark.Columns
+import CertiFriProofs.Exec.Stark.Shard
+import CertiFriProofs.Exec.Stark.Link

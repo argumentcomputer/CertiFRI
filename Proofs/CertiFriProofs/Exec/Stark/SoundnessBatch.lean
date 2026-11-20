@@ -138,10 +138,6 @@ structure BatchCovered (a : BAttempt F EF D) : Prop where
   final : ∀ h ∈ a.preamble.headers,
     ∀ m ∈ (starkShape sys M.extData.d h.active h.logDegrees).flatten,
       sys.fri.logFinalHeight ≤ m.logDegree + sys.fri.logBlowup
-  /-- The margin of unique decoding at the height of every committed matrix. -/
-  margin : ∀ h ∈ a.preamble.headers,
-    ∀ m ∈ (starkShape sys M.extData.d h.active h.logDegrees).flatten,
-      DecodeMargin (M.coset (m.logDegree + sys.fri.logBlowup)) (2 ^ m.logDegree) θ
   /-- The first domain of every opening is no larger than the largest trace the
   system supports, times the blowup. -/
   height : ∀ h ∈ a.preamble.headers,
@@ -417,16 +413,19 @@ first `B.shards` shards of the batch, and an answer function that agrees with
 it. If `Stark.verifyBatch` accepts the batch against the function and the batch
 is covered, then for the header and the proof at any position no constraint
 fails, and if the lookup messages of the batch are not balanced, `balPoly` of
-them does not vanish at the two shared lookup challenges of the run. -/
+them does not vanish at the two shared lookup challenges of the run. The
+agreement `θ` is inside the unique-decoding radius:
+`1 + 2 ^ (-logBlowup) < 2 * θ` (`hθ`). -/
 theorem verifyBatch_good (hfixed : sys.FixedOk) {N : ℕ} (hN : BoundsLE sys B N)
     (hcast : ∀ a b : ℕ, a ≤ N → b ≤ N → (a : K) = (b : K) → a = b)
+    (hθ : 1 + (1 / 2 : ℝ) ^ sys.fri.logBlowup < 2 * θ)
     {l : Log (SAns F EF D K slots width)}
     (hgood : GoodLog M sys (batchVariant sys B N) θ B (maxRounds F) l)
     {f : ∀ x, SAns F EF D K slots width x} (hf : ∀ x y, l.dlookup x = some y → f x = y)
     (a : BAttempt F EF D) {l₀ : Log (SAns F EF D K slots width)} {b : Bool}
     (hout : Outcome (shardsComp M sys (batchFirstMessage sys a.preamble)
       (a.proofs.toList.take B.shards) 0) l₀ b l)
-    (hacc : batchAccepts M sys f a = true) (hcov : BatchCovered M sys θ B a) {i : ℕ}
+    (hacc : batchAccepts M sys f a = true) (hcov : BatchCovered M sys B a) {i : ℕ}
     {hdr : ShardHeader F D} {proof : Proof F EF D (Array (List D)) (Array (List D))}
     (hhdr : a.preamble.headers[i]? = some hdr) (hproof : a.proofs[i]? = some proof) :
     ¬ ConstraintFail M sys θ (M.baseRows (committedRow l)) proof.active proof.logDegrees
@@ -469,9 +468,11 @@ theorem verifyBatch_good (hfixed : sys.FixedOk) {N : ℕ} (hN : BoundsLE sys B N
   -- The shape of the shard is supported.
   have htwo := hcov.two hdr hmem
   have hfinal := hcov.final hdr hmem
-  have hmargin := hcov.margin hdr hmem
   have hheight := hcov.height hdr hmem
-  rw [hactive, hlogs] at htwo hfinal hmargin hheight
+  rw [hactive, hlogs] at htwo hfinal hheight
+  have hmargin : ∀ m ∈ (starkShape sys M.extData.d proof.active proof.logDegrees).flatten,
+      StrictMargin (M.coset (m.logDegree + sys.fri.logBlowup)) (2 ^ m.logDegree) θ :=
+    fun m hm => M.strictMargin_coset ((CertiFri.Exec.le_logMaxHeight hm).trans htwo) hθ
   -- The chain: the first lookup challenge is absorbed back in round `1`, and the
   -- position of the shard follows the second one in round `2`.
   have a0 : UAt (fun j => nextMsg M sys proof (batchFirstMessage sys a.preamble) [observeNat i] j
@@ -514,26 +515,31 @@ covered, no constraint of any shard fails. -/
 private theorem not_batchViolates_of_goodLog (hfixed : sys.FixedOk) {N : ℕ}
     (hN : BoundsLE sys B N)
     (hcast : ∀ a b : ℕ, a ≤ N → b ≤ N → (a : K) = (b : K) → a = b)
+    (hθ : 1 + (1 / 2 : ℝ) ^ sys.fri.logBlowup < 2 * θ)
     {l : Log (SAns F EF D K slots width)}
     (hgood : GoodLog M sys (batchVariant sys B N) θ B (maxRounds F) l)
     {f : ∀ x, SAns F EF D K slots width x} (hf : ∀ x y, l.dlookup x = some y → f x = y)
     (a : BAttempt F EF D) {l₀ : Log (SAns F EF D K slots width)} {b : Bool}
     (hout : Outcome (shardsComp M sys (batchFirstMessage sys a.preamble)
       (a.proofs.toList.take B.shards) 0) l₀ b l)
-    (hacc : batchAccepts M sys f a = true) (hcov : BatchCovered M sys θ B a) :
+    (hacc : batchAccepts M sys f a = true) (hcov : BatchCovered M sys B a) :
     ¬ BatchViolates M sys θ l f a := by
   rintro ⟨i, hdr, proof, hhdr, hproof, hfail⟩
-  exact (verifyBatch_good M sys θ B hfixed hN hcast hgood hf a hout hacc hcov hhdr hproof).1 hfail
+  exact (verifyBatch_good M sys θ B hfixed hN hcast hθ hgood hf a hout hacc hcov hhdr
+    hproof).1 hfail
 
 /-- **Soundness of `Stark.verifyBatch`.** The probability that some answer
 function that agrees with the final log makes `Stark.verifyBatch` accept a
 covered batch one of whose shards has a failing constraint, for the polynomials
 its committed columns decode to, is at most
 `N * εmax + ((B.shards + 1) * r + 3) * N * (N - 1) / (2 * |D|)`, with
-`N = Q + B.shards * shardQueries sys twoAdicity` and `r = maxRounds F`. -/
+`N = Q + B.shards * shardQueries sys twoAdicity` and `r = maxRounds F`. The
+agreement `θ` is inside the unique-decoding radius:
+`1 + 2 ^ (-logBlowup) < 2 * θ` (`hθ`). -/
 theorem soundness_verifyBatch [Fintype K] [Fintype D] (hfixed : sys.FixedOk) {N : ℕ}
     (hN : BoundsLE sys B N)
-    (hcast : ∀ a b : ℕ, a ≤ N → b ≤ N → (a : K) = (b : K) → a = b) {εpcs εmax : ℝ}
+    (hcast : ∀ a b : ℕ, a ≤ N → b ≤ N → (a : K) = (b : K) → a = b)
+    (hθ : 1 + (1 / 2 : ℝ) ^ sys.fri.logBlowup < 2 * θ) {εpcs εmax : ℝ}
     (hεpcs : 0 ≤ εpcs) (htwo : sys.maxLogDegree ≤ TwoAdicOps.twoAdicity (F := F))
     (hslots : sys.fri.numQueries + 1 ≤ slots) (hcommit : sys.fri.commitPowBits ≤ width)
     (hquery : sys.fri.queryPowBits ≤ width)
@@ -549,7 +555,7 @@ theorem soundness_verifyBatch [Fintype K] [Fintype D] (hfixed : sys.FixedOk) {N 
     (attempt : A → BAttempt F EF D) :
     prob (fun out l => ∃ f : ∀ x, SAns F EF D K slots width x,
         (∀ x y, l.dlookup x = some y → f x = y) ∧
-          batchAccepts M sys f (attempt out.1) = true ∧ BatchCovered M sys θ B (attempt out.1) ∧
+          batchAccepts M sys f (attempt out.1) = true ∧ BatchCovered M sys B (attempt out.1) ∧
           BatchViolates M sys θ l f (attempt out.1))
       (batchExperiment M sys B adv attempt) [] ≤
       (Q + B.shards * shardQueries sys (TwoAdicOps.twoAdicity (F := F)) : ℕ) * εmax +
@@ -565,8 +571,8 @@ theorem soundness_verifyBatch [Fintype K] [Fintype D] (hfixed : sys.FixedOk) {N 
   obtain ⟨a, l₀, -, hout⟩ := outcome_bind.mp hout
   obtain ⟨b, l₁, hcomp, hpure⟩ := outcome_bind.mp hout
   obtain ⟨rfl, rfl⟩ := hpure
-  exact not_batchViolates_of_goodLog M sys θ B hfixed hN hcast hgood hf (attempt a) hcomp hacc
-    hcov hviol
+  exact not_batchViolates_of_goodLog M sys θ B hfixed hN hcast hθ hgood hf (attempt a) hcomp
+    hacc hcov hviol
 
 end Batch
 

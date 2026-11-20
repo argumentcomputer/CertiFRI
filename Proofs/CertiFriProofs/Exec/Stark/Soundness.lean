@@ -43,6 +43,10 @@ the trace domains satisfy all constraints of all active circuits.
   `N * εmax + ((B.shards + 1) * r + 3) * N * (N - 1) / (2 * |D|)`, where `N` is
   the number of oracle queries of the experiment, `r` the largest number of
   rounds of a chain, and `εmax` bounds the error of every round (`roundErr`).
+  The error of the round of `ζ` is `(zetaBound + cosetBound) / |K|`: the check
+  at `ζ` passes by chance, or `ζ` or its successor on a trace domain is a point
+  of a coset a column is committed on (the verifier does not check that it is
+  not).
 * `verify_good`: the deterministic part. In a good log, an accepted and covered
   attempt violates no constraint, and if its lookup messages are not balanced,
   `balPoly` of them does not vanish at the lookup challenges of the run
@@ -68,11 +72,15 @@ first message, which are read when there is room for one shard.
   the unique-decoding radius.
 * `Covered`: the public claims are within the bounds `B`; the first domain of
   the opening exists in the field and no committed column is shorter than the
-  final height (both also follow from acceptance); the first domain is no
+  final height (both also follow from acceptance); and the first domain is no
   larger than the largest trace the system supports, times the blowup (true of
-  an accepted proof unless a fixed trace of the system is taller than that);
-  and the margin of unique decoding holds at the height of every committed
-  matrix. A proof with a trace too short for the margin is not covered.
+  an accepted proof unless a fixed trace of the system is taller than that).
+  It asks nothing else of the trace heights: proofs with short traces are
+  covered.
+* `hθ : 1 + (1 / 2) ^ logBlowup < 2 * θ`: the agreement `θ` is inside the
+  unique-decoding radius of a code of rate `2 ^ (-logBlowup)`. It gives the
+  margin of unique decoding (`StrictMargin`) on the coset of every committed
+  matrix, whatever its height (`strictMargin_coset`).
 * `sys.FixedOk`, and sizes that are distinct as field elements (`hcast`).
 * The system is fixed before the adversary runs: its constraint graphs are not
   absorbed into the transcript.
@@ -148,9 +156,6 @@ structure Covered (a : SAttempt F EF D) : Prop where
   /-- No committed column is shorter than the final height. -/
   final : ∀ m ∈ (starkShape sys M.extData.d a.proof.active a.proof.logDegrees).flatten,
     sys.fri.logFinalHeight ≤ m.logDegree + sys.fri.logBlowup
-  /-- The margin of unique decoding at the height of every committed matrix. -/
-  margin : ∀ m ∈ (starkShape sys M.extData.d a.proof.active a.proof.logDegrees).flatten,
-    DecodeMargin (M.coset (m.logDegree + sys.fri.logBlowup)) (2 ^ m.logDegree) θ
   /-- The first domain of the opening is no larger than the largest trace the
   system supports, times the blowup. -/
   height : logMaxHeight sys.fri.logBlowup
@@ -289,16 +294,18 @@ holds the queries of the verification of the attempt, and an answer function
 that agrees with it. If `Stark.verify` accepts the attempt against the function
 and the attempt is covered, then no constraint fails, and if the lookup
 messages of the attempt are not balanced, `balPoly` of them does not vanish at
-the two lookup challenges of the run. -/
+the two lookup challenges of the run. The agreement `θ` is inside the
+unique-decoding radius: `1 + 2 ^ (-logBlowup) < 2 * θ` (`hθ`). -/
 theorem verify_good (hfixed : sys.FixedOk) (hshards : 1 ≤ B.shards) {N : ℕ}
     (hN : BoundsLE sys B N)
     (hcast : ∀ a b : ℕ, a ≤ N → b ≤ N → (a : K) = (b : K) → a = b)
+    (hθ : 1 + (1 / 2 : ℝ) ^ sys.fri.logBlowup < 2 * θ)
     {l : Log (SAns F EF D K slots width)}
     (hgood : GoodLog M sys (singleVariant sys B) θ B (maxRounds F) l)
     {f : ∀ x, SAns F EF D K slots width x} (hf : ∀ x y, l.dlookup x = some y → f x = y)
     (a : SAttempt F EF D) {l₀ : Log (SAns F EF D K slots width)} {b : Bool}
     (hout : Outcome (shardComp M sys a.proof (firstMessage sys a.proof a.claims) []) l₀ b l)
-    (hacc : verifyAccepts M sys f a = true) (hcov : Covered M sys θ B a) :
+    (hacc : verifyAccepts M sys f a = true) (hcov : Covered M sys B a) :
     ¬ Violates M sys θ l f a ∧
       (¬ Balanced (allItems M sys θ
           (M.baseRows (readMsg B (firstMessage sys a.proof a.claims) (committedRow l)).2)
@@ -339,7 +346,9 @@ theorem verify_good (hfixed : sys.FixedOk) (hshards : 1 ≤ B.shards) {N : ℕ}
     (hdr := ⟨a.proof.active, a.proof.stage1Commit, a.proof.logDegrees, a.claims⟩) rfl rfl rfl rfl
     (by rw [hdigs]; exact List.mem_append_right _ List.mem_cons_self)
     (fun c hc => by rw [hdigs, hc]; exact List.mem_append_left _ List.mem_cons_self)
-    hcov.two hcov.final hcov.margin hcov.height
+    hcov.two hcov.final
+    (fun m hm => M.strictMargin_coset ((CertiFri.Exec.le_logMaxHeight hm).trans hcov.two) hθ)
+    hcov.height
     (Nat.add_le_add_left (Nat.add_le_add_right
       (le_trans (Compiled.Params.rounds_le _) hcov.two) 2) 4)
     hshape _ _ _ _ hβ hγ hs rfl hcheck
@@ -351,14 +360,15 @@ against the function and the attempt is covered, no constraint fails. -/
 private theorem not_violates_of_goodLog (hfixed : sys.FixedOk) (hshards : 1 ≤ B.shards) {N : ℕ}
     (hN : BoundsLE sys B N)
     (hcast : ∀ a b : ℕ, a ≤ N → b ≤ N → (a : K) = (b : K) → a = b)
+    (hθ : 1 + (1 / 2 : ℝ) ^ sys.fri.logBlowup < 2 * θ)
     {l : Log (SAns F EF D K slots width)}
     (hgood : GoodLog M sys (singleVariant sys B) θ B (maxRounds F) l)
     {f : ∀ x, SAns F EF D K slots width x} (hf : ∀ x y, l.dlookup x = some y → f x = y)
     (a : SAttempt F EF D) {l₀ : Log (SAns F EF D K slots width)} {b : Bool}
     (hout : Outcome (shardComp M sys a.proof (firstMessage sys a.proof a.claims) []) l₀ b l)
-    (hacc : verifyAccepts M sys f a = true) (hcov : Covered M sys θ B a) :
+    (hacc : verifyAccepts M sys f a = true) (hcov : Covered M sys B a) :
     ¬ Violates M sys θ l f a :=
-  (verify_good M sys θ B hfixed hshards hN hcast hgood hf a hout hacc hcov).1
+  (verify_good M sys θ B hfixed hshards hN hcast hθ hgood hf a hout hacc hcov).1
 
 /-- **Soundness of `Stark.verify`.** The probability that some answer function
 that agrees with the final log makes `Stark.verify` accept a covered attempt
@@ -366,10 +376,12 @@ one of whose constraints fails, for the polynomials its committed columns
 decode to, is at most
 `N * εmax + ((B.shards + 1) * r + 3) * N * (N - 1) / (2 * |D|)`, with
 `N = Q + shardQueries sys twoAdicity` the number of queries of the experiment
-and `r = maxRounds F`. -/
+and `r = maxRounds F`. The agreement `θ` is inside the unique-decoding radius:
+`1 + 2 ^ (-logBlowup) < 2 * θ` (`hθ`). -/
 theorem soundness_verify [Fintype K] [Fintype D] (hfixed : sys.FixedOk) (hshards : 1 ≤ B.shards)
     {N : ℕ} (hN : BoundsLE sys B N)
-    (hcast : ∀ a b : ℕ, a ≤ N → b ≤ N → (a : K) = (b : K) → a = b) {εpcs εmax : ℝ}
+    (hcast : ∀ a b : ℕ, a ≤ N → b ≤ N → (a : K) = (b : K) → a = b)
+    (hθ : 1 + (1 / 2 : ℝ) ^ sys.fri.logBlowup < 2 * θ) {εpcs εmax : ℝ}
     (hεpcs : 0 ≤ εpcs) (htwo : sys.maxLogDegree ≤ TwoAdicOps.twoAdicity (F := F))
     (hslots : sys.fri.numQueries + 1 ≤ slots) (hcommit : sys.fri.commitPowBits ≤ width)
     (hquery : sys.fri.queryPowBits ≤ width)
@@ -385,7 +397,7 @@ theorem soundness_verify [Fintype K] [Fintype D] (hfixed : sys.FixedOk) (hshards
     (attempt : A → SAttempt F EF D) :
     prob (fun out l => ∃ f : ∀ x, SAns F EF D K slots width x,
         (∀ x y, l.dlookup x = some y → f x = y) ∧
-          verifyAccepts M sys f (attempt out.1) = true ∧ Covered M sys θ B (attempt out.1) ∧
+          verifyAccepts M sys f (attempt out.1) = true ∧ Covered M sys B (attempt out.1) ∧
           Violates M sys θ l f (attempt out.1))
       (experiment M sys adv attempt) [] ≤
       (Q + shardQueries sys (TwoAdicOps.twoAdicity (F := F)) : ℕ) * εmax +
@@ -401,8 +413,8 @@ theorem soundness_verify [Fintype K] [Fintype D] (hfixed : sys.FixedOk) (hshards
   obtain ⟨a, l₀, -, hout⟩ := outcome_bind.mp hout
   obtain ⟨b, l₁, hcomp, hpure⟩ := outcome_bind.mp hout
   obtain ⟨rfl, rfl⟩ := hpure
-  exact not_violates_of_goodLog M sys θ B hfixed hshards hN hcast hgood hf (attempt a) hcomp hacc
-    hcov hviol
+  exact not_violates_of_goodLog M sys θ B hfixed hshards hN hcast hθ hgood hf (attempt a) hcomp
+    hacc hcov hviol
 
 end Single
 

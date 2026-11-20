@@ -1,14 +1,16 @@
 import CertiFriProofs.Exec.Stark.Model
 import CertiFriProofs.Exec.Extract
+import CertiFriProofs.Theory.PcsRbr.DecodeTight
 
 /-!
 # Committed columns and the polynomials they decode to
 
 A column of a committed matrix is a word on a coset of a two-adic subgroup,
 read off the rows a commitment opens to. Inside the unique-decoding radius it
-determines a polynomial: the one the opening proof makes claims about. This
-file defines that polynomial for the columns of the STARK, from a `StarkModel`
-alone, and relates it to the claims of the opening protocol.
+determines a polynomial: the one the opening proof makes claims about, when the
+opening points are outside the coset. This file defines that polynomial for the
+columns of the STARK, from a `StarkModel` alone, and relates it to the claims
+of the opening protocol.
 
 ## Contents
 
@@ -17,26 +19,42 @@ alone, and relates it to the claims of the opening protocol.
 * `StarkModel.colWord com root dims mi col h`: the word of column `col` of
   matrix `mi` under `root`, of `2 ^ h` entries, for the committed rows `com`.
 * `StarkModel.colPoly lb θ …`: the polynomial of degree at most
-  `2 ^ (h - lb)` it decodes to at agreement `θ` (`decode`,
-  `Theory/PcsRbr/Decode.lean`); zero if there is none.
+  `2 ^ (h - lb)` it decodes to at agreement `θ` (`decodeT`,
+  `Theory/PcsRbr/DecodeTight.lean`): one that agrees with the word on a
+  fraction `θ` of the coset; zero if there is none.
 * `StarkModel.baseRows com`: the committed rows `com`, without the rows that
   have an entry outside the base field.
 * `claims_f_eq_colWord`, `coset_eq`, `ldt_degree_eq`: the functions, cosets and
   degree bounds of the claims of the opening protocol (`Compiled.Params.claims`
   for `modelParams`) are these.
-* `eval_colPoly_of_not_claimsFail`: if the claims of an opening do not fail,
-  every claimed value is the value of the decoded polynomial of its column at
-  its opening point.
+* `eval_colPoly_of_not_claimsFail`: if the claims of an opening do not fail
+  and no opening point lies in the coset of a column it is claimed for, every
+  claimed value is the value of the decoded polynomial of its column at its
+  opening point.
 * `natDegree_colPoly_le`, `coeff_colPoly_mem_base`: the decoded polynomial has
   degree at most `2 ^ (h - lb)`, and base-field coefficients when the rows are
   base-field rows.
+* `StarkModel.card_coset`, `StarkModel.strictMargin_coset`: a coset of a height
+  that exists in the field has `2 ^ h` points, and the margin of unique
+  decoding holds on it, for every height, as soon as
+  `1 + 2 ^ (-lb) < 2 * θ`.
 
 ## Assumptions
 
-The margin of unique decoding (`DecodeMargin`) at the levels that have a claim,
-where it is used. `eval_colPoly_of_not_claimsFail` asks, of the shape checks of
-the opening proof, only for the numbers of opening points and that no column is
-shorter than the final height.
+The margin of unique decoding (`StrictMargin`,
+`|D| + d < 2 * θ * |D|`) at the heights of the matrices of the shape, where it
+is used. It does not depend on the height: `strictMargin_coset` derives it from
+the blowup and `θ` alone.
+
+`eval_colPoly_of_not_claimsFail` asks that no opening point lies in the coset
+of a column it is claimed for. The opening protocol says nothing about a
+committed word at an opening point (`PcsRbr.ClaimsHoldOff`), and the decoder
+leaves no point out: the hypothesis gives the agreement on the whole dense set.
+The verifier does not check it: the STARK pays for it with the probability that
+its random opening point lands in a coset (`fractionLE_offCosets`,
+`Exec/Stark/Shard.lean`). Of the shape checks of the opening proof, the theorem
+asks only for the numbers of opening points and that no column is shorter than
+the final height.
 -/
 
 namespace CertiFri.Exec.Stark
@@ -66,10 +84,11 @@ noncomputable def colWord (com : Compiled.Committed K D) (root : D) (dims : Arra
   Compiled.ofIndexed (2 ^ h) (M.cosetPoint h) fun i => Compiled.entry (com root dims mi i) col
 
 /-- The polynomial a column decodes to at agreement `θ`: of degree at most
-`2 ^ (h - lb)`, for a blowup of `2 ^ lb`. -/
+`2 ^ (h - lb)`, for a blowup of `2 ^ lb`, agreeing with the word of the column
+on a fraction `θ` of the coset. -/
 noncomputable def colPoly (lb : ℕ) (θ : ℝ) (com : Compiled.Committed K D) (root : D)
     (dims : Array Dimensions) (mi col h : ℕ) : K[X] :=
-  decode (M.coset h) (2 ^ (h - lb)) θ (M.colWord com root dims mi col h)
+  decodeT (M.coset h) (2 ^ (h - lb)) θ (M.colWord com root dims mi col h)
 
 open Classical in
 /-- The committed rows `com`, without the rows that have an entry outside the
@@ -84,7 +103,7 @@ noncomputable def baseRows (com : Compiled.Committed K D) : Compiled.Committed K
 theorem natDegree_colPoly_le (lb : ℕ) (θ : ℝ) (com : Compiled.Committed K D) (root : D)
     (dims : Array Dimensions) (mi col h : ℕ) :
     (M.colPoly lb θ com root dims mi col h).natDegree ≤ 2 ^ (h - lb) := by
-  have hlt := degree_decode_lt (M.coset h) (2 ^ (h - lb)) θ (M.colWord com root dims mi col h)
+  have hlt := degree_decodeT_lt (M.coset h) (2 ^ (h - lb)) θ (M.colWord com root dims mi col h)
   exact natDegree_le_iff_degree_le.mpr (Order.le_of_lt_succ (by exact_mod_cast hlt))
 
 /-! ### The base field -/
@@ -137,12 +156,29 @@ private theorem coeff_mem_of_eval_mem (L : Subfield K) {P : K[X]} {s : Finset K}
   exact a.2
 
 /-- A coset of a height that exists in the field has `2 ^ h` points. -/
-private theorem card_coset {h : ℕ} (hh : h ≤ TwoAdicOps.twoAdicity (F := F)) :
+theorem card_coset {h : ℕ} (hh : h ≤ TwoAdicOps.twoAdicity (F := F)) :
     (M.coset h).card = 2 ^ h := by
   rw [coset, Finset.card_image_of_injOn, Finset.card_range]
   intro a ha b hb hab
   exact (M.generator h hh).pow_inj (by simpa using ha) (by simpa using hb)
     (mul_left_cancel₀ M.shift_ne hab)
+
+/-- **The margin of unique decoding, for every height.** On the coset of
+`2 ^ (k + lb)` points of a height that exists in the field, with the degree
+bound `2 ^ k` of a blowup of `2 ^ lb`, the strict margin holds as soon as
+`1 + 2 ^ (-lb) < 2 * θ`. The condition does not mention `k`. -/
+theorem strictMargin_coset {k lb : ℕ} {θ : ℝ} (hh : k + lb ≤ TwoAdicOps.twoAdicity (F := F))
+    (hθ : 1 + (1 / 2 : ℝ) ^ lb < 2 * θ) : StrictMargin (M.coset (k + lb)) (2 ^ k) θ := by
+  have hpos : (0 : ℝ) < 2 ^ (k + lb) := by positivity
+  have hk : (1 / 2 : ℝ) ^ lb * 2 ^ (k + lb) = 2 ^ k := by
+    rw [pow_add, one_div, inv_pow]
+    field_simp
+  have hmul := mul_lt_mul_of_pos_right hθ hpos
+  rw [add_mul, one_mul, hk] at hmul
+  unfold StrictMargin
+  rw [M.card_coset hh]
+  push_cast
+  linarith
 
 /-- The points of a coset are in the base field. -/
 private theorem mem_baseSubfield_of_mem_coset {h : ℕ} {x : K} (hx : x ∈ M.coset h) :
@@ -189,19 +225,20 @@ bound, the decoded polynomial of a column of base-field rows has base-field
 coefficients. -/
 theorem coeff_colPoly_mem_base (lb : ℕ) {θ : ℝ} (com : Compiled.Committed K D) (root : D)
     (dims : Array Dimensions) (mi col : ℕ) {h : ℕ} (hh : h ≤ TwoAdicOps.twoAdicity (F := F))
-    (hθ : ((2 ^ (h - lb) + 2 : ℕ) : ℝ) ≤ θ * 2 ^ h) (n : ℕ) :
+    (hθ : ((2 ^ (h - lb) : ℕ) : ℝ) < θ * 2 ^ h) (n : ℕ) :
     (M.colPoly lb θ (M.baseRows com) root dims mi col h).coeff n ∈ Set.range M.base.toModel := by
   rw [← mem_baseSubfield]
-  unfold colPoly decode
+  unfold colPoly decodeT
   split
   · next hex =>
     obtain ⟨hdeg, B, hB, hcard, hf⟩ := Classical.choose_spec hex
     refine coeff_mem_of_eval_mem M.baseSubfield (s := B) ?_
       (fun x hx => M.mem_baseSubfield_of_mem_coset (hB hx)) (fun x hx => ?_) n
     · rw [M.card_coset hh] at hcard
-      have hle : ((2 ^ (h - lb) + 1 : ℕ) : ℝ) ≤ (B.card : ℝ) := by
+      have hlt : ((2 ^ (h - lb) : ℕ) : ℝ) < (B.card : ℝ) := by
         push_cast at hθ hcard ⊢
         linarith
+      have hle : 2 ^ (h - lb) + 1 ≤ B.card := Nat.cast_lt.mp hlt
       exact hdeg.trans_le (by exact_mod_cast hle)
     · rw [← hf x hx]
       exact M.colWord_baseRows_mem com root dims mi col h x
@@ -292,32 +329,6 @@ private theorem exists_matrix_of_mem_claimRefs {lb : ℕ} {c : ClaimRef}
   exact ⟨ms, List.mem_flatten.mpr ⟨mats, List.mem_of_getElem? hmats, List.mem_of_getElem? hms⟩,
     hh.trans hph⟩
 
-/-- The margin of unique decoding at a level of the opening protocol that has a
-claim, from the margin at the heights of the matrices of the shape. -/
-private theorem decodeMargin_level {θ : ℝ}
-    (hfinal : params.logFinalHeight ≤ logMaxHeight params.logBlowup shape)
-    (hmargin : ∀ m ∈ shape.flatten,
-      DecodeMargin (M.coset (m.logDegree + params.logBlowup)) (2 ^ m.logDegree) θ)
-    {j : ℕ} (hj : j ≤ numRounds params shape)
-    (hne : (modelParams M.toFieldModel params shape (M.wellFormed params shape hshape)).numClaims
-      j ≠ 0) :
-    DecodeMargin
-      (((modelParams M.toFieldModel params shape (M.wellFormed params shape hshape)).ldt.domain
-        j).image
-          ((modelParams M.toFieldModel params shape (M.wellFormed params shape hshape)).shift * ·))
-      ((modelParams M.toFieldModel params shape (M.wellFormed params shape hshape)).ldt.degree j)
-      θ := by
-  have hmem := List.get_mem
-    (levelClaims params.logBlowup shape (logMaxHeight params.logBlowup shape) j)
-    ⟨0, Nat.pos_of_ne_zero hne⟩
-  obtain ⟨ms, hms, hc⟩ :=
-    exists_matrix_of_mem_claimRefs shape (mem_claimRefs_of_mem_levelClaims hmem)
-  have hlog := logHeight_of_mem_levelClaims hmem
-  have hn : logMaxHeight params.logBlowup shape - j = ms.logDegree + params.logBlowup := by omega
-  rw [Compiled.Params.ldt_domain, coset_eq M params shape hshape (by omega),
-    ldt_degree_eq M params shape hshape hfinal hj, hn, Nat.add_sub_cancel]
-  exact hmargin ms hms
-
 omit [DecidableEq K] in
 /-- The root of an input batch in the statement, read through `view`, is the
 commitment of the batch. -/
@@ -369,17 +380,20 @@ private theorem value_firstMessage (commitments : Array D) (points values : Arra
 
 /-- **Claims that do not fail are evaluations of the decoded polynomials.** Let
 the statement of an opening have one opening point per point of the shape, and
-no column shorter than the final height; let the margin of unique decoding hold
-at the height of every column of the shape. If the claims, read from the
-committed rows `com`, do not fail at agreement `θ`, then for every claim of the
-shape the claimed value is the value, at the opening point of the claim, of the
-polynomial its column decodes to. -/
+no column shorter than the final height; let the strict margin of unique
+decoding hold at the height of every column of the shape, and let no opening
+point lie in the coset of a column it is claimed for. If the claims, read from
+the committed rows `com`, do not fail at agreement `θ`, then for every claim of
+the shape the claimed value is the value, at the opening point of the claim, of
+the polynomial its column decodes to. -/
 theorem eval_colPoly_of_not_claimsFail {θ : ℝ} (commitments : Array D) (points values : Array EF)
     (com : Compiled.Committed K D)
     (hpoints : points.size = (pointRefs params.logBlowup shape).length)
     (hfinal : ∀ m ∈ shape.flatten, params.logFinalHeight ≤ m.logDegree + params.logBlowup)
     (hmargin : ∀ m ∈ shape.flatten,
-      DecodeMargin (M.coset (m.logDegree + params.logBlowup)) (2 ^ m.logDegree) θ)
+      StrictMargin (M.coset (m.logDegree + params.logBlowup)) (2 ^ m.logDegree) θ)
+    (hoff : ∀ c ∈ claimRefs params.logBlowup shape,
+      M.ext.toModel (points.getD c.pointIdx 0) ∉ M.coset c.logHeight)
     (h : ¬ PcsRbr.ClaimsFail
       (modelParams M.toFieldModel params shape (M.wellFormed params shape hshape)).ldt
       (modelParams M.toFieldModel params shape (M.wellFormed params shape hshape)).shift θ
@@ -405,13 +419,30 @@ theorem eval_colPoly_of_not_claimsFail {θ : ℝ} (commitments : Array D) (point
   have hmem : c ∈ levelClaims params.logBlowup shape (logMaxHeight params.logBlowup shape) j :=
     List.mem_filter.mpr ⟨hc, beq_iff_eq.mpr hlog⟩
   obtain ⟨k, rfl⟩ := List.mem_iff_get.mp hmem
-  have hext := extracts_of_not_claimsFail
-    (fun j hj hne => decodeMargin_level M params shape hshape hheight hmargin hj hne) h j hj k
+  have hhold : PcsRbr.ClaimsHoldOff
+      (((modelParams M.toFieldModel params shape (M.wellFormed params shape hshape)).ldt.domain
+        j).image
+          ((modelParams M.toFieldModel params shape (M.wellFormed params shape hshape)).shift * ·))
+      ((modelParams M.toFieldModel params shape (M.wellFormed params shape hshape)).ldt.degree j)
+      θ
+      ((modelParams M.toFieldModel params shape (M.wellFormed params shape hshape)).claims
+        (view M.toFieldModel params shape (firstMessage commitments points values)) com j) :=
+    not_not.mp fun hn => h ⟨j, hj, hn⟩
   have hword := claims_f_eq_colWord M params shape hshape
     (view M.toFieldModel params shape (firstMessage commitments points values)) com hjn k
   rw [inputRoots_firstMessage M params shape hshape, hn] at hword
   rw [Compiled.Params.ldt_domain, coset_eq M params shape hshape hjn,
-    ldt_degree_eq M params shape hshape hheight hj, hn, hword] at hext
+    ldt_degree_eq M params shape hshape hheight hj, hn] at hhold
+  have hm : StrictMargin (M.coset ((levelClaims params.logBlowup shape
+      (logMaxHeight params.logBlowup shape) j).get k).logHeight)
+      (2 ^ (((levelClaims params.logBlowup shape
+        (logMaxHeight params.logBlowup shape) j).get k).logHeight - params.logBlowup)) θ := by
+    rw [hcms, Nat.add_sub_cancel]
+    exact hmargin ms hms
+  have hz := hoff _ hc
+  rw [← point_firstMessage M params shape commitments points values hpoints hj k] at hz
+  have hext := eval_decodeT_of_claimsHoldOff hm hhold k hz
+  rw [hword] at hext
   rw [← point_firstMessage M params shape commitments points values hpoints hj k,
     ← value_firstMessage M params shape commitments points values hpoints hj k]
   exact hext

@@ -42,19 +42,20 @@ decodes to, provided it is within the size bounds (`PreOk`):
 * from round `3`, for the shard of the chain, provided its shape is supported
   (`Supported`): if some constraint fails on some row (`ConstraintFail`), then
   after round `3` the folded constraints fail on some row (`AlphaFail`), and
-  from round `4` the check at `ζ` fails (`ZetaFail`) and, from round `5`,
-  either the executable checks do not pass on any opened values with the
-  absorbed flattening (`Check`), or the opening protocol is in its doomed
-  state.
+  from round `4` the check at `ζ` fails (`ZetaFail`) and `ζ` is off the cosets
+  of the shard (`OffCosets`: no opening point lies in the coset of a column it
+  is claimed for) and, from round `5`, either the executable checks do not pass
+  on any opened values with the absorbed flattening (`Check`), or the opening
+  protocol is in its doomed state.
 
 ## Results
 
 * `sdoomed_nil`: the empty transcript is doomed.
 * `rbrSound_sdoomed`: round-by-round soundness, with the errors `roundErr`:
   `2 * itemBound / |K|` for `β`, `2 * itemBound * lenBound / |K|` for `γ`,
-  `(constraintBound - 1) / |K|` for `α`, `zetaBound / |K|` for `ζ`, and a
-  bound `εpcs` on the errors of the opening protocol for every supported
-  shape.
+  `(constraintBound - 1) / |K|` for `α`, `(zetaBound + cosetBound) / |K|` for
+  `ζ`, and a bound `εpcs` on the errors of the opening protocol for every
+  supported shape.
 * `balance_of_sdoomedL`: in a doomed transcript of at least two rounds, if the
   lookup messages are not balanced then `balPoly` does not vanish at the
   challenges.
@@ -67,8 +68,10 @@ decodes to, provided it is within the size bounds (`PreOk`):
 By the number of rounds of the transcript. Rounds `0` and `1` are the two
 lookup challenges (`fractionLE_balPoly_beta`, `fractionLE_balPoly_gamma`),
 round `2` is the constraint challenge (`fractionLE_alphaFail`), round `3` the
-out-of-domain point (`fractionLE_zetaFail`). A later round is a round of the
-opening protocol, whose challenge is read off the uniform answer
+out-of-domain point: a `ζ` leaves the state when the check at `ζ` passes
+(`fractionLE_zetaFail`, at most `zetaBound` points) or `ζ` is not off the
+cosets (`fractionLE_offCosets`, at most `cosetBound` points). A later round is
+a round of the opening protocol, whose challenge is read off the uniform answer
 (`fractionLE_pcsChal`), or it comes after the last round of the opening
 protocol and changes nothing. A new round changes what a chain says about its
 shard only where the new message or the new challenge is read. The commitment
@@ -82,10 +85,15 @@ the fixed and the lookup traces, so they are the same before and after.
   shape is a hypothesis (`hpcs`); it is proved elsewhere from the proximity
   results.
 * `Supported`: the first domain of the opening exists in the field, no
-  committed column is shorter than the final height, and the margin of unique
-  decoding holds at the height of every committed matrix. Chains about a shard
-  of another shape are doomed by definition: the theorems say nothing about
-  them.
+  committed column is shorter than the final height, and the strict margin of
+  unique decoding (`StrictMargin`, `|D| + d < 2 * θ * |D|`) holds at the height
+  of every committed matrix. The margin does not depend on the height: it
+  follows from `1 + 2 ^ (-logBlowup) < 2 * θ` (`strictMargin_coset`). Chains
+  about a shard of another shape are doomed by definition: the theorems say
+  nothing about them.
+* That `ζ` is off the cosets is not assumed and not checked by the verifier: it
+  is part of the state from round `4`, and the `ζ` for which it fails are
+  counted in the error of round `3`.
 * `PreOk`: the size bounds `Bounds` on the numbers of shards, claims and
   messages and on their lengths. They enter the errors of the lookup
   challenges.
@@ -132,18 +140,18 @@ def ShardView.shape (v : ShardView F EF D K) : ClaimShape :=
   starkShape sys M.extData.d v.hdr.active v.hdr.logDegrees
 
 /-- The shape of a shard is supported: its first domain exists in the field,
-no committed column is shorter than the final height, the margin of unique
-decoding holds at the height of every committed matrix, its header has one
-activation bit per circuit, and its first domain is no larger than the largest
-trace the system supports, times the blowup. -/
+no committed column is shorter than the final height, the strict margin of
+unique decoding holds at the height of every committed matrix, its header has
+one activation bit per circuit, and its first domain is no larger than the
+largest trace the system supports, times the blowup. -/
 structure Supported (v : ShardView F EF D K) : Prop where
   /-- The first domain exists in the field. -/
   two : logMaxHeight sys.fri.logBlowup (v.shape M sys) ≤ TwoAdicOps.twoAdicity (F := F)
   /-- No committed column is shorter than the final height. -/
   final : ∀ m ∈ (v.shape M sys).flatten, sys.fri.logFinalHeight ≤ m.logDegree + sys.fri.logBlowup
-  /-- The margin of unique decoding. -/
+  /-- The strict margin of unique decoding. -/
   margin : ∀ m ∈ (v.shape M sys).flatten,
-    DecodeMargin (M.coset (m.logDegree + sys.fri.logBlowup)) (2 ^ m.logDegree) θ
+    StrictMargin (M.coset (m.logDegree + sys.fri.logBlowup)) (2 ^ m.logDegree) θ
   /-- The header has one activation bit per circuit. -/
   active : v.hdr.active.size = sys.circuits.size
   /-- The first domain is no larger than the largest the system supports. -/
@@ -178,6 +186,11 @@ shard. -/
 def ShardView.ZFail (v : ShardView F EF D K) (com : Compiled.Committed K D) : Prop :=
   ZetaFail M sys θ com v.hdr.active v.hdr.logDegrees v.hdr.stage1Commit v.stage2 v.quot
     v.β v.γ (M.ext.toModel v.acc0) (v.accs.map M.ext.toModel) v.α v.ζ
+
+/-- The out-of-domain point of the shard is off its cosets: no opening point
+of the shard lies in the coset of a column it is claimed for. -/
+def ShardView.Off (v : ShardView F EF D K) : Prop :=
+  OffCosets M sys v.hdr.active v.hdr.logDegrees v.ζ
 
 /-- The commitments of the opening claims of a shard: the main traces, the
 lookup traces, the quotients, and the fixed traces if the system has any. -/
@@ -442,7 +455,7 @@ three rounds. -/
 def shardDoomed {v : ShardView F EF D K} (hs : Supported M sys θ v) : Prop :=
   v.CFail M sys θ (M.baseRows (comOf sys v msgs)) →
     (msgs.length = 3 → v.AFail M sys θ (M.baseRows (comOf sys v msgs))) ∧
-    (4 ≤ msgs.length → v.ZFail M sys θ (M.baseRows (comOf sys v msgs)) ∧
+    (4 ≤ msgs.length → (v.ZFail M sys θ (M.baseRows (comOf sys v msgs)) ∧ v.Off M sys) ∧
       (5 ≤ msgs.length → v.Check M sys (valuesOf msgs) → PcsDoomed msgs chals hs))
 
 variable (M sys θ)
@@ -471,12 +484,13 @@ def sdoomed (i : ℕ) (t : Transcript (IMsg F EF D K) (UChal K slots width) i) :
   sdoomedL M sys V θ B t.msgs (chalsOf t)
 
 /-- The error of each round: the two lookup challenges, the constraint
-challenge, the out-of-domain point, and the rounds of the opening protocol. -/
+challenge, the out-of-domain point (the check at the point passes, or the point
+is not off the cosets), and the rounds of the opening protocol. -/
 noncomputable def roundErr [Fintype K] (εpcs : ℝ) (i : ℕ) : ℝ :=
   if i = 0 then (2 * itemBound sys B : ℕ) / Fintype.card K
   else if i = 1 then (2 * itemBound sys B * lenBound sys B : ℕ) / Fintype.card K
   else if i = 2 then (constraintBound sys M.extData.d - 1 : ℕ) / Fintype.card K
-  else if i = 3 then zetaBound sys / Fintype.card K
+  else if i = 3 then ((zetaBound sys + cosetBound sys : ℕ) : ℝ) / Fintype.card K
   else εpcs
 
 variable {M sys V θ B msgs chals}
@@ -631,25 +645,25 @@ private theorem shardDoomed_three {v : ShardView F EF D K} {hs : Supported M sys
     fun h hcf => ⟨fun _ => h hcf, fun h4 => absurd h4 (by omega)⟩⟩
 
 /-- With four rounds, the shard is doomed when a failing constraint makes the
-check at the out-of-domain point fail. -/
+check at the out-of-domain point fail, at a point off the cosets. -/
 private theorem shardDoomed_four {v : ShardView F EF D K} {hs : Supported M sys θ v}
     (hm : msgs.length = 4) :
     shardDoomed msgs chals hs ↔
       (v.CFail M sys θ (M.baseRows (comOf sys v msgs)) →
-        v.ZFail M sys θ (M.baseRows (comOf sys v msgs))) := by
+        v.ZFail M sys θ (M.baseRows (comOf sys v msgs)) ∧ v.Off M sys) := by
   unfold shardDoomed
   exact ⟨fun h hcf => ((h hcf).2 (by omega)).1,
     fun h hcf => ⟨fun h3 => absurd h3 (by omega),
       fun _ => ⟨h hcf, fun h5 => absurd h5 (by omega)⟩⟩⟩
 
 /-- From five rounds on, the shard is doomed when a failing constraint makes
-the check at the out-of-domain point fail and, if the executable checks pass,
-dooms the opening protocol. -/
+the check at the out-of-domain point fail, at a point off the cosets, and, if
+the executable checks pass, dooms the opening protocol. -/
 private theorem shardDoomed_of_five_le {v : ShardView F EF D K} {hs : Supported M sys θ v}
     (hm : 5 ≤ msgs.length) :
     shardDoomed msgs chals hs ↔
       (v.CFail M sys θ (M.baseRows (comOf sys v msgs)) →
-        v.ZFail M sys θ (M.baseRows (comOf sys v msgs)) ∧
+        (v.ZFail M sys θ (M.baseRows (comOf sys v msgs)) ∧ v.Off M sys) ∧
           (v.Check M sys (valuesOf msgs) → PcsDoomed msgs chals hs)) := by
   unfold shardDoomed
   exact ⟨fun h hcf => ⟨((h hcf).2 (by omega)).1, ((h hcf).2 (by omega)).2 hm⟩,
@@ -805,9 +819,10 @@ private theorem fractionLE_alpha_round [Fintype K] {v : ShardView F EF D K}
     exact (shardDoomed_three hm).mpr fun hcf => absurd hcf hCF
 
 /-- **The out-of-domain point.** From a doomed shard with three rounds and any
-message, for all but a fraction `zetaBound / |K|` of the challenges the shard
-is doomed, for the view with the new commitment to the quotients whose
-out-of-domain point is the challenge. -/
+message, for all but a fraction `(zetaBound + cosetBound) / |K|` of the
+challenges the shard is doomed, for the view with the new commitment to the
+quotients whose out-of-domain point is the challenge. A challenge leaves the
+state when the check at the point passes or the point is not off the cosets. -/
 private theorem fractionLE_zeta_round [Fintype K]
     (htwo : sys.maxLogDegree ≤ TwoAdicOps.twoAdicity (F := F)) {v : ShardView F EF D K}
     (hact : v.hdr.active.size ≤ sys.circuits.size)
@@ -817,9 +832,9 @@ private theorem fractionLE_zeta_round [Fintype K]
       (fun c : UAns K slots width =>
         ¬ ∀ hs : Supported M sys θ { v with quot := q, ζ := c.field },
           shardDoomed (msgs ++ [m]) (chals ++ [c]) hs)
-      (zetaBound sys / Fintype.card K) := by
+      (((zetaBound sys + cosetBound sys : ℕ) : ℝ) / Fintype.card K) := by
   have hnone : FractionLE (fun _ : UAns K slots width => False)
-      (zetaBound sys / Fintype.card K) :=
+      (((zetaBound sys + cosetBound sys : ℕ) : ℝ) / Fintype.card K) :=
     FractionLE.false.mono_right (by positivity)
   have hlen : (msgs ++ [m]).length = 4 := by rw [List.length_append, hm, List.length_singleton]
   have h1 := baseRows_comOf_append M sys v (le_of_eq hm.symm) m (.inl rfl)
@@ -838,9 +853,13 @@ private theorem fractionLE_zeta_round [Fintype K]
       absurd ((constraintFail_congr (quot' := v.quot) h1 h2 h3).mp hcf) hCF
   have hAF := (alphaFail_congr (quot := q) (quot' := v.quot) h1 h2 h3).mpr
     ((shardDoomed_three hm).mp (hd hsup) hCF)
-  refine (fractionLE_field (fractionLE_zetaFail hact hdeg htwo hAF)).mono_left
-    fun c hc hZF => hc fun hs => ?_
-  exact (shardDoomed_four hlen).mpr fun _ => hZF
+  refine ((fractionLE_field ((fractionLE_zetaFail hact hdeg htwo hAF).or
+    (fractionLE_offCosets hsup.active hsup.height hsup.two))).mono_left
+    fun c hc => ?_).mono_right (le_of_eq ?_)
+  · by_contra hno
+    rw [not_or, not_not, not_not] at hno
+    exact hc fun hs => (shardDoomed_four hlen).mpr fun _ => hno
+  · rw [Nat.cast_add, add_div]
 
 /-- **The rounds of the opening protocol.** From a doomed shard with at least
 four rounds and any message, for all but a fraction `εpcs` of the challenges
@@ -871,7 +890,7 @@ private theorem fractionLE_pcs_round [Fintype K] {εpcs : ℝ} (hεpcs : 0 ≤ �
     rw [hcom] at hcf
     exact absurd hcf hCF
   obtain ⟨hZF, hP⟩ := (hd hCF).2 hm
-  have hZF' : v.ZFail M sys θ (M.baseRows (comOf sys v (msgs ++ [m]))) := by
+  have hZF' : v.ZFail M sys θ (M.baseRows (comOf sys v (msgs ++ [m]))) ∧ v.Off M sys := by
     rw [hcom]
     exact hZF
   by_cases hCk : v.Check M sys (valuesOf (msgs ++ [m]))
@@ -1031,11 +1050,12 @@ private theorem map_commitment_openingClaims (v : ShardView F EF D K)
 /-- **Passing checks and a failing check at `ζ` make the claims of round `0`
 fail.** If the executable checks pass on the opened values a chain absorbed
 although the check at the out-of-domain point fails for the polynomials the
-committed columns decode to, then the claims of the message of round `0` of the
-opening protocol, read off the chain, fail. -/
+committed columns decode to, and the point is off the cosets of the shard, then
+the claims of the message of round `0` of the opening protocol, read off the
+chain, fail. -/
 private theorem claimsFail_pcsMsg (hfixed : sys.FixedOk) {v : ShardView F EF D K}
     (hs : Supported M sys θ v) (hcheck : v.Check M sys (valuesOf msgs))
-    (hZF : v.ZFail M sys θ (M.baseRows (comOf sys v msgs))) :
+    (hZF : v.ZFail M sys θ (M.baseRows (comOf sys v msgs))) (hoff : v.Off M sys) :
     ClaimsFail hs.params.ldt hs.params.shift θ (pcsMsg msgs hs 0).claims := by
   obtain ⟨proof, hact, hst1, hst2, hq, haccs, hlog, hshape, hvals, hcons, hzeta⟩ := hcheck
   have hrep : ∀ x : K, M.ext.toModel (rep M x) = x := fun x => Function.surjInv_eq M.surj x
@@ -1064,9 +1084,12 @@ private theorem claimsFail_pcsMsg (hfixed : sys.FixedOk) {v : ShardView F EF D K
     rw [hact, hlog, hst1, hst2, hq, haccs]
     simp only [hrep]
     exact hZF
+  have hoff' : OffCosets M sys proof.active proof.logDegrees (M.ext.toModel (rep M v.ζ)) := by
+    rw [hact, hlog, hrep]
+    exact hoff
   have hcf := claimsFail_of_zetaFail hfixed proof hshape (rep M v.β) (rep M v.γ) v.acc0
     (rep M v.α) (rep M v.ζ) hcons hzeta (by rw [heq]; exact hs.two)
-    (by rw [heq]; exact hs.final) (by rw [heq]; exact hs.margin) hZF'
+    (by rw [heq]; exact hs.final) (by rw [heq]; exact hs.margin) hoff' hZF'
   rw [map_commitment_openingClaims v proof _ hst1 hst2 hq,
     claimPoints_openingClaims sys proof hshape, ← M.degree_eq, hvals] at hcf
   exact key _ (by rw [heq]; exact hs.two) heq hcf
@@ -1093,7 +1116,7 @@ theorem good_of_sdoomedL (hfixed : sys.FixedOk) (hd : sdoomedL M sys V θ B msgs
   have hfail : ClaimsFail hs.params.ldt hs.params.shift θ
       (claimsOf (ungrind (pcsT msgs chals hs (hs.params.rounds + 2)))) := by
     rw [claimsOf_ungrind_pcsT hs (hs.params.rounds + 1)]
-    exact claimsFail_pcsMsg hfixed hs hcheck hZF
+    exact claimsFail_pcsMsg hfixed hs hcheck hZF.1 hZF.2
   exact not_grindDoomed_of_accepts _ hpow hfail hacc hgd
 
 end State

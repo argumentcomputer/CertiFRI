@@ -331,15 +331,16 @@ private theorem lookupsBalanced_of_goodLog (hplain : ∀ c ∈ sys.circuits, c.L
     (h2 : (2 : K) ≠ 0) (hfixed : sys.FixedOk) (hshards : 1 ≤ B.shards) {N : ℕ}
     (hN : BoundsLE sys B N)
     (hcast : ∀ a b : ℕ, a ≤ N → b ≤ N → (a : K) = (b : K) → a = b)
+    (hθ : 1 + (1 / 2 : ℝ) ^ sys.fri.logBlowup < 2 * θ)
     {l : Log (SAns F EF D K slots width)}
     (hgood : GoodLog M sys (singleVariant sys B) θ B (maxRounds F) l)
     {f : ∀ x, SAns F EF D K slots width x} (hf : ∀ x y, l.dlookup x = some y → f x = y)
     (a : SAttempt F EF D) {l₀ : Log (SAns F EF D K slots width)} {b : Bool}
     (hout : Outcome (shardComp M sys a.proof (firstMessage sys a.proof a.claims) []) l₀ b l)
-    (hacc : verifyAccepts M sys f a = true) (hcov : Covered M sys θ B a) :
+    (hacc : verifyAccepts M sys f a = true) (hcov : Covered M sys B a) :
     LookupsBalanced M sys θ B l a := by
   obtain ⟨hviol, hbal⟩ :=
-    verify_good M sys θ B hfixed hshards hN hcast hgood hf a hout hacc hcov
+    verify_good M sys θ B hfixed hshards hN hcast hθ hgood hf a hout hacc hcov
   by_contra hnb
   obtain ⟨hne, hsum⟩ := of_eval_balPoly_ne_zero (hbal hnb)
   simp only [verifyAccepts, Stark.verify, Bool.and_eq_true] at hacc
@@ -372,12 +373,14 @@ private theorem lookupsBalanced_of_goodLog (hplain : ∀ c ∈ sys.circuits, c.L
 lookups are plain (its zeros may read anything) over a field of characteristic
 not two, the probability that some answer function that agrees with the final
 log makes `Stark.verify` accept a covered attempt whose lookup messages are not
-balanced is at most the bound of `soundness_verify`. -/
+balanced is at most the bound of `soundness_verify`, for an agreement `θ`
+inside the unique-decoding radius (`hθ`). -/
 theorem soundness_verify_lookups [Fintype K] [Fintype D]
     (hplain : ∀ c ∈ sys.circuits, c.LookupsPlain)
     (h2 : (2 : K) ≠ 0) (hfixed : sys.FixedOk) (hshards : 1 ≤ B.shards) {N : ℕ}
     (hN : BoundsLE sys B N)
-    (hcast : ∀ a b : ℕ, a ≤ N → b ≤ N → (a : K) = (b : K) → a = b) {εpcs εmax : ℝ}
+    (hcast : ∀ a b : ℕ, a ≤ N → b ≤ N → (a : K) = (b : K) → a = b)
+    (hθ : 1 + (1 / 2 : ℝ) ^ sys.fri.logBlowup < 2 * θ) {εpcs εmax : ℝ}
     (hεpcs : 0 ≤ εpcs) (htwo : sys.maxLogDegree ≤ TwoAdicOps.twoAdicity (F := F))
     (hslots : sys.fri.numQueries + 1 ≤ slots) (hcommit : sys.fri.commitPowBits ≤ width)
     (hquery : sys.fri.queryPowBits ≤ width)
@@ -393,7 +396,7 @@ theorem soundness_verify_lookups [Fintype K] [Fintype D]
     (attempt : A → SAttempt F EF D) :
     prob (fun out l => ∃ f : ∀ x, SAns F EF D K slots width x,
         (∀ x y, l.dlookup x = some y → f x = y) ∧
-          verifyAccepts M sys f (attempt out.1) = true ∧ Covered M sys θ B (attempt out.1) ∧
+          verifyAccepts M sys f (attempt out.1) = true ∧ Covered M sys B (attempt out.1) ∧
           ¬ LookupsBalanced M sys θ B l (attempt out.1))
       (experiment M sys adv attempt) [] ≤
       (Q + shardQueries sys (TwoAdicOps.twoAdicity (F := F)) : ℕ) * εmax +
@@ -409,7 +412,7 @@ theorem soundness_verify_lookups [Fintype K] [Fintype D]
   obtain ⟨a, l₀, -, hout⟩ := outcome_bind.mp hout
   obtain ⟨b, l₁, hcomp, hpure⟩ := outcome_bind.mp hout
   obtain ⟨rfl, rfl⟩ := hpure
-  exact hnb (lookupsBalanced_of_goodLog M sys θ B hplain h2 hfixed hshards hN hcast hgood hf
+  exact hnb (lookupsBalanced_of_goodLog M sys θ B hplain h2 hfixed hshards hN hcast hθ hgood hf
     (attempt a) hcomp hacc hcov)
 
 /-! ## A batch -/
@@ -483,13 +486,14 @@ private theorem batchLookupsBalanced_of_goodLog
     (hplain : ∀ c ∈ sys.circuits, c.LookupsPlain)
     (h2 : (2 : K) ≠ 0) (hfixed : sys.FixedOk) {N : ℕ} (hN : BoundsLE sys B N)
     (hcast : ∀ a b : ℕ, a ≤ N → b ≤ N → (a : K) = (b : K) → a = b)
+    (hθ : 1 + (1 / 2 : ℝ) ^ sys.fri.logBlowup < 2 * θ)
     {l : Log (SAns F EF D K slots width)}
     (hgood : GoodLog M sys (batchVariant sys B N) θ B (maxRounds F) l)
     {f : ∀ x, SAns F EF D K slots width x} (hf : ∀ x y, l.dlookup x = some y → f x = y)
     (a : BAttempt F EF D) {l₀ : Log (SAns F EF D K slots width)} {b : Bool}
     (hout : Outcome (shardsComp M sys (batchFirstMessage sys a.preamble)
       (a.proofs.toList.take B.shards) 0) l₀ b l)
-    (hacc : batchAccepts M sys f a = true) (hcov : BatchCovered M sys θ B a) :
+    (hacc : batchAccepts M sys f a = true) (hcov : BatchCovered M sys B a) :
     BatchLookupsBalanced M sys θ B l a := by
   by_contra hnb
   obtain ⟨hsz, hall⟩ := shardOk_of_batchAccepts M sys hacc
@@ -497,7 +501,7 @@ private theorem batchLookupsBalanced_of_goodLog
   have hshardGood := fun {i : ℕ} {hdr : ShardHeader F D}
       {proof : Proof F EF D (Array (List D)) (Array (List D))}
       (hhdr : a.preamble.headers[i]? = some hdr) (hproof : a.proofs[i]? = some proof) =>
-    verifyBatch_good M sys θ B hfixed hN hcast hgood hf a hout hacc hcov hhdr hproof
+    verifyBatch_good M sys θ B hfixed hN hcast hθ hgood hf a hout hacc hcov hhdr hproof
   -- There is a shard: its chain gives the clause on the lookup challenges.
   have h0 : 0 < a.preamble.headers.size := Nat.pos_of_ne_zero hne0
   obtain ⟨hne, hsum⟩ := of_eval_balPoly_ne_zero
@@ -554,11 +558,13 @@ private theorem batchLookupsBalanced_of_goodLog
 lookups are plain (its zeros may read anything) over a field of characteristic
 not two, the probability that some answer function that agrees with the final
 log makes `Stark.verifyBatch` accept a covered batch whose lookup messages are
-not balanced is at most the bound of `soundness_verifyBatch`. -/
+not balanced is at most the bound of `soundness_verifyBatch`, for an agreement
+`θ` inside the unique-decoding radius (`hθ`). -/
 theorem soundness_verifyBatch_lookups [Fintype K] [Fintype D]
     (hplain : ∀ c ∈ sys.circuits, c.LookupsPlain) (h2 : (2 : K) ≠ 0) (hfixed : sys.FixedOk) {N : ℕ}
     (hN : BoundsLE sys B N)
-    (hcast : ∀ a b : ℕ, a ≤ N → b ≤ N → (a : K) = (b : K) → a = b) {εpcs εmax : ℝ}
+    (hcast : ∀ a b : ℕ, a ≤ N → b ≤ N → (a : K) = (b : K) → a = b)
+    (hθ : 1 + (1 / 2 : ℝ) ^ sys.fri.logBlowup < 2 * θ) {εpcs εmax : ℝ}
     (hεpcs : 0 ≤ εpcs) (htwo : sys.maxLogDegree ≤ TwoAdicOps.twoAdicity (F := F))
     (hslots : sys.fri.numQueries + 1 ≤ slots) (hcommit : sys.fri.commitPowBits ≤ width)
     (hquery : sys.fri.queryPowBits ≤ width)
@@ -574,7 +580,7 @@ theorem soundness_verifyBatch_lookups [Fintype K] [Fintype D]
     (attempt : A → BAttempt F EF D) :
     prob (fun out l => ∃ f : ∀ x, SAns F EF D K slots width x,
         (∀ x y, l.dlookup x = some y → f x = y) ∧
-          batchAccepts M sys f (attempt out.1) = true ∧ BatchCovered M sys θ B (attempt out.1) ∧
+          batchAccepts M sys f (attempt out.1) = true ∧ BatchCovered M sys B (attempt out.1) ∧
           ¬ BatchLookupsBalanced M sys θ B l (attempt out.1))
       (batchExperiment M sys B adv attempt) [] ≤
       (Q + B.shards * shardQueries sys (TwoAdicOps.twoAdicity (F := F)) : ℕ) * εmax +
@@ -590,7 +596,7 @@ theorem soundness_verifyBatch_lookups [Fintype K] [Fintype D]
   obtain ⟨a, l₀, -, hout⟩ := outcome_bind.mp hout
   obtain ⟨b, l₁, hcomp, hpure⟩ := outcome_bind.mp hout
   obtain ⟨rfl, rfl⟩ := hpure
-  exact hnb (batchLookupsBalanced_of_goodLog M sys θ B hplain h2 hfixed hN hcast hgood hf
+  exact hnb (batchLookupsBalanced_of_goodLog M sys θ B hplain h2 hfixed hN hcast hθ hgood hf
     (attempt a) hcomp hacc hcov)
 
 end CertiFri.Exec.Stark

@@ -39,9 +39,9 @@ zero-knowledge.
   `Exec.Stark.soundness_verifyBatch_ud`): except with small probability, an
   accepted proof has committed columns that decode to base-field traces which
   satisfy every constraint on every row, and whose lookup messages are
-  balanced. The theorems cover proofs within stated size bounds whose traces
-  are tall enough for unique decoding, and they assume laws of the field
-  implementation that are not proved for Goldilocks here; see
+  balanced. The theorems cover proofs of every trace height within stated size
+  bounds, and they assume laws of the field implementation that are not proved
+  for Goldilocks here; see
   [What is proved about it](#what-is-proved-about-it).
 
 ## The verifier
@@ -260,7 +260,7 @@ challenge queries of the Fiat–Shamir chains and the hash queries of the Merkle
 trees.
 
 **Soundness** (`soundness_verify_ud`, `soundness_verifyBatch_ud` in
-`Unconditional.lean`). Let `δ ≥ 0` with `2 * δ + 2 ^ (-logBlowup) ≤ 1`. The
+`Unconditional.lean`). Let `δ ≥ 0` with `2 * δ + 2 ^ (-logBlowup) < 1`. The
 probability of the following event is at most
 `N * starkErr + ((S + 1) * r + 3) * N * (N - 1) / (2 * |D|)`: some answer
 function that agrees with the final log makes the verifier accept a *covered*
@@ -279,7 +279,7 @@ number of digests. `starkErr` is the largest error of a round:
 | lookup challenge `β` | `2 * itemBound / \|K\|` |
 | lookup challenge `γ` | `2 * itemBound * lenBound / \|K\|` |
 | constraint challenge `α` | `(constraintBound - 1) / \|K\|` |
-| out-of-domain point `ζ` | `zetaBound / \|K\|` |
+| out-of-domain point `ζ` | `(zetaBound + cosetBound) / \|K\|` |
 | opening proof, batching | `valueBound * c / \|K\|` |
 | opening proof, each folding round | `2 * c / \|K\| / 2 ^ commitPowBits` |
 | opening proof, queries | `(1 - δ) ^ numQueries / 2 ^ queryPowBits` |
@@ -287,8 +287,16 @@ number of digests. `starkErr` is the largest error of a round:
 Here `c = 2 ^ n * (δ * 2 ^ n + 1) + 1` with `n = maxLogDegree + logBlowup`;
 `itemBound` bounds the number of lookup messages and `lenBound` their length,
 `constraintBound` is the largest number of constraint values of a circuit,
-`zetaBound` the degree of the polynomial checked at `ζ`, and `valueBound` the
-number of opened values.
+`zetaBound` the degree of the polynomial checked at `ζ`, `cosetBound` the
+number of points `ζ` at which an opening point falls in a committed coset, and
+`valueBound` the number of opened values.
+
+The columns are decoded with no slack (`decodeT` in
+`Theory/PcsRbr/DecodeTight.lean`): inside the unique-decoding radius, which is
+what `2 * δ + 2 ^ (-logBlowup) < 1` says, a word has at most one polynomial at
+agreement `1 - δ`, whatever the height of the trace. The opening proof only
+guarantees agreement away from an opening point that lies in the committed
+coset; the `cosetBound` term pays for the points `ζ` where that can happen.
 
 **What the conclusion means** (`Meaning.lean`, `Lookups.lean`,
 `Theory/Stark/BalanceInt.lean`).
@@ -337,13 +345,12 @@ bound (`PcsSound.lean`); the refinement of the executable checks
   - the numbers of shards, public claims and messages, and their lengths, are
     within bounds that enter the errors, and all sizes are below the
     characteristic;
-  - the margin of unique decoding holds at the height of every committed
-    matrix: for a trace of `2 ^ k` rows,
-    `2 * δ + 2 ^ (-logBlowup) + 3 / 2 ^ (k + logBlowup) ≤ 1`. A very short
-    trace does not meet it for a useful `δ`, so a proof with one is not
-    covered;
   - the first domain of the opening exists in the field and is no larger than
-    the largest trace the system supports, times the blowup.
+    the largest trace the system supports, times the blowup. An accepted proof
+    meets this unless a fixed trace of the system is taller than the system
+    supports.
+
+  There is no condition on the heights of the traces.
 - For the meaning of the conclusion: `Circuit.ZerosPlain` or
   `Circuit.LookupsPlain` as above, and a characteristic other than two.
 
@@ -353,8 +360,8 @@ bound (`PcsSound.lean`); the refinement of the executable checks
   and messages (ix's `validate_preamble` is not part of multi-stark and not
   modelled). "Balanced" is in the field: multiplicities are field elements, and
   two messages that differ by trailing zeros are the same message.
-- Anything about proofs that are not covered: very short traces, or more
-  shards, claims or messages than the bounds.
+- Anything about proofs that are not covered: more shards, claims or messages
+  than the bounds.
 - Completeness of the STARK verifier, which is tested on proofs made by
   multi-stark and not proved. Zero knowledge.
 - The exact degree: a decoded column has degree at most `2 ^ k`, one more than

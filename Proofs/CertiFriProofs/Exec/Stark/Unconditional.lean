@@ -9,7 +9,8 @@ soundness of the opening protocol as a hypothesis (`hpcs`).
 `Exec/Stark/PcsSound.lean` proves it at the unique-decoding radius. This file
 puts the two together: the soundness of `Stark.verify` and of
 `Stark.verifyBatch` at agreement `1 - δ`, for any `δ ≥ 0` with
-`2 * δ + (1 / 2) ^ logBlowup ≤ 1`, with an explicit error.
+`2 * δ + (1 / 2) ^ logBlowup < 1`, with an explicit error. The condition is on
+the blowup alone: proofs with traces of any supported height are covered.
 
 ## Contents
 
@@ -17,7 +18,9 @@ puts the two together: the soundness of `Stark.verify` and of
   * `2 * itemBound / |K|` and `2 * itemBound * lenBound / |K|`, for the two
     lookup challenges;
   * `(constraintBound - 1) / |K|`, for the constraint challenge;
-  * `zetaBound / |K|`, for the out-of-domain point;
+  * `(zetaBound + cosetBound) / |K|`, for the out-of-domain point: the check at
+    the point passes by chance (`zetaBound`), or the point or its successor on
+    a trace domain lies in a coset a column is committed on (`cosetBound`);
   * `pcsErr`, for the rounds of the opening protocol (batching, folding with
     its proof of work, queries with their proof of work).
 * `soundness_verify_ud`, `soundness_verifyBatch_ud`: the two soundness
@@ -31,12 +34,18 @@ puts the two together: the soundness of `Stark.verify` and of
 
 ## Assumptions
 
-Those of `soundness_verify` other than `hpcs`: the random-oracle model with the
-idealised challenger and Merkle trees over the oracle, a `StarkModel` of the
-fields, a system fixed before the adversary runs, and the conditions of
-`Covered` (size bounds, a first domain no larger than the largest trace the
-system supports times the blowup, and the margin of unique decoding at the
-height of every committed matrix).
+Those of `soundness_verify` other than `hpcs` and `hθ`: the random-oracle model
+with the idealised challenger and Merkle trees over the oracle, a `StarkModel`
+of the fields, a system fixed before the adversary runs, and the conditions of
+`Covered` (size bounds, a first domain that exists in the field, no column
+shorter than the final height, and a first domain no larger than the largest
+trace the system supports times the blowup).
+
+`hrate : 2 * δ + (1 / 2) ^ logBlowup < 1`: the distance `δ` is strictly inside
+the unique-decoding radius of a code of rate `2 ^ (-logBlowup)`. It gives the
+round-by-round soundness of the opening protocol (`rbrSound_pcs_ud`, which
+needs `≤` only) and the margin of unique decoding on the coset of every
+committed matrix, whatever its height (`strictMargin_coset`, which needs `<`).
 
 The two theorems about lookups also assume a characteristic other than two and
 that the lookups of every circuit of the system are plain
@@ -95,13 +104,13 @@ theorem starkErr_nonneg {δ : ℝ} (hδ : 0 ≤ δ) : 0 ≤ starkErr M sys B δ 
 variable {δ}
 
 /-- **Soundness of `Stark.verify`, with no hypothesis about the opening
-protocol.** For `δ ≥ 0` with `2 * δ + (1 / 2) ^ logBlowup ≤ 1`, the probability
+protocol.** For `δ ≥ 0` with `2 * δ + (1 / 2) ^ logBlowup < 1`, the probability
 that some answer function that agrees with the final log makes `Stark.verify`
 accept a covered attempt one of whose constraints fails, at agreement `1 - δ`,
 is at most `N * starkErr + ((B.shards + 1) * r + 3) * N * (N - 1) / (2 * |D|)`,
 with `N = Q + shardQueries sys twoAdicity` and `r = maxRounds F`. -/
 theorem soundness_verify_ud [Fintype D] (hδ : 0 ≤ δ)
-    (hrate : 2 * δ + (1 / 2) ^ sys.fri.logBlowup ≤ 1) (hfixed : sys.FixedOk)
+    (hrate : 2 * δ + (1 / 2) ^ sys.fri.logBlowup < 1) (hfixed : sys.FixedOk)
     (hshards : 1 ≤ B.shards) {N : ℕ} (hN : BoundsLE sys B N)
     (hcast : ∀ a b : ℕ, a ≤ N → b ≤ N → (a : K) = (b : K) → a = b)
     (htwo : sys.maxLogDegree ≤ TwoAdicOps.twoAdicity (F := F))
@@ -113,7 +122,7 @@ theorem soundness_verify_ud [Fintype D] (hδ : 0 ≤ δ)
     prob (fun out l => ∃ f : ∀ x, SAns F EF D K slots width x,
         (∀ x y, l.dlookup x = some y → f x = y) ∧
           verifyAccepts M sys f (attempt out.1) = true ∧
-          Covered M sys (1 - δ) B (attempt out.1) ∧
+          Covered M sys B (attempt out.1) ∧
           Violates M sys (1 - δ) l f (attempt out.1))
       (experiment M sys adv attempt) [] ≤
       (Q + shardQueries sys (TwoAdicOps.twoAdicity (F := F)) : ℕ) * starkErr M sys B δ +
@@ -121,20 +130,20 @@ theorem soundness_verify_ud [Fintype D] (hδ : 0 ≤ δ)
           (Q + shardQueries sys (TwoAdicOps.twoAdicity (F := F)) : ℕ) *
           ((Q + shardQueries sys (TwoAdicOps.twoAdicity (F := F)) : ℕ) - 1) /
             (2 * Fintype.card D) :=
-  soundness_verify M sys (1 - δ) B hfixed hshards hN hcast
+  soundness_verify M sys (1 - δ) B hfixed hshards hN hcast (by linarith)
     (pcsErr_nonneg (K := K) sys M.extData.d hδ) htwo hslots hcommit hquery hwidth
-    (fun v hs => rbrSound_pcs_ud M sys hδ hrate v hs.active hs)
+    (fun v hs => rbrSound_pcs_ud M sys hδ hrate.le v hs.active hs)
     (roundErr_le_starkErr M sys B δ) (starkErr_nonneg M sys B hδ) hadv attempt
 
 /-- **Soundness of `Stark.verifyBatch`, with no hypothesis about the opening
-protocol.** For `δ ≥ 0` with `2 * δ + (1 / 2) ^ logBlowup ≤ 1`, the probability
+protocol.** For `δ ≥ 0` with `2 * δ + (1 / 2) ^ logBlowup < 1`, the probability
 that some answer function that agrees with the final log makes
 `Stark.verifyBatch` accept a covered batch one of whose shards has a failing
 constraint, at agreement `1 - δ`, is at most
 `N * starkErr + ((B.shards + 1) * r + 3) * N * (N - 1) / (2 * |D|)`, with
 `N = Q + B.shards * shardQueries sys twoAdicity` and `r = maxRounds F`. -/
 theorem soundness_verifyBatch_ud [Fintype D] (hδ : 0 ≤ δ)
-    (hrate : 2 * δ + (1 / 2) ^ sys.fri.logBlowup ≤ 1) (hfixed : sys.FixedOk) {N : ℕ}
+    (hrate : 2 * δ + (1 / 2) ^ sys.fri.logBlowup < 1) (hfixed : sys.FixedOk) {N : ℕ}
     (hN : BoundsLE sys B N)
     (hcast : ∀ a b : ℕ, a ≤ N → b ≤ N → (a : K) = (b : K) → a = b)
     (htwo : sys.maxLogDegree ≤ TwoAdicOps.twoAdicity (F := F))
@@ -146,7 +155,7 @@ theorem soundness_verifyBatch_ud [Fintype D] (hδ : 0 ≤ δ)
     prob (fun out l => ∃ f : ∀ x, SAns F EF D K slots width x,
         (∀ x y, l.dlookup x = some y → f x = y) ∧
           batchAccepts M sys f (attempt out.1) = true ∧
-          BatchCovered M sys (1 - δ) B (attempt out.1) ∧
+          BatchCovered M sys B (attempt out.1) ∧
           BatchViolates M sys (1 - δ) l f (attempt out.1))
       (batchExperiment M sys B adv attempt) [] ≤
       (Q + B.shards * shardQueries sys (TwoAdicOps.twoAdicity (F := F)) : ℕ) *
@@ -155,20 +164,20 @@ theorem soundness_verifyBatch_ud [Fintype D] (hδ : 0 ≤ δ)
           (Q + B.shards * shardQueries sys (TwoAdicOps.twoAdicity (F := F)) : ℕ) *
           ((Q + B.shards * shardQueries sys (TwoAdicOps.twoAdicity (F := F)) : ℕ) - 1) /
             (2 * Fintype.card D) :=
-  soundness_verifyBatch M sys (1 - δ) B hfixed hN hcast
+  soundness_verifyBatch M sys (1 - δ) B hfixed hN hcast (by linarith)
     (pcsErr_nonneg (K := K) sys M.extData.d hδ) htwo hslots hcommit hquery hwidth
-    (fun v hs => rbrSound_pcs_ud M sys hδ hrate v hs.active hs)
+    (fun v hs => rbrSound_pcs_ud M sys hδ hrate.le v hs.active hs)
     (roundErr_le_starkErr M sys B δ) (starkErr_nonneg M sys B hδ) hadv attempt
 
 /-- **`Stark.verify` only accepts balanced lookups, with no hypothesis about
 the opening protocol.** For a system whose lookups are plain (its zeros may
 read anything) over a field of characteristic not two and `δ ≥ 0` with
-`2 * δ + (1 / 2) ^ logBlowup ≤ 1`, the probability that some answer function
+`2 * δ + (1 / 2) ^ logBlowup < 1`, the probability that some answer function
 that agrees with the final log makes `Stark.verify` accept a covered attempt
 whose lookup messages are not balanced, at agreement `1 - δ`, is at most the
 bound of `soundness_verify_ud`. -/
 theorem soundness_verify_lookups_ud [Fintype D] (hδ : 0 ≤ δ)
-    (hrate : 2 * δ + (1 / 2) ^ sys.fri.logBlowup ≤ 1)
+    (hrate : 2 * δ + (1 / 2) ^ sys.fri.logBlowup < 1)
     (hplain : ∀ c ∈ sys.circuits, c.LookupsPlain) (h2 : (2 : K) ≠ 0) (hfixed : sys.FixedOk)
     (hshards : 1 ≤ B.shards) {N : ℕ} (hN : BoundsLE sys B N)
     (hcast : ∀ a b : ℕ, a ≤ N → b ≤ N → (a : K) = (b : K) → a = b)
@@ -181,7 +190,7 @@ theorem soundness_verify_lookups_ud [Fintype D] (hδ : 0 ≤ δ)
     prob (fun out l => ∃ f : ∀ x, SAns F EF D K slots width x,
         (∀ x y, l.dlookup x = some y → f x = y) ∧
           verifyAccepts M sys f (attempt out.1) = true ∧
-          Covered M sys (1 - δ) B (attempt out.1) ∧
+          Covered M sys B (attempt out.1) ∧
           ¬ LookupsBalanced M sys (1 - δ) B l (attempt out.1))
       (experiment M sys adv attempt) [] ≤
       (Q + shardQueries sys (TwoAdicOps.twoAdicity (F := F)) : ℕ) * starkErr M sys B δ +
@@ -189,20 +198,20 @@ theorem soundness_verify_lookups_ud [Fintype D] (hδ : 0 ≤ δ)
           (Q + shardQueries sys (TwoAdicOps.twoAdicity (F := F)) : ℕ) *
           ((Q + shardQueries sys (TwoAdicOps.twoAdicity (F := F)) : ℕ) - 1) /
             (2 * Fintype.card D) :=
-  soundness_verify_lookups M sys (1 - δ) B hplain h2 hfixed hshards hN hcast
+  soundness_verify_lookups M sys (1 - δ) B hplain h2 hfixed hshards hN hcast (by linarith)
     (pcsErr_nonneg (K := K) sys M.extData.d hδ) htwo hslots hcommit hquery hwidth
-    (fun v hs => rbrSound_pcs_ud M sys hδ hrate v hs.active hs)
+    (fun v hs => rbrSound_pcs_ud M sys hδ hrate.le v hs.active hs)
     (roundErr_le_starkErr M sys B δ) (starkErr_nonneg M sys B hδ) hadv attempt
 
 /-- **`Stark.verifyBatch` only accepts balanced lookups, with no hypothesis
 about the opening protocol.** For a system whose lookups are plain (its zeros
 may read anything) over a field of characteristic not two and `δ ≥ 0` with
-`2 * δ + (1 / 2) ^ logBlowup ≤ 1`, the probability that some answer function
+`2 * δ + (1 / 2) ^ logBlowup < 1`, the probability that some answer function
 that agrees with the final log makes `Stark.verifyBatch` accept a covered batch
 whose lookup messages are not balanced, at agreement `1 - δ`, is at most the
 bound of `soundness_verifyBatch_ud`. -/
 theorem soundness_verifyBatch_lookups_ud [Fintype D] (hδ : 0 ≤ δ)
-    (hrate : 2 * δ + (1 / 2) ^ sys.fri.logBlowup ≤ 1)
+    (hrate : 2 * δ + (1 / 2) ^ sys.fri.logBlowup < 1)
     (hplain : ∀ c ∈ sys.circuits, c.LookupsPlain) (h2 : (2 : K) ≠ 0) (hfixed : sys.FixedOk)
     {N : ℕ} (hN : BoundsLE sys B N)
     (hcast : ∀ a b : ℕ, a ≤ N → b ≤ N → (a : K) = (b : K) → a = b)
@@ -215,7 +224,7 @@ theorem soundness_verifyBatch_lookups_ud [Fintype D] (hδ : 0 ≤ δ)
     prob (fun out l => ∃ f : ∀ x, SAns F EF D K slots width x,
         (∀ x y, l.dlookup x = some y → f x = y) ∧
           batchAccepts M sys f (attempt out.1) = true ∧
-          BatchCovered M sys (1 - δ) B (attempt out.1) ∧
+          BatchCovered M sys B (attempt out.1) ∧
           ¬ BatchLookupsBalanced M sys (1 - δ) B l (attempt out.1))
       (batchExperiment M sys B adv attempt) [] ≤
       (Q + B.shards * shardQueries sys (TwoAdicOps.twoAdicity (F := F)) : ℕ) *
@@ -224,9 +233,9 @@ theorem soundness_verifyBatch_lookups_ud [Fintype D] (hδ : 0 ≤ δ)
           (Q + B.shards * shardQueries sys (TwoAdicOps.twoAdicity (F := F)) : ℕ) *
           ((Q + B.shards * shardQueries sys (TwoAdicOps.twoAdicity (F := F)) : ℕ) - 1) /
             (2 * Fintype.card D) :=
-  soundness_verifyBatch_lookups M sys (1 - δ) B hplain h2 hfixed hN hcast
+  soundness_verifyBatch_lookups M sys (1 - δ) B hplain h2 hfixed hN hcast (by linarith)
     (pcsErr_nonneg (K := K) sys M.extData.d hδ) htwo hslots hcommit hquery hwidth
-    (fun v hs => rbrSound_pcs_ud M sys hδ hrate v hs.active hs)
+    (fun v hs => rbrSound_pcs_ud M sys hδ hrate.le v hs.active hs)
     (roundErr_le_starkErr M sys B δ) (starkErr_nonneg M sys B hδ) hadv attempt
 
 end CertiFri.Exec.Stark

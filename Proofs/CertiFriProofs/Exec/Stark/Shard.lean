@@ -5,8 +5,8 @@ import CertiFriProofs.Exec.Stark.Columns
 # One proof of the STARK: its columns, its constraints, and the two bounds
 
 Everything here is about one proof (one shard of a batch): the shape of its
-opening claims, the polynomials its committed columns decode to, and the three
-events the security proof follows through the rounds of the protocol.
+opening claims, the polynomials its committed columns decode to, and the events
+the security proof follows through the rounds of the protocol.
 
 ## Contents
 
@@ -26,13 +26,30 @@ events the security proof follows through the rounds of the protocol.
   circuit, folded with `α`, are not zero on some row. `ZetaFail`: for some
   active circuit, the folded constraints at `ζ` are not the vanishing
   polynomial times the quotient at `ζ`.
-* `constraintBound`, `zetaBound`: the numbers in the two error terms.
+* `OffCosets`: neither `ζ` nor its successor on the trace domain of a matrix
+  is a point of the coset the matrix is committed on, for every matrix of the
+  proof. `point_of_mem_openingClaims`, `exists_point_of_mem_claimRefs`: these
+  are the opening points of the claims.
+* `constraintBound`, `zetaBound`, `cosetBound`: the numbers in the error terms.
 * `fractionLE_alphaFail`: if `ConstraintFail`, then `AlphaFail` for all but a
   fraction `(constraintBound - 1) / |K|` of the `α`.
 * `fractionLE_zetaFail`: if `AlphaFail`, then `ZetaFail` for all but a fraction
   `zetaBound / |K|` of the `ζ`.
+* `fractionLE_offCosets`: `OffCosets` for all but a fraction
+  `cosetBound / |K|` of the `ζ`.
 
-`Exec/Stark/Link.lean` relates `ZetaFail` to the opening claims.
+`Exec/Stark/Link.lean` relates `ZetaFail` to the opening claims, for a `ζ` that
+is off the cosets.
+
+## Why `OffCosets`
+
+The opening protocol says nothing about a committed word at an opening point
+(`PcsRbr.ClaimsHoldOff`), and the columns are decoded with no point left out
+(`decodeT`, `Theory/PcsRbr/DecodeTight.lean`), under a margin that does not
+depend on the height of the trace. So a claimed value is the value of the
+decoded polynomial only when the opening point is outside the coset of the
+column. The verifier does not check this. The security proof adds the fraction
+of the `ζ` that are not off the cosets to the error of the round of `ζ`.
 -/
 
 namespace CertiFri.Exec.Stark
@@ -112,6 +129,36 @@ private theorem getD_mem_circuits {sys : System F D} {active : Array Bool}
   rw [Array.getD_eq_getD_getElem?, Array.getElem?_eq_getElem hlt, Option.getD_some]
   exact Array.getElem_mem_toList hlt
 
+/-- The shape of a proof has at most four matrices per circuit of the system:
+a main trace, a lookup trace and a quotient per active circuit, and a fixed
+trace per circuit. -/
+private theorem length_flatten_starkShape_le (sys : System F D) (d : ℕ) {active : Array Bool}
+    (logDegrees : Array ℕ) (hact : active.size ≤ sys.circuits.size) :
+    (starkShape sys d active logDegrees).flatten.length ≤ 4 * sys.circuits.size := by
+  have hlen : (activeIndices active).length ≤ sys.circuits.size :=
+    (List.length_filter_le _ _).trans (by rw [List.length_range]; exact hact)
+  have htr : ∀ (width : ℕ → ℕ) (n : ℕ),
+      (traceShapes (activeIndices active) logDegrees width n).length ≤ sys.circuits.size := by
+    intro width n
+    rw [traceShapes, List.length_map, List.length_zipIdx]
+    exact hlen
+  have hfix : (fixedShapes sys (activeIndices active) logDegrees).length ≤
+      sys.circuits.size := by
+    rw [fixedShapes]
+    exact (List.length_filterMap_le _ _).trans (by rw [List.length_range])
+  have h1 := htr (fun ci => (sys.circuits.getD ci default).mainWidth) 2
+  have h2 := htr (fun ci => (sys.circuits.getD ci default).stage2Width) 2
+  have h3 := htr (fun ci => (sys.circuits.getD ci default).quotientDegree * d) 1
+  rw [starkShape]
+  cases sys.preprocessedCommit with
+  | none =>
+    simp only [List.append_nil, List.flatten_cons, List.flatten_nil, List.length_append]
+    omega
+  | some _ =>
+    simp only [List.cons_append, List.nil_append, List.flatten_cons, List.flatten_nil,
+      List.length_append, List.length_nil]
+    omega
+
 end Shape
 
 /-! ## The rows of a proof and the claims about one matrix -/
@@ -163,6 +210,15 @@ private theorem uniform_matrixOpening (k : ℕ) (points : List EF) {rows : Array
     exact hw _ (Array.getElem_mem h0)
   rw [hc, hw p hp]
   exact beq_self_eq_true w
+
+/-- An opening point of the claims about a matrix is one of the points the
+claims are built from. -/
+private theorem point_mem_of_mem_matrixOpening {k : ℕ} {points : List EF}
+    {rows : Array (Array EF)} {po : PointOpening EF}
+    (h : po ∈ (matrixOpening k points rows).points) : po.point ∈ points := by
+  simp only [matrixOpening, List.mem_toArray, List.mem_map] at h
+  obtain ⟨⟨x, row⟩, hmem, rfl⟩ := h
+  exact (List.of_mem_zip hmem).1
 
 /-- A circuit found among the active circuits is at the position it is found
 at. -/
@@ -514,6 +570,79 @@ theorem exists_claimRef [Inhabited EF] (lb : ℕ) (claims : Array (CommitmentOpe
         (by rw [Array.getElem?_toList, Array.getElem?_eq_getElem hj]),
       Array.getD_eq_getD_getElem?, Array.getElem?_eq_getElem hj]
 
+omit [FieldOps F] [FieldOps EF] [TwoAdicOps F] [ExtensionOps F EF] in
+/-- **Every claim of the shape of nested claims names a point of the claims.**
+The opening point of a claim of the shape, read in the flat list of points, is
+an opening point of a matrix of the claims, and the claim has the committed
+height of that matrix. -/
+theorem exists_point_of_mem_claimRefs (lb : ℕ) (claims : Array (CommitmentOpening EF D))
+    {r : ClaimRef} (hr : r ∈ claimRefs lb (claimShape claims)) (dflt : EF) :
+    ∃ c ∈ claims, ∃ m ∈ c.matrices, ∃ po ∈ m.points,
+      r.logHeight = m.logDegree + lb ∧ (claimPoints claims).getD r.pointIdx dflt = po.point := by
+  obtain ⟨pr, hpr, -, -, hh, -⟩ := mem_claimRefs hr
+  rw [← map_fst_pointPairs, List.getElem?_map] at hpr
+  obtain ⟨x, hx, rfl⟩ := Option.map_eq_some_iff.mp hpr
+  have hmem := List.mem_of_getElem? hx
+  simp only [pointPairs, List.mem_flatMap, List.mem_map] at hmem
+  obtain ⟨⟨c, b⟩, hc, ⟨m, mi⟩, hm, po, hpo, rfl⟩ := hmem
+  refine ⟨c, Array.mem_toList_iff.mp (List.mem_of_getElem? (List.mem_zipIdx_iff_getElem?.mp hc)),
+    m, Array.mem_toList_iff.mp (List.mem_of_getElem? (List.mem_zipIdx_iff_getElem?.mp hm)),
+    po, Array.mem_toList_iff.mp hpo, hh, ?_⟩
+  rw [claimPoints_eq lb, Array.getD_eq_getD_getElem?, List.getElem?_toArray, List.getElem?_map,
+    hx]
+  rfl
+
+/-- **The opening points of a proof.** Every opening point of a matrix of the
+opening claims is `ζ` or the successor of `ζ` on the trace domain of that
+matrix. -/
+theorem point_of_mem_openingClaims {InputProof CommitProof : Type} (sys : System F D)
+    (proof : Proof F EF D InputProof CommitProof) (ζ : EF) {c : CommitmentOpening EF D}
+    (hc : c ∈ openingClaims sys proof ζ) {m : MatrixOpening EF} (hm : m ∈ c.matrices)
+    {po : PointOpening EF} (hpo : po ∈ m.points) :
+    po.point = ζ ∨ po.point = nextPoint (F := F) m.logDegree ζ := by
+  have key : ∀ (k : ℕ) (pts : List EF) (rows : Array (Array EF)),
+      (∀ x ∈ pts, x = ζ ∨ x = nextPoint (F := F) k ζ) →
+      po ∈ (matrixOpening k pts rows).points →
+        po.point = ζ ∨ po.point = nextPoint (F := F) (matrixOpening k pts rows).logDegree ζ :=
+    fun k pts rows hpts h => hpts _ (point_mem_of_mem_matrixOpening h)
+  have h2 : ∀ k : ℕ, ∀ x ∈ [ζ, nextPoint (F := F) k ζ], x = ζ ∨ x = nextPoint (F := F) k ζ := by
+    intro k x hx
+    simpa using hx
+  have h1 : ∀ k : ℕ, ∀ x ∈ [ζ], x = ζ ∨ x = nextPoint (F := F) k ζ := by
+    intro k x hx
+    exact Or.inl (by simpa using hx)
+  simp only [openingClaims, Array.mem_append, List.mem_toArray, List.mem_cons, List.not_mem_nil,
+    or_false] at hc
+  rcases hc with (rfl | rfl | rfl) | hc
+  · simp only [List.mem_toArray, List.mem_map] at hm
+    obtain ⟨p, -, rfl⟩ := hm
+    exact key _ _ _ (h2 _) hpo
+  · simp only [List.mem_toArray, List.mem_map] at hm
+    obtain ⟨p, -, rfl⟩ := hm
+    exact key _ _ _ (h2 _) hpo
+  · simp only [List.mem_toArray, List.mem_map] at hm
+    obtain ⟨p, -, rfl⟩ := hm
+    exact key _ _ _ (h1 _) hpo
+  · split at hc
+    · simp only [List.mem_toArray, List.mem_cons, List.not_mem_nil, or_false] at hc
+      subst hc
+      simp only [List.mem_toArray, List.mem_filterMap, List.mem_range] at hm
+      obtain ⟨ci, -, hm⟩ := hm
+      by_cases hn : (sys.preprocessedIndices.getD ci none).isNone = true
+      · rw [ite_eq_left hn] at hm
+        cases hm
+      · rw [ite_eq_right hn] at hm
+        cases hidx : (activeIndices proof.active).idxOf? ci with
+        | some pos =>
+          rw [hidx, Option.some.injEq] at hm
+          subst hm
+          exact key _ _ _ (h2 _) hpo
+        | none =>
+          rw [hidx, Option.some.injEq] at hm
+          subst hm
+          exact key _ _ _ (h1 _) hpo
+    · exact absurd hc (Array.not_mem_empty c)
+
 end Claims
 
 /-! ## The columns and the constraints of one proof -/
@@ -615,6 +744,22 @@ def zetaBound (sys : System F D) : ℕ :=
     ((List.range (sys.maxLogDegree + 1)).map fun k => c.zetaDegree (2 ^ k) (2 ^ k)).foldr max
       0).foldr max 0
 
+/-- The point `ζ` is off the cosets of the proof: for every committed matrix,
+neither `ζ` nor its successor on the trace domain of the matrix is a point of
+the coset the matrix is committed on. These are the opening points of the
+matrix, so no opening point of the proof lies in the coset of a column it is
+claimed for. -/
+def OffCosets (active : Array Bool) (logDegrees : Array ℕ) (ζ : K) : Prop :=
+  ∀ m ∈ (starkShape sys M.extData.d active logDegrees).flatten,
+    ζ ∉ M.coset (m.logDegree + sys.fri.logBlowup) ∧
+      ζ * M.gen m.logDegree ∉ M.coset (m.logDegree + sys.fri.logBlowup)
+
+/-- A bound on the number of points `ζ` that are not off the cosets of a proof:
+at most four matrices per circuit, each excluding at most two points per point
+of its coset, and no coset larger than the largest supported one. -/
+def cosetBound (sys : System F D) : ℕ :=
+  8 * sys.circuits.size * 2 ^ (sys.maxLogDegree + sys.fri.logBlowup)
+
 /-- The columns of an active circuit have degree at most the height of its
 trace. -/
 private theorem degLE_shardCols (active : Array Bool) (logDegrees : Array ℕ)
@@ -697,6 +842,66 @@ theorem fractionLE_zetaFail [Fintype K] {active : Array Bool} {logDegrees : Arra
           ((List.range (sys.maxLogDegree + 1)).map fun k =>
             c.zetaDegree (2 ^ k) (2 ^ k)).foldr max 0)
         (getD_mem_circuits hact hp)))
+
+/-- **The out-of-domain point is off the cosets.** For a bitmap of the length
+of the system and a first domain that is supported and exists in the field, all
+but a fraction `cosetBound / |K|` of the points `ζ` are off the cosets of the
+proof: the shape has at most `4 * sys.circuits.size` matrices, and a matrix on
+a coset of `2 ^ h` points excludes the `2 ^ h` points of the coset and the
+`2 ^ h` points whose successor is in the coset. -/
+theorem fractionLE_offCosets [Fintype K] {active : Array Bool} {logDegrees : Array ℕ}
+    (hact : active.size = sys.circuits.size)
+    (hheight : logMaxHeight sys.fri.logBlowup (starkShape sys M.extData.d active logDegrees) ≤
+      sys.maxLogDegree + sys.fri.logBlowup)
+    (htwo : logMaxHeight sys.fri.logBlowup (starkShape sys M.extData.d active logDegrees) ≤
+      TwoAdicOps.twoAdicity (F := F)) :
+    FractionLE (fun ζ : K => ¬ OffCosets M sys active logDegrees ζ)
+      (cosetBound sys / Fintype.card K) := by
+  have hK : (0 : ℝ) < Fintype.card K := by exact_mod_cast Fintype.card_pos
+  have hone : ∀ m ∈ (starkShape sys M.extData.d active logDegrees).flatten,
+      FractionLE (fun ζ : K => ζ ∈ M.coset (m.logDegree + sys.fri.logBlowup) ∨
+          ζ * M.gen m.logDegree ∈ M.coset (m.logDegree + sys.fri.logBlowup))
+        ((2 * 2 ^ (sys.maxLogDegree + sys.fri.logBlowup) : ℕ) / Fintype.card K) := by
+    intro m hm
+    have hle : m.logDegree + sys.fri.logBlowup ≤
+        logMaxHeight sys.fri.logBlowup (starkShape sys M.extData.d active logDegrees) :=
+      CertiFri.Exec.le_logMaxHeight hm
+    have hg : M.gen m.logDegree ≠ 0 :=
+      (M.generator _ ((Nat.le_add_right _ _).trans (hle.trans htwo))).ne_zero
+        (pow_ne_zero _ two_ne_zero)
+    have hcard : (M.coset (m.logDegree + sys.fri.logBlowup)).card ≤
+        2 ^ (sys.maxLogDegree + sys.fri.logBlowup) := by
+      rw [M.card_coset (hle.trans htwo)]
+      exact Nat.pow_le_pow_right (by norm_num) (hle.trans hheight)
+    refine ⟨M.coset (m.logDegree + sys.fri.logBlowup) ∪
+      (M.coset (m.logDegree + sys.fri.logBlowup)).image (· * (M.gen m.logDegree)⁻¹), ?_,
+      fun ζ hζ => ?_⟩
+    · rw [div_mul_cancel₀ _ hK.ne']
+      have hunion := Finset.card_union_le (M.coset (m.logDegree + sys.fri.logBlowup))
+        ((M.coset (m.logDegree + sys.fri.logBlowup)).image (· * (M.gen m.logDegree)⁻¹))
+      have himage := (Finset.card_image_le (s := M.coset (m.logDegree + sys.fri.logBlowup))
+        (f := (· * (M.gen m.logDegree)⁻¹))).trans hcard
+      exact_mod_cast (by omega :
+        (M.coset (m.logDegree + sys.fri.logBlowup) ∪
+          (M.coset (m.logDegree + sys.fri.logBlowup)).image
+            (· * (M.gen m.logDegree)⁻¹)).card ≤ 2 * 2 ^ (sys.maxLogDegree + sys.fri.logBlowup))
+    · rcases hζ with h | h
+      · exact Finset.mem_union_left _ h
+      · exact Finset.mem_union_right _
+          (Finset.mem_image.mpr ⟨_, h, mul_inv_cancel_right₀ hg ζ⟩)
+  refine ((FractionLE.exists_mem_list _ hone).mono_left fun ζ hζ => ?_).mono_right ?_
+  · by_contra hno
+    exact hζ fun m hm => ⟨fun h => hno ⟨m, hm, Or.inl h⟩, fun h => hno ⟨m, hm, Or.inr h⟩⟩
+  · have hlen := length_flatten_starkShape_le sys M.extData.d logDegrees hact.le
+    have hnat : (starkShape sys M.extData.d active logDegrees).flatten.length *
+        (2 * 2 ^ (sys.maxLogDegree + sys.fri.logBlowup)) ≤ cosetBound sys := by
+      unfold cosetBound
+      calc _ ≤ 4 * sys.circuits.size * (2 * 2 ^ (sys.maxLogDegree + sys.fri.logBlowup)) :=
+            Nat.mul_le_mul_right _ hlen
+        _ = 8 * sys.circuits.size * 2 ^ (sys.maxLogDegree + sys.fri.logBlowup) := by ring
+    rw [← mul_div_assoc]
+    refine div_le_div_of_nonneg_right ?_ hK.le
+    exact_mod_cast hnat
 
 end Shard
 

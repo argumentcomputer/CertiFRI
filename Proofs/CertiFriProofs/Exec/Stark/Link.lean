@@ -8,15 +8,19 @@ The security proof of the STARK follows the event `ZetaFail`
 the check at `ζ` fails for some circuit. The verifier does not see these
 polynomials; it runs its check on the values the prover opened. This file
 connects the two: if the opened values pass the executable checks although
-`ZetaFail` holds, the opened values are not the values of the decoded
-polynomials, so the opening claims fail.
+`ZetaFail` holds, and `ζ` is off the cosets of the proof (`OffCosets`), the
+opened values are not the values of the decoded polynomials, so the opening
+claims fail.
 
 * `claimsFail_of_zetaFail`: the statement.
 
 ## The proof
 
-By contradiction. If the opening claims do not fail, every claimed value is the
-value of the decoded polynomial of its column at its opening point
+By contradiction. Every opening point of the claims is `ζ` or the successor of
+`ζ` on the trace domain of its matrix (`point_of_mem_openingClaims`), so for a
+`ζ` off the cosets no opening point lies in the coset of a column it is claimed
+for. If the opening claims do not fail, every claimed value is then the value
+of the decoded polynomial of its column at its opening point
 (`eval_colPoly_of_not_claimsFail`). The opening claims of a proof that passes
 the shape check hold, for each active circuit, the rows opened on its main
 trace, its lookup trace, its quotient and its fixed trace, so each opened row
@@ -28,8 +32,13 @@ some circuit.
 ## Assumptions
 
 `System.FixedOk`: a circuit without a fixed trace has fixed-trace width zero.
-The margin of unique decoding at the height of every committed matrix, and a
-first domain that exists in the field.
+The strict margin of unique decoding (`StrictMargin`) at the height of every
+committed matrix, and a first domain that exists in the field.
+
+`OffCosets` at `ζ` is a hypothesis: the verifier does not check it, and without
+it the opening protocol says nothing about the committed words at the opening
+points. `fractionLE_offCosets` (`Exec/Stark/Shard.lean`) bounds the fraction of
+the `ζ` for which it fails.
 -/
 
 namespace CertiFri.Exec.Stark
@@ -288,10 +297,11 @@ private theorem openingClaims_fixed {InputProof CommitProof : Type} (sys : Syste
 claims fail.** Let a proof pass the shape check, and the executable constraint
 checks pass on its opened values for the challenges `β`, `γ`, `α`, `ζ` and the
 entering lookup sum `acc0`, with `ζ` usable. Let the first domain of the
-opening exist in the field, and the margin of unique decoding hold at the
-height of every committed matrix. If, for the polynomials the committed columns
-decode to, the check at `ζ` fails for some circuit, then the opening claims of
-the proof, read from the committed rows `com`, fail. -/
+opening exist in the field, the strict margin of unique decoding hold at the
+height of every committed matrix, and `ζ` be off the cosets of the proof. If,
+for the polynomials the committed columns decode to, the check at `ζ` fails for
+some circuit, then the opening claims of the proof, read from the committed
+rows `com`, fail. -/
 theorem claimsFail_of_zetaFail [Inhabited D] {InputProof CommitProof : Type} (hfixed : sys.FixedOk)
     (proof : Proof F EF D InputProof CommitProof) (hshape : shapeOk sys proof = true)
     (β γ acc0 α ζ : EF)
@@ -302,7 +312,8 @@ theorem claimsFail_of_zetaFail [Inhabited D] {InputProof CommitProof : Type} (hf
     (hfinal : ∀ m ∈ (starkShape sys M.extData.d proof.active proof.logDegrees).flatten,
       sys.fri.logFinalHeight ≤ m.logDegree + sys.fri.logBlowup)
     (hmargin : ∀ m ∈ (starkShape sys M.extData.d proof.active proof.logDegrees).flatten,
-      DecodeMargin (M.coset (m.logDegree + sys.fri.logBlowup)) (2 ^ m.logDegree) θ)
+      StrictMargin (M.coset (m.logDegree + sys.fri.logBlowup)) (2 ^ m.logDegree) θ)
+    (hoff : OffCosets M sys proof.active proof.logDegrees (M.ext.toModel ζ))
     (hfail : ZetaFail M sys θ com proof.active proof.logDegrees proof.stage1Commit
       proof.stage2Commit proof.quotientCommit (M.ext.toModel β) (M.ext.toModel γ)
       (M.ext.toModel acc0) (proof.intermediateAccumulators.map M.ext.toModel) (M.ext.toModel α)
@@ -327,6 +338,27 @@ theorem claimsFail_of_zetaFail [Inhabited D] {InputProof CommitProof : Type} (hf
       starkShape sys M.extData.d proof.active proof.logDegrees := by
     rw [claimShape_openingClaims sys proof hshape ζ, M.degree_eq]
   have huni := widthsUniform_openingClaims sys proof hshape ζ
+  -- No opening point lies in the coset of a column it is claimed for.
+  have hpoint : ∀ r ∈ claimRefs sys.fri.logBlowup
+      (starkShape sys M.extData.d proof.active proof.logDegrees),
+      M.ext.toModel ((claimPoints (openingClaims sys proof ζ)).getD r.pointIdx 0) ∉
+        M.coset r.logHeight := by
+    intro r hr
+    rw [← hsh] at hr
+    obtain ⟨c, hc, m, hm, po, hpo, hh, hpt⟩ :=
+      exists_point_of_mem_claimRefs sys.fri.logBlowup (openingClaims sys proof ζ) hr 0
+    have hmem : (⟨m.logDegree, claimedWidth m, m.points.size⟩ : MatrixShape) ∈
+        (starkShape sys M.extData.d proof.active proof.logDegrees).flatten := by
+      rw [← hsh]
+      exact List.mem_flatten.mpr ⟨_, List.mem_map_of_mem (Array.mem_toList_iff.mpr hc),
+        List.mem_map_of_mem (Array.mem_toList_iff.mpr hm)⟩
+    have hm' := hoff _ hmem
+    rw [hpt, hh]
+    rcases point_of_mem_openingClaims sys proof ζ hc hm hpo with h | h
+    · rw [h]
+      exact hm'.1
+    · rw [h, nextPoint, M.ext.map_mul, M.embed]
+      exact hm'.2
   have heval : ∀ r ∈ claimRefs sys.fri.logBlowup (claimShape (openingClaims sys proof ζ)),
       (M.colPoly sys.fri.logBlowup θ com
           (((openingClaims sys proof ζ).map (·.commitment)).getD r.batch default)
@@ -337,7 +369,7 @@ theorem claimsFail_of_zetaFail [Inhabited D] {InputProof CommitProof : Type} (hf
     rw [hsh]
     intro r hr
     exact eval_colPoly_of_not_claimsFail M sys.fri _ htwo _ _ _ com
-      (by rw [← hsh]; exact size_claimPoints _ _) hfinal hmargin hnf hr
+      (by rw [← hsh]; exact size_claimPoints _ _) hfinal hmargin hpoint hnf hr
   -- The circuit whose check at `ζ` fails.
   obtain ⟨⟨ci, pos⟩, hp, hne⟩ := hfail
   refine hne ?_

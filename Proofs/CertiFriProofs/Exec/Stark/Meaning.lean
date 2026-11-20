@@ -31,8 +31,8 @@ committed columns decode to. This file spells out what that means.
   active circuit is the sum entering the first plus the lookup sum of these
   messages. Nothing is asked of the zeros.
 * `coeff_shardCols_mem_base`: the main and fixed columns of a proof have
-  base-field coefficients, for base-field rows and under the margin of unique
-  decoding.
+  base-field coefficients, for base-field rows and under the strict margin of
+  unique decoding (`StrictMargin`).
 
 ## Assumptions
 
@@ -292,30 +292,22 @@ theorem lookupSum_of_not_constraintFail (h2 : (2 : K) ≠ 0) {active : Array Boo
   rw [Nat.zero_add, ← hsize, accIn_size, show accIn acc0 accs 0 = acc0 from ite_eq_left rfl] at htel
   exact eq_add_of_sub_eq' htel
 
-/-- A coset of a height that exists in the field has `2 ^ h` points. -/
-private theorem card_coset (M : StarkModel F EF K) {h : ℕ}
-    (hh : h ≤ TwoAdicOps.twoAdicity (F := F)) : (M.coset h).card = 2 ^ h := by
-  rw [StarkModel.coset, Finset.card_image_of_injOn, Finset.card_range]
-  intro a ha b hb hab
-  exact (M.generator h hh).pow_inj (by simpa using ha) (by simpa using hb)
-    (mul_left_cancel₀ M.shift_ne hab)
-
 /-- **The main and fixed columns have base-field coefficients**, for committed
 rows of base-field elements, at a height that exists in the field, for an
-agreement of at most one and under the margin of unique decoding. -/
+agreement of at most one and under the strict margin of unique decoding. -/
 theorem coeff_shardCols_mem_base (hθ : θ ≤ 1) {active : Array Bool} {logDegrees : Array ℕ}
     {stage1 stage2 quot : D} {pos ci : ℕ}
     (htwo : logDegrees.getD pos 0 + sys.fri.logBlowup ≤ TwoAdicOps.twoAdicity (F := F))
-    (hmargin : DecodeMargin (M.coset (logDegrees.getD pos 0 + sys.fri.logBlowup))
+    (hmargin : StrictMargin (M.coset (logDegrees.getD pos 0 + sys.fri.logBlowup))
       (2 ^ logDegrees.getD pos 0) θ) (j n : ℕ) :
     ((shardCols M sys θ (M.baseRows com) active logDegrees stage1 stage2 quot pos ci).main
         j).coeff n ∈ Set.range M.base.toModel ∧
       ((shardCols M sys θ (M.baseRows com) active logDegrees stage1 stage2 quot pos ci).pre
         j).coeff n ∈ Set.range M.base.toModel := by
   -- The margin leaves more points than the degree bound.
-  have hmar : ((2 ^ (logDegrees.getD pos 0 + sys.fri.logBlowup - sys.fri.logBlowup) + 2 : ℕ) : ℝ)
-      ≤ θ * 2 ^ (logDegrees.getD pos 0 + sys.fri.logBlowup) := by
-    rw [DecodeMargin, card_coset M htwo] at hmargin
+  have hmar : ((2 ^ (logDegrees.getD pos 0 + sys.fri.logBlowup - sys.fri.logBlowup) : ℕ) : ℝ)
+      < θ * 2 ^ (logDegrees.getD pos 0 + sys.fri.logBlowup) := by
+    rw [StrictMargin, M.card_coset htwo] at hmargin
     rw [Nat.add_sub_cancel]
     have hle : θ * (2 : ℝ) ^ (logDegrees.getD pos 0 + sys.fri.logBlowup)
         ≤ 2 ^ (logDegrees.getD pos 0 + sys.fri.logBlowup) :=

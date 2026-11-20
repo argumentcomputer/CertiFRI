@@ -27,10 +27,12 @@ here.
 * The proof passes the shape check, and its header is the one the preamble
   holds at the position of the chain.
 * The shape of the proof is supported: its first domain exists in the field,
-  no committed column is shorter than the final height, and the margin of
-  unique decoding holds at the height of every committed matrix, and the first
-  domain is no larger than the largest trace the system supports, times the
-  blowup.
+  no committed column is shorter than the final height, the strict margin of
+  unique decoding (`StrictMargin`, `|D| + d < 2 * θ * |D|`) holds at the height
+  of every committed matrix, and the first domain is no larger than the largest
+  trace the system supports, times the blowup. The margin does not depend on
+  the trace heights: `strictMargin_coset` derives it from
+  `1 + 2 ^ (-logBlowup) < 2 * θ`.
 * The commitments to the main traces and to the fixed traces are among the
   digests of the first message that are read (`digestsOf`).
 * `mid` holds base-field elements only.
@@ -897,7 +899,7 @@ private theorem shard_good_aux (M : StarkModel F EF K) (sys : System F D) (V : V
     (htwo : logMaxHeight sys.fri.logBlowup shape ≤ TwoAdicOps.twoAdicity (F := F))
     (hfinal : ∀ m ∈ shape.flatten, sys.fri.logFinalHeight ≤ m.logDegree + sys.fri.logBlowup)
     (hmargin : ∀ m ∈ shape.flatten,
-      DecodeMargin (M.coset (m.logDegree + sys.fri.logBlowup)) (2 ^ m.logDegree) θ)
+      StrictMargin (M.coset (m.logDegree + sys.fri.logBlowup)) (2 ^ m.logDegree) θ)
     (hheight : logMaxHeight sys.fri.logBlowup shape ≤ sys.maxLogDegree + sys.fri.logBlowup)
     {R : ℕ} (hR : R = numRounds sys.fri shape) (hr : 4 + (R + 2) ≤ r)
     (hsup : Supports l₁ (fsTranscript f ms (4 + (R + 2))))
@@ -1123,7 +1125,7 @@ theorem shard_good (M : StarkModel F EF K) (sys : System F D) (V : Variant F EF 
     (hfinal : ∀ m ∈ (starkShape sys M.extData.d proof.active proof.logDegrees).flatten,
       sys.fri.logFinalHeight ≤ m.logDegree + sys.fri.logBlowup)
     (hmargin : ∀ m ∈ (starkShape sys M.extData.d proof.active proof.logDegrees).flatten,
-      DecodeMargin (M.coset (m.logDegree + sys.fri.logBlowup)) (2 ^ m.logDegree) θ)
+      StrictMargin (M.coset (m.logDegree + sys.fri.logBlowup)) (2 ^ m.logDegree) θ)
     (hheight : logMaxHeight sys.fri.logBlowup
       (starkShape sys M.extData.d proof.active proof.logDegrees) ≤
         sys.maxLogDegree + sys.fri.logBlowup)

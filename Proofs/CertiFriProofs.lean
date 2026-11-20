@@ -60,3 +60,7 @@ import CertiFriProofs.Exec.Stark.Arith
 import CertiFriProofs.Exec.Stark.Columns
 import CertiFriProofs.Exec.Stark.Shard
 import CertiFriProofs.Exec.Stark.Link
+import CertiFriProofs.Theory.Compiled.AcceptsCom
+import CertiFriProofs.Exec.Stark.Preamble
+import CertiFriProofs.Exec.Stark.Encode
+import CertiFriProofs.Exec.Stark.Run

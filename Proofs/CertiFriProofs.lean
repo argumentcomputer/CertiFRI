@@ -68,3 +68,7 @@ import CertiFriProofs.Exec.Stark.State
 import CertiFriProofs.Exec.Stark.GoodLog
 import CertiFriProofs.Exec.Stark.PcsSound
 import CertiFriProofs.Exec.Stark.Meaning
+import CertiFriProofs.Exec.Stark.Chain
+import CertiFriProofs.Exec.Stark.ShardGood
+import CertiFriProofs.Exec.Stark.Soundness
+import CertiFriProofs.Exec.Stark.SoundnessBatch

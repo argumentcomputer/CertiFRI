@@ -66,3 +66,5 @@ import CertiFriProofs.Exec.Stark.Encode
 import CertiFriProofs.Exec.Stark.Run
 import CertiFriProofs.Exec.Stark.State
 import CertiFriProofs.Exec.Stark.GoodLog
+import CertiFriProofs.Exec.Stark.PcsSound
+import CertiFriProofs.Exec.Stark.Meaning

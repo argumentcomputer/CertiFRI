@@ -45,3 +45,12 @@ import CertiFriProofs.Exec.Completeness
 import CertiFriProofs.Exec.HonestProver.Prover
 import CertiFriProofs.Exec.HonestProver.Fields
 import CertiFriProofs.Exec.HonestProver
+import CertiFriProofs.Theory.Oracle.Balanced
+import CertiFriProofs.Theory.Oracle.Adaptive
+import CertiFriProofs.Theory.Stark.Graph
+import CertiFriProofs.Theory.Stark.Logup
+import CertiFriProofs.Theory.Stark.LogupDegree
+import CertiFriProofs.Theory.Stark.Balance
+import CertiFriProofs.Theory.Stark.Air
+import CertiFriProofs.Theory.Stark.Uniform
+import CertiFriProofs.Exec.Stark.Free

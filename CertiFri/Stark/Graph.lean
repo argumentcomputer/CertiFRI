@@ -26,7 +26,9 @@ point.
   behaviour on the first and panics on the others; its compiler never produces
   such a graph.
 
-Nothing is proved here.
+Nothing is proved here. The proofs package has the same evaluation over a
+commutative ring and its properties
+(`Proofs/CertiFriProofs/Theory/Stark/Graph.lean`).
 -/
 
 namespace CertiFri.Stark

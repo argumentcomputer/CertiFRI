@@ -43,6 +43,10 @@ the trace domains satisfy all constraints of all active circuits.
   `N * εmax + ((B.shards + 1) * r + 3) * N * (N - 1) / (2 * |D|)`, where `N` is
   the number of oracle queries of the experiment, `r` the largest number of
   rounds of a chain, and `εmax` bounds the error of every round (`roundErr`).
+* `verify_good`: the deterministic part. In a good log, an accepted and covered
+  attempt violates no constraint, and if its lookup messages are not balanced,
+  `balPoly` of them does not vanish at the lookup challenges of the run
+  (used in `Exec/Stark/Lookups.lean`).
 
 ## Proof
 
@@ -183,7 +187,7 @@ private theorem queryBound_shardComp_twoAdicity
 
 omit [DecidableEq F] [DecidableEq EF] in
 /-- The experiment makes at most `Q + shardQueries sys twoAdicity` queries. -/
-private theorem queryBound_experiment {A : Type}
+theorem queryBound_experiment {A : Type}
     {adv : OracleComp (SAns F EF D K slots width) A} {Q : ℕ} (hadv : adv.QueryBound Q)
     (attempt : A → SAttempt F EF D) :
     (experiment M sys adv attempt).QueryBound
@@ -247,7 +251,7 @@ omit [FieldOps EF] [TwoAdicOps F] [ExtensionOps F EF] [Inhabited D] [DecidableEq
   [DecidableEq EF] in
 /-- With room for one shard, the digests of the first message of `Stark.verify`
 are all read. -/
-private theorem digestsOf_firstMessage (hshards : 1 ≤ B.shards) {InputProof CommitProof : Type}
+theorem digestsOf_firstMessage (hshards : 1 ≤ B.shards) {InputProof CommitProof : Type}
     (proof : Proof F EF D InputProof CommitProof) (claims : Array (Array F)) :
     digestsOf B (firstMessage sys proof claims) =
       sys.preprocessedCommit.toList ++ [proof.stage1Commit] := by
@@ -279,11 +283,14 @@ private theorem headerOk_of_shapeOk {InputProof CommitProof : Type}
 
 /-! ## The deterministic part -/
 
-/-- **In a good log, an accepted and covered attempt violates no constraint.**
-Take a good log that holds the queries of the verification of the attempt, and
-an answer function that agrees with it. If `Stark.verify` accepts the attempt
-against the function and the attempt is covered, no constraint fails. -/
-private theorem not_violates_of_goodLog (hfixed : sys.FixedOk) (hshards : 1 ≤ B.shards) {N : ℕ}
+/-- **In a good log, an accepted and covered attempt violates no constraint,
+and its lookup challenges are not roots of `balPoly`.** Take a good log that
+holds the queries of the verification of the attempt, and an answer function
+that agrees with it. If `Stark.verify` accepts the attempt against the function
+and the attempt is covered, then no constraint fails, and if the lookup
+messages of the attempt are not balanced, `balPoly` of them does not vanish at
+the two lookup challenges of the run. -/
+theorem verify_good (hfixed : sys.FixedOk) (hshards : 1 ≤ B.shards) {N : ℕ}
     (hN : BoundsLE sys B N)
     (hcast : ∀ a b : ℕ, a ≤ N → b ≤ N → (a : K) = (b : K) → a = b)
     {l : Log (SAns F EF D K slots width)}
@@ -292,7 +299,15 @@ private theorem not_violates_of_goodLog (hfixed : sys.FixedOk) (hshards : 1 ≤ 
     (a : SAttempt F EF D) {l₀ : Log (SAns F EF D K slots width)} {b : Bool}
     (hout : Outcome (shardComp M sys a.proof (firstMessage sys a.proof a.claims) []) l₀ b l)
     (hacc : verifyAccepts M sys f a = true) (hcov : Covered M sys θ B a) :
-    ¬ Violates M sys θ l f a := by
+    ¬ Violates M sys θ l f a ∧
+      (¬ Balanced (allItems M sys θ
+          (M.baseRows (readMsg B (firstMessage sys a.proof a.claims) (committedRow l)).2)
+          ⟨#[⟨a.proof.active, a.proof.stage1Commit, a.proof.logDegrees, a.claims⟩], #[]⟩) →
+        ((balPoly (allItems M sys θ
+          (M.baseRows (readMsg B (firstMessage sys a.proof a.claims) (committedRow l)).2)
+          ⟨#[⟨a.proof.active, a.proof.stage1Commit, a.proof.logDegrees, a.claims⟩], #[]⟩)).eval
+            (Polynomial.C (M.ext.toModel (lookupOf M sys f a).1))).eval
+          (M.ext.toModel (lookupOf M sys f a).2) ≠ 0) := by
   simp only [verifyAccepts, Stark.verify, Bool.and_eq_true] at hacc
   obtain ⟨⟨hshape, -⟩, -, hcheck⟩ := hacc
   -- The preamble.
@@ -318,7 +333,7 @@ private theorem not_violates_of_goodLog (hfixed : sys.FixedOk) (hshards : 1 ≤ 
     (ms := fun j => nextMsg M sys a.proof (firstMessage sys a.proof a.claims) [] j
       (fsTranscriptA f (nextMsg M sys a.proof (firstMessage sys a.proof a.claims) []) j)) rfl
     (congrArg (fun x => [Observation.ext x]) hβ0.symm)
-  exact (shard_good M sys (singleVariant sys B) θ B (maxRounds F) hfixed hgood hf a.proof
+  exact shard_good M sys (singleVariant sys B) θ B (maxRounds F) hfixed hgood hf a.proof
     (firstMessage sys a.proof a.claims) [] (fun o ho => absurd ho List.not_mem_nil) hout
     (List.prefix_refl l) hdec hpre
     (hdr := ⟨a.proof.active, a.proof.stage1Commit, a.proof.logDegrees, a.claims⟩) rfl rfl rfl rfl
@@ -327,7 +342,23 @@ private theorem not_violates_of_goodLog (hfixed : sys.FixedOk) (hshards : 1 ≤ 
     hcov.two hcov.final hcov.margin hcov.height
     (Nat.add_le_add_left (Nat.add_le_add_right
       (le_trans (Compiled.Params.rounds_le _) hcov.two) 2) 4)
-    hshape _ _ _ _ hβ hγ hs rfl hcheck).1
+    hshape _ _ _ _ hβ hγ hs rfl hcheck
+
+/-- **In a good log, an accepted and covered attempt violates no constraint.**
+Take a good log that holds the queries of the verification of the attempt, and
+an answer function that agrees with it. If `Stark.verify` accepts the attempt
+against the function and the attempt is covered, no constraint fails. -/
+private theorem not_violates_of_goodLog (hfixed : sys.FixedOk) (hshards : 1 ≤ B.shards) {N : ℕ}
+    (hN : BoundsLE sys B N)
+    (hcast : ∀ a b : ℕ, a ≤ N → b ≤ N → (a : K) = (b : K) → a = b)
+    {l : Log (SAns F EF D K slots width)}
+    (hgood : GoodLog M sys (singleVariant sys B) θ B (maxRounds F) l)
+    {f : ∀ x, SAns F EF D K slots width x} (hf : ∀ x y, l.dlookup x = some y → f x = y)
+    (a : SAttempt F EF D) {l₀ : Log (SAns F EF D K slots width)} {b : Bool}
+    (hout : Outcome (shardComp M sys a.proof (firstMessage sys a.proof a.claims) []) l₀ b l)
+    (hacc : verifyAccepts M sys f a = true) (hcov : Covered M sys θ B a) :
+    ¬ Violates M sys θ l f a :=
+  (verify_good M sys θ B hfixed hshards hN hcast hgood hf a hout hacc hcov).1
 
 /-- **Soundness of `Stark.verify`.** The probability that some answer function
 that agrees with the final log makes `Stark.verify` accept a covered attempt

@@ -73,3 +73,4 @@ import CertiFriProofs.Exec.Stark.ShardGood
 import CertiFriProofs.Exec.Stark.Soundness
 import CertiFriProofs.Exec.Stark.SoundnessBatch
 import CertiFriProofs.Exec.Stark.Unconditional
+import CertiFriProofs.Exec.Stark.Lookups

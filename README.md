@@ -5,8 +5,8 @@ Only the verifier is certified. The prover is an ordinary Rust program.
 
 The protocol is Plonky3's `TwoAdicFriPcs` at revision `3152b14a`, the revision
 the Rust prover pins, with folding by two. The theorems are about the
-commitment scheme. The STARK built on it, multi-stark, has a verifier here too
-(`CertiFri/Stark/`), which is tested and not yet proved: see
+commitment scheme and about the verifier of the STARK built on it, multi-stark
+(`CertiFri/Stark/`): see
 [The multi-stark verifier](#the-multi-stark-verifier). The protocol is not
 zero-knowledge.
 
@@ -34,8 +34,15 @@ zero-knowledge.
 - **The multi-stark verifier** (`Stark.verify`, `Stark.verifyBatch` in
   `CertiFri/Stark/`) is a port of the STARK verifier that runs on this
   commitment scheme. It accepts proofs made by multi-stark and derives the
-  same challenges (`CertiFriTest/Stark/MultiStark.lean`). **Nothing is proved
-  about it.**
+  same challenges (`CertiFriTest/Stark/MultiStark.lean`). **It is proved
+  sound** in the random-oracle model (`Exec.Stark.soundness_verify_ud`,
+  `Exec.Stark.soundness_verifyBatch_ud`): except with small probability, an
+  accepted proof has committed columns that decode to base-field traces which
+  satisfy every constraint on every row, and whose lookup messages are
+  balanced. The theorems cover proofs within stated size bounds whose traces
+  are tall enough for unique decoding, and they assume laws of the field
+  implementation that are not proved for Goldilocks here; see
+  [What is proved about it](#what-is-proved-about-it).
 
 ## The verifier
 
@@ -217,7 +224,7 @@ evaluation of the final polynomial (`Proofs/CertiFriProofs/Poly.lean`).
 `CertiFri/Stark/` is a port of the verifier of
 [multi-stark](https://github.com/argumentcomputer/multi-stark) at revision
 `3515632`: a STARK for systems of several circuits connected by lookups, over
-Plonky3's FRI. Nothing is proved about it yet.
+Plonky3's FRI.
 
 ```lean
 Stark.verify      inputMmcs friMmcs chal init sys claims proof : Bool   -- System::verify_multiple_claims
@@ -240,8 +247,110 @@ constraints among them, on the opened values.
 | `Stark/System.lean` | Systems, proofs, batch preambles |
 | `Stark/Verifier.lean` | The shape check, the transcript, the opening claims, the constraint check, `verify`, `verifyBatch` |
 
-What a soundness theorem for it would say, and what it needs beyond the
-theorems above, is not written down in this repository yet.
+### What is proved about it
+
+The theorems are in `Proofs/CertiFriProofs/Exec/Stark/`, over the algebra in
+`Proofs/CertiFriProofs/Theory/Stark/`. All are on `propext`, `Classical.choice`
+and `Quot.sound`, with no `sorry`.
+
+**The experiment.** The system (the verifying key) is fixed. An adversary with
+`Q` queries to a random oracle outputs public claims and a proof, or a batch.
+Then the queries of the verification are made. One oracle answers the
+challenge queries of the Fiat–Shamir chains and the hash queries of the Merkle
+trees.
+
+**Soundness** (`soundness_verify_ud`, `soundness_verifyBatch_ud` in
+`Unconditional.lean`). Let `δ ≥ 0` with `2 * δ + 2 ^ (-logBlowup) ≤ 1`. The
+probability of the following event is at most
+`N * starkErr + ((S + 1) * r + 3) * N * (N - 1) / (2 * |D|)`: some answer
+function that agrees with the final log makes the verifier accept a *covered*
+proof, and some constraint value of some active circuit (a zero of its graph,
+or a lookup constraint) is not zero on some row of its trace domain. The
+constraint values are those of the polynomials that the committed columns
+decode to, at agreement `1 - δ`, against the log; they are functions of the
+commitments and the oracle queries alone.
+
+`N` is the number of oracle queries of the experiment, `S` the bound on the
+number of shards, `r` the largest number of rounds of a chain and `|D|` the
+number of digests. `starkErr` is the largest error of a round:
+
+| Round | Error |
+| --- | --- |
+| lookup challenge `β` | `2 * itemBound / \|K\|` |
+| lookup challenge `γ` | `2 * itemBound * lenBound / \|K\|` |
+| constraint challenge `α` | `(constraintBound - 1) / \|K\|` |
+| out-of-domain point `ζ` | `zetaBound / \|K\|` |
+| opening proof, batching | `valueBound * c / \|K\|` |
+| opening proof, each folding round | `2 * c / \|K\| / 2 ^ commitPowBits` |
+| opening proof, queries | `(1 - δ) ^ numQueries / 2 ^ queryPowBits` |
+
+Here `c = 2 ^ n * (δ * 2 ^ n + 1) + 1` with `n = maxLogDegree + logBlowup`;
+`itemBound` bounds the number of lookup messages and `lenBound` their length,
+`constraintBound` is the largest number of constraint values of a circuit,
+`zetaBound` the degree of the polynomial checked at `ζ`, and `valueBound` the
+number of opened values.
+
+**What the conclusion means** (`Meaning.lean`, `Lookups.lean`). For a system
+whose zeros and lookups read only the fixed and the main traces
+(`Circuit.PlainOk`):
+
+- every zero of every active circuit holds on every row, on the values of the
+  decoded fixed and main columns (`zeros_of_not_constraintFail`), and these
+  columns have base-field coefficients (`coeff_shardCols_mem_base`);
+- the lookup messages of the proof are balanced
+  (`soundness_verify_lookups_ud`, `soundness_verifyBatch_lookups_ud`, with
+  the same bound): the public
+  claims, what every circuit sends on every row of its trace, and the messages
+  of a batch are such that, for every message, its multiplicities add up to
+  zero in the field.
+
+**On the way.** The state function of the protocol and its round-by-round
+soundness (`rbrSound_sdoomed` in `State.lean`); the injectivity of the
+transcript encoding of both entry points (`Encode.lean`); the round-by-round
+soundness of the opening protocol for every supported shape, with one error
+bound (`PcsSound.lean`); the refinement of the executable checks
+(`Arith.lean`, `Run.lean`).
+
+### What these theorems assume
+
+- **The random-oracle model with ideal primitives**, as for the commitment
+  scheme. The challenger is idealised (`uChallenger`): the field challenge, the
+  proof-of-work bits and the query indices of a round are independent parts of
+  one uniform answer of the oracle to everything absorbed so far. Merkle trees
+  hash with the same oracle.
+- **`StarkModel`**: the executable fields implement a field, with the
+  extension basis and coordinates the verifier uses, and compatible two-adic
+  generators that are primitive roots. These laws are not proved for the
+  Goldilocks code of `CertiFriP3`.
+- **A system fixed before the adversary runs.** The transcript absorbs the
+  sizes of the circuits, not their constraint graphs.
+- **`Covered`**, a condition on the proof the event is about:
+  - the numbers of shards, public claims and messages, and their lengths, are
+    within bounds that enter the errors, and all sizes are below the
+    characteristic;
+  - the margin of unique decoding holds at the height of every committed
+    matrix: for a trace of `2 ^ k` rows,
+    `2 * δ + 2 ^ (-logBlowup) + 3 / 2 ^ (k + logBlowup) ≤ 1`. A very short
+    trace does not meet it for a useful `δ`, so a proof with one is not
+    covered;
+  - the first domain of the opening exists in the field and is no larger than
+    the largest trace the system supports, times the blowup.
+- For the meaning of the conclusion: `Circuit.PlainOk`, and a characteristic
+  other than two.
+
+### What they do not establish
+
+- What the constraints mean for a particular system, and any policy on claims
+  and messages (ix's `validate_preamble` is not part of multi-stark and not
+  modelled). "Balanced" is in the field: multiplicities are field elements, and
+  two messages that differ by trailing zeros are the same message.
+- Anything about proofs that are not covered: very short traces, or more
+  shards, claims or messages than the bounds.
+- Completeness of the STARK verifier, which is tested on proofs made by
+  multi-stark and not proved. Zero knowledge.
+- The exact degree: a decoded column has degree at most `2 ^ k`, one more than
+  an honest column of a trace of `2 ^ k` rows.
+- The Plonky3 instantiation, as for the commitment scheme.
 
 ## Tests
 
@@ -302,7 +411,7 @@ claimed value; Plonky3 inverts one per opening point, in a batch.
 
 | Path | Contents |
 | --- | --- |
-| `CertiFri/` | The certified FRI verifier, and the port of the multi-stark verifier (`Stark/`, not proved). No dependency beyond the Lean toolchain. Proofs that need only core Lean sit next to the code. |
+| `CertiFri/` | The certified FRI verifier, and the port of the multi-stark verifier (`Stark/`). No dependency beyond the Lean toolchain. Proofs that need only core Lean sit next to the code. |
 | `CertiFriP3/` | The Plonky3 instantiation: Goldilocks, BLAKE3, the challenger, pruned Merkle proofs. Tested, not proved. |
 | `CertiFriTest/` | Executable checks against reference code and against Plonky3, and the generators of their vectors. |
 | `Proofs/` | A separate Lake package that depends on Mathlib and on `CertiFri`: the security theory, and the refinement of the executable verifier to it. |

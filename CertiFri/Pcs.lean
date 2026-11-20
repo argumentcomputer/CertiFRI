@@ -18,8 +18,9 @@ which a shape cannot express. Plonky3 rejects such claims (the count of values
 at every point must be the width of the opened row), and so does
 `verifyClaims`.
 
-Nothing is proved here. The security theorems are about `Fri.verify`; this
-file only rearranges its input.
+Nothing is proved here. The security theorems are about `Fri.verify`, and
+about the multi-stark verifier, which calls `verifyClaimsFrom`; this file only
+rearranges its input.
 -/
 
 namespace CertiFri.Fri

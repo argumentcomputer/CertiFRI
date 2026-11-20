@@ -41,7 +41,9 @@ constants are read off the basis (`basisTable`).
   for the quadratic extension of Goldilocks, not proved.
 * A missing column or node reads zero, where multi-stark panics.
 
-Nothing is proved here.
+Nothing is proved here. What these values mean is proved in the proofs
+package (`Proofs/CertiFriProofs/Theory/Stark/Logup.lean`, and
+`Exec/Stark/Arith.lean` for this executable code).
 -/
 
 namespace CertiFri.Stark

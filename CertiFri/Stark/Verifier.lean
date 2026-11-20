@@ -80,8 +80,11 @@ before the proof is made.
 
 ## What is proved
 
-Nothing in this file. The acceptance of proofs made by multi-stark is tested
-(`CertiFriTest/Stark`).
+Nothing in this file. The proofs package proves `verify` and `verifyBatch`
+sound in the random-oracle model, with ideal primitives
+(`Proofs/CertiFriProofs/Exec/Stark/`, `soundness_verify_ud` and
+`soundness_verifyBatch_ud`). The acceptance of proofs made by multi-stark is
+tested (`CertiFriTest/Stark`).
 -/
 
 namespace CertiFri.Stark

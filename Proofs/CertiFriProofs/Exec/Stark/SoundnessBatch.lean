@@ -37,6 +37,10 @@ that
 * `soundness_verifyBatch`: the probability of the event is at most
   `N * εmax + ((B.shards + 1) * r + 3) * N * (N - 1) / (2 * |D|)`, with
   `N = Q + B.shards * shardQueries sys twoAdicity` and `r = maxRounds F`.
+* `verifyBatch_good`: the deterministic part, for one shard. In a good log, no
+  constraint of a shard of an accepted and covered batch fails, and if the
+  lookup messages of the batch are not balanced, `balPoly` of them does not
+  vanish at the shared lookup challenges (used in `Exec/Stark/Lookups.lean`).
 
 ## Proof
 
@@ -59,8 +63,8 @@ read (`digestsOf_batchFirstMessage`).
 Those of `soundness_verify`. The sum check on the residuals of the shards and
 the messages of the batch is not used here: this theorem is about the
 constraints of each shard; what the sum check adds is that the lookup messages
-of the whole batch are balanced (`Exec/Stark/State.lean`,
-`balance_of_sdoomedL`).
+of the whole batch are balanced (`Exec/Stark/Lookups.lean`,
+`soundness_verifyBatch_lookups`).
 -/
 
 namespace CertiFri.Exec.Stark
@@ -198,7 +202,7 @@ private theorem queryBound_shardsComp (m0 : RawMsg F EF D)
 omit [DecidableEq F] [DecidableEq EF] in
 /-- The experiment makes at most `Q + B.shards * shardQueries sys twoAdicity`
 queries. -/
-private theorem queryBound_batchExperiment {A : Type}
+theorem queryBound_batchExperiment {A : Type}
     {adv : OracleComp (SAns F EF D K slots width) A} {Q : ℕ} (hadv : adv.QueryBound Q)
     (attempt : A → BAttempt F EF D) :
     (batchExperiment M sys B adv attempt).QueryBound
@@ -323,7 +327,7 @@ omit [FieldOps EF] [TwoAdicOps F] [ExtensionOps F EF] [Inhabited D] [DecidableEq
   [DecidableEq EF] in
 /-- With room for the shards of the preamble, the digests of the first message
 of `Stark.verifyBatch` are all read. -/
-private theorem digestsOf_batchFirstMessage {pre : BatchPreamble F D}
+theorem digestsOf_batchFirstMessage {pre : BatchPreamble F D}
     (hshards : pre.headers.size ≤ B.shards) :
     digestsOf B (batchFirstMessage (EF := EF) sys pre) =
       sys.preprocessedCommit.toList ++ pre.headers.toList.map (·.stage1Commit) := by
@@ -365,7 +369,7 @@ the shape check, the activation bitmap, the commitment to the main traces and
 the trace heights of the header are those of the proof, and the checks that
 follow the lookup challenges pass, from the shared state after the position of
 the shard is absorbed. -/
-private theorem shardOk_of_batchAccepts {f : ∀ x, SAns F EF D K slots width x}
+theorem shardOk_of_batchAccepts {f : ∀ x, SAns F EF D K slots width x}
     {a : BAttempt F EF D} (hacc : batchAccepts M sys f a = true) :
     a.preamble.headers.size = a.proofs.size ∧
       ∀ (i : ℕ) (hdr : ShardHeader F D)
@@ -406,13 +410,15 @@ private theorem shardOk_of_batchAccepts {f : ∀ x, SAns F EF D K slots width x}
   obtain ⟨⟨⟨⟨hshape, hactive⟩, hstage1⟩, hlogs⟩, -, hcheck⟩ := h
   exact ⟨hshape, hactive, hstage1, hlogs, hcheck⟩
 
-/-- **In a good log, an accepted and covered batch violates no constraint.**
-Take a good log that holds the queries of the verification of the first
-`B.shards` shards of the batch, and an answer function that agrees with it. If
-`Stark.verifyBatch` accepts the batch against the function and the batch is
-covered, no constraint of any shard fails. -/
-private theorem not_batchViolates_of_goodLog (hfixed : sys.FixedOk) {N : ℕ}
-    (hN : BoundsLE sys B N)
+/-- **In a good log, a shard of an accepted and covered batch violates no
+constraint, and the lookup challenges of the batch are not roots of
+`balPoly`.** Take a good log that holds the queries of the verification of the
+first `B.shards` shards of the batch, and an answer function that agrees with
+it. If `Stark.verifyBatch` accepts the batch against the function and the batch
+is covered, then for the header and the proof at any position no constraint
+fails, and if the lookup messages of the batch are not balanced, `balPoly` of
+them does not vanish at the two shared lookup challenges of the run. -/
+theorem verifyBatch_good (hfixed : sys.FixedOk) {N : ℕ} (hN : BoundsLE sys B N)
     (hcast : ∀ a b : ℕ, a ≤ N → b ≤ N → (a : K) = (b : K) → a = b)
     {l : Log (SAns F EF D K slots width)}
     (hgood : GoodLog M sys (batchVariant sys B N) θ B (maxRounds F) l)
@@ -420,9 +426,23 @@ private theorem not_batchViolates_of_goodLog (hfixed : sys.FixedOk) {N : ℕ}
     (a : BAttempt F EF D) {l₀ : Log (SAns F EF D K slots width)} {b : Bool}
     (hout : Outcome (shardsComp M sys (batchFirstMessage sys a.preamble)
       (a.proofs.toList.take B.shards) 0) l₀ b l)
-    (hacc : batchAccepts M sys f a = true) (hcov : BatchCovered M sys θ B a) :
-    ¬ BatchViolates M sys θ l f a := by
-  rintro ⟨i, hdr, proof, hhdr, hproof, hfail⟩
+    (hacc : batchAccepts M sys f a = true) (hcov : BatchCovered M sys θ B a) {i : ℕ}
+    {hdr : ShardHeader F D} {proof : Proof F EF D (Array (List D)) (Array (List D))}
+    (hhdr : a.preamble.headers[i]? = some hdr) (hproof : a.proofs[i]? = some proof) :
+    ¬ ConstraintFail M sys θ (M.baseRows (committedRow l)) proof.active proof.logDegrees
+        proof.stage1Commit proof.stage2Commit proof.quotientCommit
+        (M.ext.toModel (batchLookupOf M sys f a).1) (M.ext.toModel (batchLookupOf M sys f a).2)
+        (M.ext.toModel (claimsAccumulator (batchLookupOf M sys f a).1 (batchLookupOf M sys f a).2
+          hdr.claims).2)
+        (proof.intermediateAccumulators.map M.ext.toModel) ∧
+      (¬ Balanced (allItems M sys θ
+          (M.baseRows (readMsg B (batchFirstMessage sys a.preamble : RawMsg F EF D)
+            (committedRow l)).2) a.preamble) →
+        ((balPoly (allItems M sys θ
+          (M.baseRows (readMsg B (batchFirstMessage sys a.preamble : RawMsg F EF D)
+            (committedRow l)).2) a.preamble)).eval
+            (Polynomial.C (M.ext.toModel (batchLookupOf M sys f a).1))).eval
+          (M.ext.toModel (batchLookupOf M sys f a).2) ≠ 0) := by
   obtain ⟨hsz, hall⟩ := shardOk_of_batchAccepts M sys hacc
   obtain ⟨hshape, hactive, hstage1, hlogs, hcheck⟩ := hall i hdr proof hhdr hproof
   have hmem : hdr ∈ a.preamble.headers := Array.mem_of_getElem? hhdr
@@ -472,7 +492,7 @@ private theorem not_batchViolates_of_goodLog (hfixed : sys.FixedOk) {N : ℕ}
         (fsTranscriptA f
           (nextMsg M sys proof (batchFirstMessage sys a.preamble) [observeNat i]) 2)) = i :=
     batchVariant_shard M.base sys B hcast _ (hi.le.trans hN.shards) _
-  exact (shard_good M sys (batchVariant sys B N) θ B (maxRounds F) hfixed hgood hf proof
+  exact shard_good M sys (batchVariant sys B N) θ B (maxRounds F) hfixed hgood hf proof
     (batchFirstMessage sys a.preamble) [observeNat i]
     (fun o ho => ⟨_, List.mem_singleton.mp ho⟩) hcomp hl₁ hdec hpre (hdr := hdr)
     (by rw [hshard]; exact hhdr) hactive hstage1 hlogs
@@ -484,7 +504,26 @@ private theorem not_batchViolates_of_goodLog (hfixed : sys.FixedOk) {N : ℕ}
     htwo hfinal hmargin hheight
     (Nat.add_le_add_left (Nat.add_le_add_right
       (le_trans (Compiled.Params.rounds_le _) htwo) 2) 4)
-    hshape _ _ _ _ hβ hγ hs' rfl hcheck).1 hfail
+    hshape _ _ _ _ hβ hγ hs' rfl hcheck
+
+/-- **In a good log, an accepted and covered batch violates no constraint.**
+Take a good log that holds the queries of the verification of the first
+`B.shards` shards of the batch, and an answer function that agrees with it. If
+`Stark.verifyBatch` accepts the batch against the function and the batch is
+covered, no constraint of any shard fails. -/
+private theorem not_batchViolates_of_goodLog (hfixed : sys.FixedOk) {N : ℕ}
+    (hN : BoundsLE sys B N)
+    (hcast : ∀ a b : ℕ, a ≤ N → b ≤ N → (a : K) = (b : K) → a = b)
+    {l : Log (SAns F EF D K slots width)}
+    (hgood : GoodLog M sys (batchVariant sys B N) θ B (maxRounds F) l)
+    {f : ∀ x, SAns F EF D K slots width x} (hf : ∀ x y, l.dlookup x = some y → f x = y)
+    (a : BAttempt F EF D) {l₀ : Log (SAns F EF D K slots width)} {b : Bool}
+    (hout : Outcome (shardsComp M sys (batchFirstMessage sys a.preamble)
+      (a.proofs.toList.take B.shards) 0) l₀ b l)
+    (hacc : batchAccepts M sys f a = true) (hcov : BatchCovered M sys θ B a) :
+    ¬ BatchViolates M sys θ l f a := by
+  rintro ⟨i, hdr, proof, hhdr, hproof, hfail⟩
+  exact (verifyBatch_good M sys θ B hfixed hN hcast hgood hf a hout hacc hcov hhdr hproof).1 hfail
 
 /-- **Soundness of `Stark.verifyBatch`.** The probability that some answer
 function that agrees with the final log makes `Stark.verifyBatch` accept a

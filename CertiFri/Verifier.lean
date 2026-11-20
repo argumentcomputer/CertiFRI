@@ -75,8 +75,9 @@ of degree below `2 ^ (c.logHeight - logBlowup)` that takes the value
 Nothing in this file. The proofs package relates `verify` to the model verifier
 of the security theory, and derives soundness (`Proofs/CertiFriProofs/Exec/`).
 Those theorems are about `verify`. `verifyFrom` runs the same checks on another
-transcript; what it guarantees depends on the protocol around it, and nothing
-is proved about it yet.
+transcript; what it guarantees depends on the protocol around it. For the
+multi-stark verifier, which calls it, that is proved in
+`Proofs/CertiFriProofs/Exec/Stark/`.
 -/
 
 namespace CertiFri.Fri

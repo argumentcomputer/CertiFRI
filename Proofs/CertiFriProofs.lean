@@ -64,3 +64,5 @@ import CertiFriProofs.Theory.Compiled.AcceptsCom
 import CertiFriProofs.Exec.Stark.Preamble
 import CertiFriProofs.Exec.Stark.Encode
 import CertiFriProofs.Exec.Stark.Run
+import CertiFriProofs.Exec.Stark.State
+import CertiFriProofs.Exec.Stark.GoodLog

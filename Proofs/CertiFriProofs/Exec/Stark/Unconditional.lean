@@ -25,7 +25,9 @@ puts the two together: the soundness of `Stark.verify` and of
   `N * starkErr + ((B.shards + 1) * r + 3) * N * (N - 1) / (2 * |D|)`.
 * `soundness_verify_lookups_ud`, `soundness_verifyBatch_lookups_ud`: the same
   bound for the event that the lookup messages of an accepted, covered proof
-  are not balanced (`Exec/Stark/Lookups.lean`).
+  are not balanced (`Exec/Stark/Lookups.lean`), for a system whose lookups read
+  only the fixed and main traces and the row selectors
+  (`Circuit.LookupsPlain`).
 
 ## Assumptions
 
@@ -35,6 +37,14 @@ fields, a system fixed before the adversary runs, and the conditions of
 `Covered` (size bounds, a first domain no larger than the largest trace the
 system supports times the blowup, and the margin of unique decoding at the
 height of every committed matrix).
+
+The two theorems about lookups also assume a characteristic other than two and
+that the lookups of every circuit of the system are plain
+(`Circuit.LookupsPlain`): their multiplicities and their arguments read only
+the fixed trace, the main trace and the row selectors. The zeros may read
+anything, the lookup trace and the public values included: a system with
+extension constraints is covered, as long as the nodes its lookups refer to
+come before the first node that reads the lookup trace or a public value.
 -/
 
 namespace CertiFri.Exec.Stark
@@ -151,14 +161,15 @@ theorem soundness_verifyBatch_ud [Fintype D] (hδ : 0 ≤ δ)
     (roundErr_le_starkErr M sys B δ) (starkErr_nonneg M sys B hδ) hadv attempt
 
 /-- **`Stark.verify` only accepts balanced lookups, with no hypothesis about
-the opening protocol.** For a system of plain circuits over a field of
-characteristic not two and `δ ≥ 0` with `2 * δ + (1 / 2) ^ logBlowup ≤ 1`, the
-probability that some answer function that agrees with the final log makes
-`Stark.verify` accept a covered attempt whose lookup messages are not balanced,
-at agreement `1 - δ`, is at most the bound of `soundness_verify_ud`. -/
+the opening protocol.** For a system whose lookups are plain (its zeros may
+read anything) over a field of characteristic not two and `δ ≥ 0` with
+`2 * δ + (1 / 2) ^ logBlowup ≤ 1`, the probability that some answer function
+that agrees with the final log makes `Stark.verify` accept a covered attempt
+whose lookup messages are not balanced, at agreement `1 - δ`, is at most the
+bound of `soundness_verify_ud`. -/
 theorem soundness_verify_lookups_ud [Fintype D] (hδ : 0 ≤ δ)
     (hrate : 2 * δ + (1 / 2) ^ sys.fri.logBlowup ≤ 1)
-    (hplain : ∀ c ∈ sys.circuits, c.PlainOk) (h2 : (2 : K) ≠ 0) (hfixed : sys.FixedOk)
+    (hplain : ∀ c ∈ sys.circuits, c.LookupsPlain) (h2 : (2 : K) ≠ 0) (hfixed : sys.FixedOk)
     (hshards : 1 ≤ B.shards) {N : ℕ} (hN : BoundsLE sys B N)
     (hcast : ∀ a b : ℕ, a ≤ N → b ≤ N → (a : K) = (b : K) → a = b)
     (htwo : sys.maxLogDegree ≤ TwoAdicOps.twoAdicity (F := F))
@@ -184,16 +195,16 @@ theorem soundness_verify_lookups_ud [Fintype D] (hδ : 0 ≤ δ)
     (roundErr_le_starkErr M sys B δ) (starkErr_nonneg M sys B hδ) hadv attempt
 
 /-- **`Stark.verifyBatch` only accepts balanced lookups, with no hypothesis
-about the opening protocol.** For a system of plain circuits over a field of
-characteristic not two and `δ ≥ 0` with `2 * δ + (1 / 2) ^ logBlowup ≤ 1`, the
-probability that some answer function that agrees with the final log makes
-`Stark.verifyBatch` accept a covered batch whose lookup messages are not
-balanced, at agreement `1 - δ`, is at most the bound of
-`soundness_verifyBatch_ud`. -/
+about the opening protocol.** For a system whose lookups are plain (its zeros
+may read anything) over a field of characteristic not two and `δ ≥ 0` with
+`2 * δ + (1 / 2) ^ logBlowup ≤ 1`, the probability that some answer function
+that agrees with the final log makes `Stark.verifyBatch` accept a covered batch
+whose lookup messages are not balanced, at agreement `1 - δ`, is at most the
+bound of `soundness_verifyBatch_ud`. -/
 theorem soundness_verifyBatch_lookups_ud [Fintype D] (hδ : 0 ≤ δ)
     (hrate : 2 * δ + (1 / 2) ^ sys.fri.logBlowup ≤ 1)
-    (hplain : ∀ c ∈ sys.circuits, c.PlainOk) (h2 : (2 : K) ≠ 0) (hfixed : sys.FixedOk) {N : ℕ}
-    (hN : BoundsLE sys B N)
+    (hplain : ∀ c ∈ sys.circuits, c.LookupsPlain) (h2 : (2 : K) ≠ 0) (hfixed : sys.FixedOk)
+    {N : ℕ} (hN : BoundsLE sys B N)
     (hcast : ∀ a b : ℕ, a ≤ N → b ≤ N → (a : K) = (b : K) → a = b)
     (htwo : sys.maxLogDegree ≤ TwoAdicOps.twoAdicity (F := F))
     (hslots : sys.fri.numQueries + 1 ≤ slots) (hcommit : sys.fri.commitPowBits ≤ width)

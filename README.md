@@ -290,19 +290,28 @@ Here `c = 2 ^ n * (δ * 2 ^ n + 1) + 1` with `n = maxLogDegree + logBlowup`;
 `zetaBound` the degree of the polynomial checked at `ζ`, and `valueBound` the
 number of opened values.
 
-**What the conclusion means** (`Meaning.lean`, `Lookups.lean`). For a system
-whose zeros and lookups read only the fixed and the main traces
-(`Circuit.PlainOk`):
+**What the conclusion means** (`Meaning.lean`, `Lookups.lean`,
+`Theory/Stark/BalanceInt.lean`).
 
-- every zero of every active circuit holds on every row, on the values of the
-  decoded fixed and main columns (`zeros_of_not_constraintFail`), and these
-  columns have base-field coefficients (`coeff_shardCols_mem_base`);
-- the lookup messages of the proof are balanced
-  (`soundness_verify_lookups_ud`, `soundness_verifyBatch_lookups_ud`, with
-  the same bound): the public
-  claims, what every circuit sends on every row of its trace, and the messages
-  of a batch are such that, for every message, its multiplicities add up to
-  zero in the field.
+- If the zeros of a circuit read only the fixed and the main traces
+  (`Circuit.ZerosPlain`), every one of them holds on every row, on the values
+  of the decoded fixed and main columns (`zeros_of_not_constraintFail`). These
+  columns have base-field coefficients (`coeff_shardCols_mem_base`).
+- If the lookups of every circuit read only the fixed and the main traces
+  (`Circuit.LookupsPlain`; the zeros may read anything), the lookup messages of
+  an accepted proof are balanced (`soundness_verify_lookups_ud`,
+  `soundness_verifyBatch_lookups_ud`, with the same bound): the public claims,
+  what every circuit sends on every row of its trace, and the messages of a
+  batch are such that, for every message, its multiplicities add up to zero in
+  the field. multi-stark compiles the lookups of a circuit first and without
+  the lookup trace, so its systems meet the condition once public values are
+  kept out of lookups.
+- Balanced in the field is balanced over the integers when the multiplicities
+  are integers whose absolute values add up to less than the characteristic
+  (`balanced_int_of_balanced`); for multiplicities `1` and `-1`, the multiset
+  of sent messages is then the multiset of received ones
+  (`map_fpPoly_eq_of_balanced`). That the multiplicities of a circuit are such
+  integers is not proved here.
 
 **On the way.** The state function of the protocol and its round-by-round
 soundness (`rbrSound_sdoomed` in `State.lean`); the injectivity of the
@@ -335,8 +344,8 @@ bound (`PcsSound.lean`); the refinement of the executable checks
     covered;
   - the first domain of the opening exists in the field and is no larger than
     the largest trace the system supports, times the blowup.
-- For the meaning of the conclusion: `Circuit.PlainOk`, and a characteristic
-  other than two.
+- For the meaning of the conclusion: `Circuit.ZerosPlain` or
+  `Circuit.LookupsPlain` as above, and a characteristic other than two.
 
 ### What they do not establish
 

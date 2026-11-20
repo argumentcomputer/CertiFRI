@@ -13,8 +13,9 @@ the verifier's checks on the sums give: the lookup messages of the whole proof
 
 ## The statement
 
-For a system whose zeros and lookups read only the fixed and main traces
-(`Circuit.PlainOk`), the lookup messages of an attempt are (`allItems`):
+For a system whose lookups read only the fixed and main traces and the row
+selectors (`Circuit.LookupsPlain`; its zeros may read anything), the lookup
+messages of an attempt are (`allItems`):
 
 * every public claim, with multiplicity one;
 * for every active circuit and every row of its trace, every lookup of the
@@ -36,7 +37,12 @@ message, the multiplicities with which it occurs add up to zero in the field.
 
 Those of `soundness_verify` and `soundness_verifyBatch`, and
 
-* every circuit of the system is `PlainOk`;
+* the lookups of every circuit of the system are plain
+  (`Circuit.LookupsPlain`): their multiplicities and their arguments read only
+  the fixed trace, the main trace and the row selectors. The zeros may read
+  anything, the lookup trace and the public values included: a system with
+  extension constraints is covered, as long as the nodes its lookups refer to
+  come before the first node that reads the lookup trace or a public value;
 * the characteristic is not two.
 
 "Balanced" is in the field: a multiplicity that is a multiple of the
@@ -171,12 +177,13 @@ private theorem rowAgree_plainRow_of_congr {com com' : Compiled.Committed K D}
       hmain
 
 omit [FieldOps F] [TwoAdicOps F] [DecidableEq K] [DecidableEq F] in
-/-- The messages of a plain circuit are the same on rows that agree on the
-fixed trace, the main trace and the selectors. -/
-private theorem circuitItems_congr_of_rowAgree (ι : F → K) {c : Circuit F} (hplain : c.PlainOk)
-    {rows rows' : ℕ → RowValues K} (h : ∀ r, RowAgree (rows r) (rows' r)) (n : ℕ) :
+/-- The messages of a circuit with plain lookups are the same on rows that
+agree on the fixed trace, the main trace and the selectors. -/
+private theorem circuitItems_congr_of_rowAgree (ι : F → K) {c : Circuit F}
+    (hplain : c.LookupsPlain) {rows rows' : ℕ → RowValues K}
+    (h : ∀ r, RowAgree (rows r) (rows' r)) (n : ℕ) :
     circuitItems ι c rows n = circuitItems ι c rows' n := by
-  obtain ⟨k, hnodes, -, hlookups⟩ := hplain
+  obtain ⟨k, hnodes, hlookups⟩ := hplain
   rw [circuitItems, circuitItems]
   refine List.flatMap_congr fun r _ => List.map_congr_left fun l hl => ?_
   obtain ⟨hm, hargs⟩ := hlookups l (Array.mem_toList_iff.mp hl)
@@ -185,12 +192,13 @@ private theorem circuitItems_congr_of_rowAgree (ι : F → K) {c : Circuit F} (h
   exact getD_sweep_congr_of_plain ι _ k hnodes (h r) (hargs a (Array.mem_toList_iff.mp ha))
 
 omit [DecidableEq D] [DecidableEq F] [DecidableEq EF] in
-/-- **The lookup messages of a shard of plain circuits**: its public claims,
-each with multiplicity one, then `shardLookupItems`, for any committed rows
-`com'` with the same rows as `com` under the commitments to the main traces and
-to the fixed traces. -/
+/-- **The lookup messages of a shard of circuits with plain lookups**: its
+public claims, each with multiplicity one, then `shardLookupItems`, for any
+committed rows `com'` with the same rows as `com` under the commitments to the
+main traces and to the fixed traces. -/
 private theorem headerItems_eq {com com' : Compiled.Committed K D} {h : ShardHeader F D}
-    (hplain : ∀ p ∈ (activeIndices h.active).zipIdx, (sys.circuits.getD p.1 default).PlainOk)
+    (hplain : ∀ p ∈ (activeIndices h.active).zipIdx,
+      (sys.circuits.getD p.1 default).LookupsPlain)
     (h1 : com h.stage1Commit = com' h.stage1Commit)
     (h3 : ∀ root, sys.preprocessedCommit = some root → com root = com' root) :
     headerItems M sys θ com h =
@@ -246,14 +254,15 @@ private theorem sizes_of_shapeOk {InputProof CommitProof : Type}
 
 omit [DecidableEq D] [DecidableEq F] [DecidableEq EF] in
 /-- **The residual of a shard is the lookup sum of its messages.** Take a proof
-that passes the shape check, with the header `hdr`, for a system of plain
-circuits. If no public claim has a zero denominator, no constraint of the proof
-fails for the committed rows `com`, and no lookup message of the shard has a
-zero denominator at the lookup challenges, then the lookup sum leaving the last
-circuit is the lookup sum of the messages of the shard. The messages are read
-off any committed rows `com'` with the same rows as `com` under the commitments
-to the main traces and to the fixed traces. -/
-private theorem toModel_residual (hplain : ∀ c ∈ sys.circuits, c.PlainOk) (h2 : (2 : K) ≠ 0)
+that passes the shape check, with the header `hdr`, for a system whose lookups
+are plain. If no public claim has a zero denominator, no constraint of the
+proof fails for the committed rows `com`, and no lookup message of the shard
+has a zero denominator at the lookup challenges, then the lookup sum leaving
+the last circuit is the lookup sum of the messages of the shard. The messages
+are read off any committed rows `com'` with the same rows as `com` under the
+commitments to the main traces and to the fixed traces. -/
+private theorem toModel_residual (hplain : ∀ c ∈ sys.circuits, c.LookupsPlain)
+    (h2 : (2 : K) ≠ 0)
     {com com' : Compiled.Committed K D} {InputProof CommitProof : Type}
     {proof : Proof F EF D InputProof CommitProof} {hdr : ShardHeader F D}
     (hshape : Stark.shapeOk sys proof = true) (hactive : hdr.active = proof.active)
@@ -277,7 +286,7 @@ private theorem toModel_residual (hplain : ∀ c ∈ sys.circuits, c.PlainOk) (h
   dsimp only at hactive hstage1 hlogs hclaims hfail
   subst hactive hstage1 hlogs
   have hpl : ∀ p ∈ (activeIndices proof.active).zipIdx,
-      (sys.circuits.getD p.1 default).PlainOk := fun p hp =>
+      (sys.circuits.getD p.1 default).LookupsPlain := fun p hp =>
     hplain _ (getD_mem_circuits_of_active hsize hp)
   rw [headerItems_eq (h := ⟨proof.active, proof.stage1Commit, proof.logDegrees, claims⟩) hpl h1
     h3] at hne ⊢
@@ -310,15 +319,15 @@ end Shard
 /-! ## One proof -/
 
 /-- **In a good log, the lookup messages of an accepted and covered attempt are
-balanced.** Take a system of plain circuits over a field of characteristic not
-two, a good log that holds the queries of the verification of the attempt, and
-an answer function that agrees with it. If `Stark.verify` accepts the attempt
-against the function and the attempt is covered, its lookup messages are
-balanced: otherwise `balPoly` would not vanish at the lookup challenges
-(`verify_good`), so the lookup sum of the messages would not be zero; but it is
-the lookup sum leaving the last circuit, which the verifier checks to be
-zero. -/
-private theorem lookupsBalanced_of_goodLog (hplain : ∀ c ∈ sys.circuits, c.PlainOk)
+balanced.** Take a system whose lookups are plain over a field of
+characteristic not two, a good log that holds the queries of the verification
+of the attempt, and an answer function that agrees with it. If `Stark.verify`
+accepts the attempt against the function and the attempt is covered, its lookup
+messages are balanced: otherwise `balPoly` would not vanish at the lookup
+challenges (`verify_good`), so the lookup sum of the messages would not be
+zero; but it is the lookup sum leaving the last circuit, which the verifier
+checks to be zero. -/
+private theorem lookupsBalanced_of_goodLog (hplain : ∀ c ∈ sys.circuits, c.LookupsPlain)
     (h2 : (2 : K) ≠ 0) (hfixed : sys.FixedOk) (hshards : 1 ≤ B.shards) {N : ℕ}
     (hN : BoundsLE sys B N)
     (hcast : ∀ a b : ℕ, a ≤ N → b ≤ N → (a : K) = (b : K) → a = b)
@@ -359,12 +368,13 @@ private theorem lookupsBalanced_of_goodLog (hplain : ∀ c ∈ sys.circuits, c.P
   -- The verifier checked that the last lookup sum is zero.
   exact hsum (hlast.symm.trans (((M.ext.beq_iff _ _).mp hres).trans M.ext.map_zero))
 
-/-- **`Stark.verify` only accepts balanced lookups.** For a system of plain
-circuits over a field of characteristic not two, the probability that some
-answer function that agrees with the final log makes `Stark.verify` accept a
-covered attempt whose lookup messages are not balanced is at most the bound of
-`soundness_verify`. -/
-theorem soundness_verify_lookups [Fintype K] [Fintype D] (hplain : ∀ c ∈ sys.circuits, c.PlainOk)
+/-- **`Stark.verify` only accepts balanced lookups.** For a system whose
+lookups are plain (its zeros may read anything) over a field of characteristic
+not two, the probability that some answer function that agrees with the final
+log makes `Stark.verify` accept a covered attempt whose lookup messages are not
+balanced is at most the bound of `soundness_verify`. -/
+theorem soundness_verify_lookups [Fintype K] [Fintype D]
+    (hplain : ∀ c ∈ sys.circuits, c.LookupsPlain)
     (h2 : (2 : K) ≠ 0) (hfixed : sys.FixedOk) (hshards : 1 ≤ B.shards) {N : ℕ}
     (hN : BoundsLE sys B N)
     (hcast : ∀ a b : ℕ, a ≤ N → b ≤ N → (a : K) = (b : K) → a = b) {εpcs εmax : ℝ}
@@ -460,15 +470,17 @@ private theorem toModel_foldl_residual {InputProof CommitProof : Type} (β γ : 
         List.flatMap_cons, lookupSum_append, add_assoc]
 
 /-- **In a good log, the lookup messages of an accepted and covered batch are
-balanced.** Take a system of plain circuits over a field of characteristic not
-two, a good log that holds the queries of the verification of the first
-`B.shards` shards of the batch, and an answer function that agrees with it. If
-`Stark.verifyBatch` accepts the batch against the function and the batch is
-covered, its lookup messages are balanced: otherwise `balPoly` would not vanish
-at the shared lookup challenges (`verifyBatch_good`), so the lookup sum of the
-messages would not be zero; but it is the lookup sum of the messages of the
-batch plus the residuals of the shards, which the verifier checks to be zero. -/
-private theorem batchLookupsBalanced_of_goodLog (hplain : ∀ c ∈ sys.circuits, c.PlainOk)
+balanced.** Take a system whose lookups are plain over a field of
+characteristic not two, a good log that holds the queries of the verification
+of the first `B.shards` shards of the batch, and an answer function that agrees
+with it. If `Stark.verifyBatch` accepts the batch against the function and the
+batch is covered, its lookup messages are balanced: otherwise `balPoly` would
+not vanish at the shared lookup challenges (`verifyBatch_good`), so the lookup
+sum of the messages would not be zero; but it is the lookup sum of the messages
+of the batch plus the residuals of the shards, which the verifier checks to be
+zero. -/
+private theorem batchLookupsBalanced_of_goodLog
+    (hplain : ∀ c ∈ sys.circuits, c.LookupsPlain)
     (h2 : (2 : K) ≠ 0) (hfixed : sys.FixedOk) {N : ℕ} (hN : BoundsLE sys B N)
     (hcast : ∀ a b : ℕ, a ≤ N → b ≤ N → (a : K) = (b : K) → a = b)
     {l : Log (SAns F EF D K slots width)}
@@ -538,13 +550,13 @@ private theorem batchLookupsBalanced_of_goodLog (hplain : ∀ c ∈ sys.circuits
   rw [allItems, lookupSum_append, add_comm, ← hm, ← hfold, Array.foldl_toList]
   exact ((M.ext.beq_iff _ _).mp hzero).trans M.ext.map_zero
 
-/-- **`Stark.verifyBatch` only accepts balanced lookups.** For a system of
-plain circuits over a field of characteristic not two, the probability that
-some answer function that agrees with the final log makes `Stark.verifyBatch`
-accept a covered batch whose lookup messages are not balanced is at most the
-bound of `soundness_verifyBatch`. -/
+/-- **`Stark.verifyBatch` only accepts balanced lookups.** For a system whose
+lookups are plain (its zeros may read anything) over a field of characteristic
+not two, the probability that some answer function that agrees with the final
+log makes `Stark.verifyBatch` accept a covered batch whose lookup messages are
+not balanced is at most the bound of `soundness_verifyBatch`. -/
 theorem soundness_verifyBatch_lookups [Fintype K] [Fintype D]
-    (hplain : ∀ c ∈ sys.circuits, c.PlainOk) (h2 : (2 : K) ≠ 0) (hfixed : sys.FixedOk) {N : ℕ}
+    (hplain : ∀ c ∈ sys.circuits, c.LookupsPlain) (h2 : (2 : K) ≠ 0) (hfixed : sys.FixedOk) {N : ℕ}
     (hN : BoundsLE sys B N)
     (hcast : ∀ a b : ℕ, a ≤ N → b ≤ N → (a : K) = (b : K) → a = b) {εpcs εmax : ℝ}
     (hεpcs : 0 ≤ εpcs) (htwo : sys.maxLogDegree ≤ TwoAdicOps.twoAdicity (F := F))

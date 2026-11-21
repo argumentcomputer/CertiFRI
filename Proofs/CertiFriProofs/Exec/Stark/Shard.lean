@@ -15,6 +15,10 @@ the security proof follows through the rounds of the protocol.
   is the shape of `openingClaims` for a proof that passes `shapeOk`.
   `widthsUniform_openingClaims`: these claims give as many values at every
   point of a matrix as at its first.
+* `System.HeightOk`: no fixed trace of the system is taller than the largest
+  trace it supports. `logMaxHeight_starkShape_le`: then the first domain of the
+  opening of a proof that passes `shapeOk` is no larger than that trace, times
+  the blowup (`logDegree_le_of_shapeOk` for the traces of the active circuits).
 * `exists_claimRef`: every value of nested opening claims is named by a
   `ClaimRef` of their shape.
 * `shardCols`: the columns of an active circuit, as the polynomials its
@@ -106,6 +110,10 @@ def _root_.CertiFri.Stark.System.FixedOk (sys : System F D) : Prop :=
   ∀ ci, (sys.preprocessedIndices.getD ci none).isNone →
     (sys.circuits.getD ci default).preprocessedWidth = 0
 
+/-- No fixed trace is taller than the largest trace the system supports. -/
+def _root_.CertiFri.Stark.System.HeightOk (sys : System F D) : Prop :=
+  ∀ ci, Nat.log2 (sys.circuits.getD ci default).preprocessedHeight ≤ sys.maxLogDegree
+
 /-- An entry of a list of numbers is at most their maximum. -/
 private theorem le_foldr_max {l : List ℕ} {a : ℕ} (h : a ∈ l) : a ≤ l.foldr max 0 := by
   induction l with
@@ -115,6 +123,14 @@ private theorem le_foldr_max {l : List ℕ} {a : ℕ} (h : a ∈ l) : a ≤ l.fo
     rcases List.mem_cons.mp h with rfl | h
     · exact Nat.le_max_left _ _
     · exact (ih h).trans (Nat.le_max_right _ _)
+
+/-- The maximum of a list of numbers that are all at most `N` is at most `N`. -/
+private theorem foldr_max_le {l : List ℕ} {N : ℕ} (h : ∀ a ∈ l, a ≤ N) : l.foldr max 0 ≤ N := by
+  induction l with
+  | nil => exact Nat.zero_le N
+  | cons b l ih =>
+    rw [List.foldr_cons]
+    exact Nat.max_le.mpr ⟨h b List.mem_cons_self, ih fun a ha => h a (List.mem_cons_of_mem b ha)⟩
 
 /-- An active circuit of a bitmap no longer than the system is a circuit of
 the system. -/
@@ -438,6 +454,66 @@ private theorem rowsOk_fixed_of_shapeOk {InputProof CommitProof : Type} {sys : S
   · rw [hn] at hc
     cases hc
   · exact hc
+
+omit [TwoAdicOps F] in
+/-- The trace of an active circuit of a proof that passes the shape check is no
+taller than the largest trace the system supports. -/
+theorem logDegree_le_of_shapeOk {InputProof CommitProof : Type} {sys : System F D}
+    {proof : Proof F EF D InputProof CommitProof} (h : Stark.shapeOk sys proof = true)
+    {p : ℕ × ℕ} (hp : p ∈ (activeIndices proof.active).zipIdx) :
+    proof.logDegrees.getD p.2 0 ≤ sys.maxLogDegree := by
+  simp only [Stark.shapeOk, Bool.and_eq_true, List.all_eq_true, decide_eq_true_eq] at h
+  exact (h.2 p hp).1.1.1.1.1.1
+
+omit [TwoAdicOps F] in
+/-- **The first domain of an opening is no larger than the largest trace the
+system supports, times the blowup**, for a proof that passes the shape check
+and a system none of whose fixed traces is taller than that trace: the main
+trace, the lookup trace, the quotient and the fixed trace of an active circuit
+have the height the shape check bounds, and the fixed trace of an inactive
+circuit has the height the system fixes. -/
+theorem logMaxHeight_starkShape_le {InputProof CommitProof : Type} {sys : System F D}
+    (hheightOk : sys.HeightOk) {proof : Proof F EF D InputProof CommitProof}
+    (h : Stark.shapeOk sys proof = true) (d : ℕ) :
+    logMaxHeight sys.fri.logBlowup (starkShape sys d proof.active proof.logDegrees) ≤
+      sys.maxLogDegree + sys.fri.logBlowup := by
+  have htr : ∀ (width : ℕ → ℕ) (n : ℕ),
+      ∀ m ∈ traceShapes (activeIndices proof.active) proof.logDegrees width n,
+        m.logDegree ≤ sys.maxLogDegree := by
+    intro width n m hm
+    obtain ⟨p, hp, rfl⟩ := List.mem_map.mp hm
+    exact logDegree_le_of_shapeOk h hp
+  have hfix : ∀ m ∈ fixedShapes sys (activeIndices proof.active) proof.logDegrees,
+      m.logDegree ≤ sys.maxLogDegree := by
+    intro m hm
+    obtain ⟨ci, -, hm⟩ := List.mem_filterMap.mp hm
+    split at hm
+    · cases hm
+    · cases hidx : (activeIndices proof.active).idxOf? ci with
+      | some pos =>
+        rw [hidx, Option.some.injEq] at hm
+        subst hm
+        exact logDegree_le_of_shapeOk h (mem_zipIdx_of_idxOf? hidx)
+      | none =>
+        rw [hidx, Option.some.injEq] at hm
+        subst hm
+        exact hheightOk ci
+  refine foldr_max_le fun a ha => ?_
+  obtain ⟨m, hm, rfl⟩ := List.mem_map.mp ha
+  refine Nat.add_le_add_right ?_ _
+  obtain ⟨mats, hmats, hmem⟩ := List.mem_flatten.mp hm
+  rw [starkShape] at hmats
+  rcases List.mem_append.mp hmats with hmats | hmats
+  · simp only [List.mem_cons, List.not_mem_nil, or_false] at hmats
+    rcases hmats with rfl | rfl | rfl <;> exact htr _ _ m hmem
+  · cases hpc : sys.preprocessedCommit with
+    | none =>
+      rw [hpc] at hmats
+      cases hmats
+    | some c =>
+      rw [hpc] at hmats
+      obtain rfl := List.mem_singleton.mp hmats
+      exact hfix m hmem
 
 /-- The opening claims of a proof that passes the shape check have the shape
 `starkShape`. -/

@@ -28,14 +28,15 @@ message, the multiplicities with which it occurs add up to zero in the field.
 
 ## Results
 
-* `soundness_verify_lookups`: the probability that `Stark.verify` accepts a
-  covered attempt whose lookup messages are not balanced is at most the bound
-  of `soundness_verify`.
+* `soundness_verify_lookups`: the probability that `Stark.verify` accepts an
+  attempt within the size bounds (`Covered`) whose lookup messages are not
+  balanced is at most the bound of `soundness_verify`.
 * `soundness_verifyBatch_lookups`: the same for `Stark.verifyBatch`.
 
 ## Assumptions
 
-Those of `soundness_verify` and `soundness_verifyBatch`, and
+Those of `soundness_verify` and `soundness_verifyBatch` (`sys.HeightOk` among
+them; `Covered` and `BatchCovered` are the size bounds alone), and
 
 * the lookups of every circuit of the system are plain
   (`Circuit.LookupsPlain`): their multiplicities and their arguments read only
@@ -54,7 +55,7 @@ business.
 
 The probability part is that of `soundness_verify` and `soundness_verifyBatch`:
 the final log is good except with the probability of the bound. In a good log
-the messages of an accepted and covered attempt are balanced
+the messages of an accepted attempt within the size bounds are balanced
 (`lookupsBalanced_of_goodLog`, `batchLookupsBalanced_of_goodLog`):
 
 * If they were not, `balPoly` of them would not vanish at the lookup challenges
@@ -64,9 +65,11 @@ the messages of an accepted and covered attempt are balanced
 * No constraint of a shard fails, so the lookup sum leaving its last circuit is
   the lookup sum of its public claims plus that of the messages of its circuits
   (`toModel_residual`, by `messagesAccumulator_model` and
-  `lookupSum_of_not_constraintFail`). The commitments to the main and to the
-  fixed traces are read in the first message, so these messages are those of
-  `allItems` for the shard (`headerItems_eq`).
+  `lookupSum_of_not_constraintFail`; the trace domains exist in the field
+  because the shape check bounds the trace heights by `maxLogDegree`). The
+  commitments to the main and to the fixed traces are read in the first
+  message, so these messages are those of `allItems` for the shard
+  (`headerItems_eq`).
 * `Stark.verify` checks that this sum is zero. `Stark.verifyBatch` checks that
   the sums of the shards and the lookup sum of the messages of the batch add up
   to zero (`sums_of_batchAccepts`, `toModel_foldl_residual`). Either way the
@@ -224,19 +227,6 @@ private theorem getD_mem_circuits_of_active {active : Array Bool}
   rw [Array.getD_eq_getD_getElem?, Array.getElem?_eq_getElem hlt, Option.getD_some]
   exact Array.getElem_mem hlt
 
-omit [FieldOps F] [TwoAdicOps F] [Inhabited D] [DecidableEq D] [DecidableEq F] in
-/-- The trace of an active circuit is no taller than the first domain of the
-opening. -/
-private theorem logDegree_le_logMaxHeight (sys : System F D) (d : ℕ) (active : Array Bool)
-    (logDegrees : Array ℕ) {p : ℕ × ℕ} (hp : p ∈ (activeIndices active).zipIdx) :
-    logDegrees.getD p.2 0 ≤
-      logMaxHeight sys.fri.logBlowup (starkShape sys d active logDegrees) := by
-  refine le_trans (Nat.le_add_right _ sys.fri.logBlowup)
-    (le_logMaxHeight
-      (m := ⟨logDegrees.getD p.2 0, (sys.circuits.getD p.1 default).mainWidth, 2⟩) ?_)
-  exact List.mem_flatten.mpr ⟨_, List.mem_append_left _ List.mem_cons_self,
-    List.mem_map.mpr ⟨p, hp, rfl⟩⟩
-
 omit [TwoAdicOps F] [Inhabited D] [DecidableEq D] [DecidableEq F] [DecidableEq EF] in
 /-- What the shape check says about the sizes: the bitmap has one bit per
 circuit, some circuit is active, and there is one lookup sum per active
@@ -255,12 +245,13 @@ private theorem sizes_of_shapeOk {InputProof CommitProof : Type}
 omit [DecidableEq D] [DecidableEq F] [DecidableEq EF] in
 /-- **The residual of a shard is the lookup sum of its messages.** Take a proof
 that passes the shape check, with the header `hdr`, for a system whose lookups
-are plain. If no public claim has a zero denominator, no constraint of the
-proof fails for the committed rows `com`, and no lookup message of the shard
-has a zero denominator at the lookup challenges, then the lookup sum leaving
-the last circuit is the lookup sum of the messages of the shard. The messages
-are read off any committed rows `com'` with the same rows as `com` under the
-commitments to the main traces and to the fixed traces. -/
+are plain and whose largest trace domain exists in the field. If no public
+claim has a zero denominator, no constraint of the proof fails for the
+committed rows `com`, and no lookup message of the shard has a zero denominator
+at the lookup challenges, then the lookup sum leaving the last circuit is the
+lookup sum of the messages of the shard. The messages are read off any
+committed rows `com'` with the same rows as `com` under the commitments to the
+main traces and to the fixed traces. -/
 private theorem toModel_residual (hplain : ∀ c ∈ sys.circuits, c.LookupsPlain)
     (h2 : (2 : K) ≠ 0)
     {com com' : Compiled.Committed K D} {InputProof CommitProof : Type}
@@ -269,9 +260,7 @@ private theorem toModel_residual (hplain : ∀ c ∈ sys.circuits, c.LookupsPlai
     (hstage1 : hdr.stage1Commit = proof.stage1Commit) (hlogs : hdr.logDegrees = proof.logDegrees)
     (h1 : com' proof.stage1Commit = com proof.stage1Commit)
     (h3 : ∀ root, sys.preprocessedCommit = some root → com' root = com root)
-    (htwo : logMaxHeight sys.fri.logBlowup
-      (starkShape sys M.extData.d proof.active proof.logDegrees) ≤
-        TwoAdicOps.twoAdicity (F := F))
+    (htwo : sys.maxLogDegree ≤ TwoAdicOps.twoAdicity (F := F))
     {β γ : EF} (hclaims : (claimsAccumulator β γ hdr.claims).1 = true)
     (hfail : ¬ ConstraintFail M sys θ com proof.active proof.logDegrees proof.stage1Commit
       proof.stage2Commit proof.quotientCommit (M.ext.toModel β) (M.ext.toModel γ)
@@ -302,7 +291,7 @@ private theorem toModel_residual (hplain : ∀ c ∈ sys.circuits, c.LookupsPlai
   rw [hmap] at hcl
   -- The circuits.
   have hsum := lookupSum_of_not_constraintFail h2 hfail hpl
-    (fun p hp => (logDegree_le_logMaxHeight sys M.extData.d _ _ hp).trans htwo)
+    (fun p hp => (logDegree_le_of_shapeOk hshape hp).trans htwo)
     (by rw [Array.size_map]; exact haccs) fun it hit => hne it (List.mem_append_right _ hit)
   -- The last lookup sum.
   have hlast : (proof.intermediateAccumulators.map M.ext.toModel).back?.getD
@@ -322,25 +311,26 @@ end Shard
 balanced.** Take a system whose lookups are plain over a field of
 characteristic not two, a good log that holds the queries of the verification
 of the attempt, and an answer function that agrees with it. If `Stark.verify`
-accepts the attempt against the function and the attempt is covered, its lookup
-messages are balanced: otherwise `balPoly` would not vanish at the lookup
-challenges (`verify_good`), so the lookup sum of the messages would not be
-zero; but it is the lookup sum leaving the last circuit, which the verifier
-checks to be zero. -/
+accepts the attempt against the function and the attempt is covered (its public
+claims are within the size bounds), its lookup messages are balanced: otherwise
+`balPoly` would not vanish at the lookup challenges (`verify_good`), so the
+lookup sum of the messages would not be zero; but it is the lookup sum leaving
+the last circuit, which the verifier checks to be zero. -/
 private theorem lookupsBalanced_of_goodLog (hplain : ∀ c ∈ sys.circuits, c.LookupsPlain)
-    (h2 : (2 : K) ≠ 0) (hfixed : sys.FixedOk) (hshards : 1 ≤ B.shards) {N : ℕ}
-    (hN : BoundsLE sys B N)
+    (h2 : (2 : K) ≠ 0) (hfixed : sys.FixedOk) (hheightOk : sys.HeightOk)
+    (hshards : 1 ≤ B.shards) {N : ℕ} (hN : BoundsLE sys B N)
     (hcast : ∀ a b : ℕ, a ≤ N → b ≤ N → (a : K) = (b : K) → a = b)
     (hθ : 1 + (1 / 2 : ℝ) ^ sys.fri.logBlowup < 2 * θ)
+    (htwo : sys.maxLogDegree ≤ TwoAdicOps.twoAdicity (F := F))
     {l : Log (SAns F EF D K slots width)}
     (hgood : GoodLog M sys (singleVariant sys B) θ B (maxRounds F) l)
     {f : ∀ x, SAns F EF D K slots width x} (hf : ∀ x y, l.dlookup x = some y → f x = y)
     (a : SAttempt F EF D) {l₀ : Log (SAns F EF D K slots width)} {b : Bool}
     (hout : Outcome (shardComp M sys a.proof (firstMessage sys a.proof a.claims) []) l₀ b l)
-    (hacc : verifyAccepts M sys f a = true) (hcov : Covered M sys B a) :
+    (hacc : verifyAccepts M sys f a = true) (hcov : Covered B a) :
     LookupsBalanced M sys θ B l a := by
   obtain ⟨hviol, hbal⟩ :=
-    verify_good M sys θ B hfixed hshards hN hcast hθ hgood hf a hout hacc hcov
+    verify_good M sys θ B hfixed hheightOk hshards hN hcast hθ hgood hf a hout hacc hcov
   by_contra hnb
   obtain ⟨hne, hsum⟩ := of_eval_balPoly_ne_zero (hbal hnb)
   simp only [verifyAccepts, Stark.verify, Bool.and_eq_true] at hacc
@@ -365,20 +355,22 @@ private theorem lookupsBalanced_of_goodLog (hplain : ∀ c ∈ sys.circuits, c.L
     (baseRows_readMsg B M _ (by rw [hdigs]; exact List.mem_append_right _ List.mem_cons_self))
     (fun root hroot => baseRows_readMsg B M _
       (by rw [hdigs, hroot]; exact List.mem_append_left _ List.mem_cons_self))
-    hcov.two hclaims' hviol hne
+    htwo hclaims' hviol hne
   -- The verifier checked that the last lookup sum is zero.
   exact hsum (hlast.symm.trans (((M.ext.beq_iff _ _).mp hres).trans M.ext.map_zero))
 
 /-- **`Stark.verify` only accepts balanced lookups.** For a system whose
 lookups are plain (its zeros may read anything) over a field of characteristic
-not two, the probability that some answer function that agrees with the final
-log makes `Stark.verify` accept a covered attempt whose lookup messages are not
-balanced is at most the bound of `soundness_verify`, for an agreement `θ`
-inside the unique-decoding radius (`hθ`). -/
+not two, and none of whose fixed traces is taller than the largest trace it
+supports (`hheightOk`), the probability that some answer function that agrees
+with the final log makes `Stark.verify` accept an attempt, with public claims
+within the size bounds (`Covered`), whose lookup messages are not balanced is
+at most the bound of `soundness_verify`, for an agreement `θ` inside the
+unique-decoding radius (`hθ`). -/
 theorem soundness_verify_lookups [Fintype K] [Fintype D]
     (hplain : ∀ c ∈ sys.circuits, c.LookupsPlain)
-    (h2 : (2 : K) ≠ 0) (hfixed : sys.FixedOk) (hshards : 1 ≤ B.shards) {N : ℕ}
-    (hN : BoundsLE sys B N)
+    (h2 : (2 : K) ≠ 0) (hfixed : sys.FixedOk) (hheightOk : sys.HeightOk)
+    (hshards : 1 ≤ B.shards) {N : ℕ} (hN : BoundsLE sys B N)
     (hcast : ∀ a b : ℕ, a ≤ N → b ≤ N → (a : K) = (b : K) → a = b)
     (hθ : 1 + (1 / 2 : ℝ) ^ sys.fri.logBlowup < 2 * θ) {εpcs εmax : ℝ}
     (hεpcs : 0 ≤ εpcs) (htwo : sys.maxLogDegree ≤ TwoAdicOps.twoAdicity (F := F))
@@ -396,7 +388,7 @@ theorem soundness_verify_lookups [Fintype K] [Fintype D]
     (attempt : A → SAttempt F EF D) :
     prob (fun out l => ∃ f : ∀ x, SAns F EF D K slots width x,
         (∀ x y, l.dlookup x = some y → f x = y) ∧
-          verifyAccepts M sys f (attempt out.1) = true ∧ Covered M sys B (attempt out.1) ∧
+          verifyAccepts M sys f (attempt out.1) = true ∧ Covered B (attempt out.1) ∧
           ¬ LookupsBalanced M sys θ B l (attempt out.1))
       (experiment M sys adv attempt) [] ≤
       (Q + shardQueries sys (TwoAdicOps.twoAdicity (F := F)) : ℕ) * εmax +
@@ -412,8 +404,8 @@ theorem soundness_verify_lookups [Fintype K] [Fintype D]
   obtain ⟨a, l₀, -, hout⟩ := outcome_bind.mp hout
   obtain ⟨b, l₁, hcomp, hpure⟩ := outcome_bind.mp hout
   obtain ⟨rfl, rfl⟩ := hpure
-  exact hnb (lookupsBalanced_of_goodLog M sys θ B hplain h2 hfixed hshards hN hcast hθ hgood hf
-    (attempt a) hcomp hacc hcov)
+  exact hnb (lookupsBalanced_of_goodLog M sys θ B hplain h2 hfixed hheightOk hshards hN hcast hθ
+    htwo hgood hf (attempt a) hcomp hacc hcov)
 
 /-! ## A batch -/
 
@@ -477,23 +469,25 @@ balanced.** Take a system whose lookups are plain over a field of
 characteristic not two, a good log that holds the queries of the verification
 of the first `B.shards` shards of the batch, and an answer function that agrees
 with it. If `Stark.verifyBatch` accepts the batch against the function and the
-batch is covered, its lookup messages are balanced: otherwise `balPoly` would
-not vanish at the shared lookup challenges (`verifyBatch_good`), so the lookup
-sum of the messages would not be zero; but it is the lookup sum of the messages
-of the batch plus the residuals of the shards, which the verifier checks to be
-zero. -/
+batch is covered (its preamble is within the size bounds), its lookup messages
+are balanced: otherwise `balPoly` would not vanish at the shared lookup
+challenges (`verifyBatch_good`), so the lookup sum of the messages would not be
+zero; but it is the lookup sum of the messages of the batch plus the residuals
+of the shards, which the verifier checks to be zero. -/
 private theorem batchLookupsBalanced_of_goodLog
     (hplain : ∀ c ∈ sys.circuits, c.LookupsPlain)
-    (h2 : (2 : K) ≠ 0) (hfixed : sys.FixedOk) {N : ℕ} (hN : BoundsLE sys B N)
+    (h2 : (2 : K) ≠ 0) (hfixed : sys.FixedOk) (hheightOk : sys.HeightOk) {N : ℕ}
+    (hN : BoundsLE sys B N)
     (hcast : ∀ a b : ℕ, a ≤ N → b ≤ N → (a : K) = (b : K) → a = b)
     (hθ : 1 + (1 / 2 : ℝ) ^ sys.fri.logBlowup < 2 * θ)
+    (htwo : sys.maxLogDegree ≤ TwoAdicOps.twoAdicity (F := F))
     {l : Log (SAns F EF D K slots width)}
     (hgood : GoodLog M sys (batchVariant sys B N) θ B (maxRounds F) l)
     {f : ∀ x, SAns F EF D K slots width x} (hf : ∀ x y, l.dlookup x = some y → f x = y)
     (a : BAttempt F EF D) {l₀ : Log (SAns F EF D K slots width)} {b : Bool}
     (hout : Outcome (shardsComp M sys (batchFirstMessage sys a.preamble)
       (a.proofs.toList.take B.shards) 0) l₀ b l)
-    (hacc : batchAccepts M sys f a = true) (hcov : BatchCovered M sys B a) :
+    (hacc : batchAccepts M sys f a = true) (hcov : BatchCovered B a) :
     BatchLookupsBalanced M sys θ B l a := by
   by_contra hnb
   obtain ⟨hsz, hall⟩ := shardOk_of_batchAccepts M sys hacc
@@ -501,7 +495,7 @@ private theorem batchLookupsBalanced_of_goodLog
   have hshardGood := fun {i : ℕ} {hdr : ShardHeader F D}
       {proof : Proof F EF D (Array (List D)) (Array (List D))}
       (hhdr : a.preamble.headers[i]? = some hdr) (hproof : a.proofs[i]? = some proof) =>
-    verifyBatch_good M sys θ B hfixed hN hcast hθ hgood hf a hout hacc hcov hhdr hproof
+    verifyBatch_good M sys θ B hfixed hheightOk hN hcast hθ hgood hf a hout hacc hcov hhdr hproof
   -- There is a shard: its chain gives the clause on the lookup challenges.
   have h0 : 0 < a.preamble.headers.size := Nat.pos_of_ne_zero hne0
   obtain ⟨hne, hsum⟩ := of_eval_balPoly_ne_zero
@@ -522,8 +516,6 @@ private theorem batchLookupsBalanced_of_goodLog
     rw [Array.getElem?_toList] at hhdr hproof
     obtain ⟨hshape, hactive, hstage1, hlogs, -⟩ := hall i hdr proof hhdr hproof
     have hmem : hdr ∈ a.preamble.headers := Array.mem_of_getElem? hhdr
-    have htwo := hcov.two hdr hmem
-    rw [hactive, hlogs] at htwo
     refine toModel_residual (com := M.baseRows (committedRow l)) hplain h2 hshape hactive
       hstage1 hlogs (baseRows_readMsg B M _ ?_) (fun root hroot => baseRows_readMsg B M _ ?_)
       htwo (hclaims i hdr proof hhdr hproof) (hshardGood hhdr hproof).1 fun it hit => hne it ?_
@@ -556,13 +548,15 @@ private theorem batchLookupsBalanced_of_goodLog
 
 /-- **`Stark.verifyBatch` only accepts balanced lookups.** For a system whose
 lookups are plain (its zeros may read anything) over a field of characteristic
-not two, the probability that some answer function that agrees with the final
-log makes `Stark.verifyBatch` accept a covered batch whose lookup messages are
-not balanced is at most the bound of `soundness_verifyBatch`, for an agreement
-`θ` inside the unique-decoding radius (`hθ`). -/
+not two, and none of whose fixed traces is taller than the largest trace it
+supports (`hheightOk`), the probability that some answer function that agrees
+with the final log makes `Stark.verifyBatch` accept a batch, with a preamble
+within the size bounds (`BatchCovered`), whose lookup messages are not balanced
+is at most the bound of `soundness_verifyBatch`, for an agreement `θ` inside
+the unique-decoding radius (`hθ`). -/
 theorem soundness_verifyBatch_lookups [Fintype K] [Fintype D]
-    (hplain : ∀ c ∈ sys.circuits, c.LookupsPlain) (h2 : (2 : K) ≠ 0) (hfixed : sys.FixedOk) {N : ℕ}
-    (hN : BoundsLE sys B N)
+    (hplain : ∀ c ∈ sys.circuits, c.LookupsPlain) (h2 : (2 : K) ≠ 0) (hfixed : sys.FixedOk)
+    (hheightOk : sys.HeightOk) {N : ℕ} (hN : BoundsLE sys B N)
     (hcast : ∀ a b : ℕ, a ≤ N → b ≤ N → (a : K) = (b : K) → a = b)
     (hθ : 1 + (1 / 2 : ℝ) ^ sys.fri.logBlowup < 2 * θ) {εpcs εmax : ℝ}
     (hεpcs : 0 ≤ εpcs) (htwo : sys.maxLogDegree ≤ TwoAdicOps.twoAdicity (F := F))
@@ -580,7 +574,7 @@ theorem soundness_verifyBatch_lookups [Fintype K] [Fintype D]
     (attempt : A → BAttempt F EF D) :
     prob (fun out l => ∃ f : ∀ x, SAns F EF D K slots width x,
         (∀ x y, l.dlookup x = some y → f x = y) ∧
-          batchAccepts M sys f (attempt out.1) = true ∧ BatchCovered M sys B (attempt out.1) ∧
+          batchAccepts M sys f (attempt out.1) = true ∧ BatchCovered B (attempt out.1) ∧
           ¬ BatchLookupsBalanced M sys θ B l (attempt out.1))
       (batchExperiment M sys B adv attempt) [] ≤
       (Q + B.shards * shardQueries sys (TwoAdicOps.twoAdicity (F := F)) : ℕ) * εmax +
@@ -596,7 +590,7 @@ theorem soundness_verifyBatch_lookups [Fintype K] [Fintype D]
   obtain ⟨a, l₀, -, hout⟩ := outcome_bind.mp hout
   obtain ⟨b, l₁, hcomp, hpure⟩ := outcome_bind.mp hout
   obtain ⟨rfl, rfl⟩ := hpure
-  exact hnb (batchLookupsBalanced_of_goodLog M sys θ B hplain h2 hfixed hN hcast hθ hgood hf
-    (attempt a) hcomp hacc hcov)
+  exact hnb (batchLookupsBalanced_of_goodLog M sys θ B hplain h2 hfixed hheightOk hN hcast hθ
+    htwo hgood hf (attempt a) hcomp hacc hcov)
 
 end CertiFri.Exec.Stark

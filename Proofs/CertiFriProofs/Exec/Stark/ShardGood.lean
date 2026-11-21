@@ -26,31 +26,47 @@ here.
 
 * The proof passes the shape check, and its header is the one the preamble
   holds at the position of the chain.
-* The shape of the proof is supported: its first domain exists in the field,
-  no committed column is shorter than the final height, the strict margin of
-  unique decoding (`StrictMargin`, `|D| + d < 2 * θ * |D|`) holds at the height
-  of every committed matrix, and the first domain is no larger than the largest
-  trace the system supports, times the blowup. The margin does not depend on
-  the trace heights: `strictMargin_coset` derives it from
-  `1 + 2 ^ (-logBlowup) < 2 * θ`.
+* `sys.FixedOk`, and `sys.HeightOk`: no fixed trace of the system is taller
+  than the largest trace the system supports.
+* `1 + 2 ^ (-logBlowup) < 2 * θ`: the agreement `θ` is inside the
+  unique-decoding radius.
 * The commitments to the main traces and to the fixed traces are among the
   digests of the first message that are read (`digestsOf`).
 * `mid` holds base-field elements only.
-* The chain has at most `r` rounds, where `r` is the number of rounds the good
-  log is good for.
+* The good log is good for the rounds of the longest chain:
+  `4 + (twoAdicity + 2) ≤ r`.
+
+Nothing is assumed about the shape of the opening of the proof. That it is
+supported (`Supported`) follows from the accepting checks:
+
+* its first domain exists in the field and no committed column is shorter than
+  the final height, because the shape check of the opening proof passed
+  (`Fri.shapeOk`, through `run_of_check`);
+* its first domain is no larger than the largest trace the system supports,
+  times the blowup, because the shape check of the proof bounds the traces of
+  the active circuits and `sys.HeightOk` the fixed traces of the inactive ones
+  (`logMaxHeight_starkShape_le`);
+* the strict margin of unique decoding (`StrictMargin`,
+  `|D| + d < 2 * θ * |D|`) holds at the height of every committed matrix, by
+  `strictMargin_coset`, whatever the trace heights;
+* the chain has at most `r` rounds: it has no more folding rounds than the
+  log-size of its first domain, which is at most `twoAdicity`.
 
 ## The proof
 
 Against `f`, the chain of the proof (`nextMsg`) is the chain of `fsTranscript`
-on its own messages. `shard_good` unfolds `shardComp` and reduces to
-`shard_good_aux`, which is stated for any messages that satisfy the equations
-of the chain. There:
+on its own messages. `shardComp` makes queries only for a proof whose first
+domain exists in the field, so `shard_good` first runs the executable checks
+along the chain to learn that it does (`run_of_check`). Then it unfolds
+`shardComp` and reduces to `shard_good_aux`, which is stated for any messages
+that satisfy the equations of the chain. There:
 
 * In a good log the chain, read against the log, is doomed
   (`sdoomed_of_goodLog`).
 * The executable checks give the constraint checks on the opened values, and
   make the model verifier of the opening protocol accept against `f`
-  (`run_of_check`). So the run of the model verifier in the log accepted.
+  (`run_of_check`). So the run of the model verifier in the log accepted. They
+  also give that the shape of the opening is supported, as above.
 * An accepting run that leaves a log without a collision makes the opening
   protocol read off the chain accept (`accepts_pcsT`). Its claims are read from
   the base-field rows under the commitments of the shard, which are the rows of
@@ -444,15 +460,16 @@ omit [DecidableEq F] [DecidableEq EF] in
 /-- **The executable checks make the model verifier accept.** Let the state of
 the idealised challenger be in round `2` of a chain whose rounds from `2` on
 hold what the verifier absorbs, and let the checks that follow the lookup
-challenges pass. Then the out-of-domain point is usable, the constraint checks
-pass, the model verifier of the opening protocol accepts against `f` on the
-challenges of the chain, and the proof-of-work numbers of the chain are zero. -/
+challenges pass. Then the first domain of the opening exists in the field, no
+committed column is shorter than the final height, the out-of-domain point is
+usable, the constraint checks pass, the model verifier of the opening protocol
+accepts against `f` on the challenges of the chain, and the proof-of-work
+numbers of the chain are zero. -/
 private theorem run_of_check (M : StarkModel F EF K) (sys : System F D)
     (f : ∀ x, SAns F EF D K slots width x)
     (proof : Proof F EF D (Array (List D)) (Array (List D)))
     (hshape : Stark.shapeOk sys proof = true) {shape : ClaimShape}
     (hsh : ∀ ζ, claimShape (openingClaims sys proof ζ) = shape)
-    (htwo : logMaxHeight sys.fri.logBlowup shape ≤ TwoAdicOps.twoAdicity (F := F))
     {ms : ℕ → RawMsg F EF D} {s : UState F EF D} {cur : RawMsg F EF D} (β γ acc : EF) {α ζ : EF}
     (hα : α = Function.surjInv M.surj (answer f ms 2).field)
     (hζ : ζ = Function.surjInv M.surj (answer f ms 3).field)
@@ -463,7 +480,9 @@ private theorem run_of_check (M : StarkModel F EF K) (sys : System F D)
     (hcheck : checkAfterChallenges (merkleMmcs (inputHasher M.toFieldModel (hasherOf f)))
       (merkleMmcs (friHasher M.toFieldModel (hasherOf f))) (uChallenger f M.toFieldModel) sys
       proof s β γ acc = true) :
-    zetaOk proof ζ = true ∧ constraintsOk sys proof β γ acc α ζ = true ∧
+    ∃ htwo : logMaxHeight sys.fri.logBlowup shape ≤ TwoAdicOps.twoAdicity (F := F),
+      (∀ m ∈ shape.flatten, sys.fri.logFinalHeight ≤ m.logDegree + sys.fri.logBlowup) ∧
+      zetaOk proof ζ = true ∧ constraintsOk sys proof β γ acc α ζ = true ∧
       ((modelParams M.toFieldModel sys.fri shape (M.wellFormed sys.fri shape htwo)).verifyWith
         (modelProof M.toFieldModel sys.fri shape proof.openingProof)
         (fun j => view M.toFieldModel sys.fri shape (messages sys.fri shape
@@ -491,9 +510,15 @@ private theorem run_of_check (M : StarkModel F EF K) (sys : System F D)
         rw [h5 i, messages_succ_of_lt _ _ _ _ _ _ hi])
       (by rw [hsh', h5, messages_of_gt _ _ _ _ _ _ (Nat.lt_succ_self _)]) hcheck
   rw [hsh'] at hfs hw hβ hpow hidx
+  -- The shape check of the opening proof: the first domain and the final height.
+  obtain ⟨htwo, hfinal⟩ : logMaxHeight sys.fri.logBlowup shape ≤ TwoAdicOps.twoAdicity (F := F) ∧
+      ∀ m ∈ shape.flatten, sys.fri.logFinalHeight ≤ m.logDegree + sys.fri.logBlowup := by
+    have h := hfs
+    simp only [Fri.shapeOk, Bool.and_eq_true, List.all_eq_true, decide_eq_true_eq] at h
+    exact ⟨h.1.1.1.1.1.1.1.1.1.1.2, fun m hm => (h.1.1.1.1.1.1.1.1.1.1.1.2 m hm).2⟩
   obtain ⟨hpowOk, hmc⟩ := modelChecks_of_verifyWith M.toFieldModel sys.fri shape
     (M.wellFormed sys.fri shape htwo) f hfs hw
-  refine ⟨hz, hc, ?_, (hpow hpowOk).1, (hpow hpowOk).2⟩
+  refine ⟨htwo, hfinal, hz, hc, ?_, (hpow hpowOk).1, (hpow hpowOk).2⟩
   refine Eq.trans (congrArg (OracleComp.run f) ?_)
     (((modelParams M.toFieldModel sys.fri shape _).run_verifyWith f _ _ _ _ _).trans hmc)
   congr 1
@@ -882,9 +907,12 @@ end Opening
 /-- **The statement, for a chain given by its messages.** `shard_good` for
 messages `ms` that satisfy the equations of the chain of the proof, a header
 with the activation, the commitment and the heights of the proof, and a run of
-the model verifier on the challenges of the chain. -/
+the model verifier on the challenges of the chain. The model verifier is that
+of a first domain that exists in the field (`htwo`); the rest of what makes the
+shape of the opening supported is derived here from the accepting checks. -/
 private theorem shard_good_aux (M : StarkModel F EF K) (sys : System F D) (V : Variant F EF D)
-    (θ : ℝ) (B : Bounds) (r : ℕ) (hfixed : sys.FixedOk) {l : Log (SAns F EF D K slots width)}
+    (θ : ℝ) (B : Bounds) (r : ℕ) (hfixed : sys.FixedOk) (hheightOk : sys.HeightOk)
+    (hθ : 1 + (1 / 2 : ℝ) ^ sys.fri.logBlowup < 2 * θ) {l : Log (SAns F EF D K slots width)}
     (hgood : GoodLog M sys V θ B r l) {f : ∀ x, SAns F EF D K slots width x}
     (proof : Proof F EF D (Array (List D)) (Array (List D))) (m0 mid : RawMsg F EF D)
     (hmid : ∀ o ∈ mid, ∃ a : F, o = .base a) {l' l₁ : Log (SAns F EF D K slots width)}
@@ -897,11 +925,8 @@ private theorem shard_good_aux (M : StarkModel F EF K) (sys : System F D) (V : V
     (hdigFixed : ∀ c, sys.preprocessedCommit = some c → c ∈ digestsOf B m0)
     {shape : ClaimShape} (hsh : shape = starkShape sys M.extData.d proof.active proof.logDegrees)
     (htwo : logMaxHeight sys.fri.logBlowup shape ≤ TwoAdicOps.twoAdicity (F := F))
-    (hfinal : ∀ m ∈ shape.flatten, sys.fri.logFinalHeight ≤ m.logDegree + sys.fri.logBlowup)
-    (hmargin : ∀ m ∈ shape.flatten,
-      StrictMargin (M.coset (m.logDegree + sys.fri.logBlowup)) (2 ^ m.logDegree) θ)
-    (hheight : logMaxHeight sys.fri.logBlowup shape ≤ sys.maxLogDegree + sys.fri.logBlowup)
-    {R : ℕ} (hR : R = numRounds sys.fri shape) (hr : 4 + (R + 2) ≤ r)
+    {R : ℕ} (hR : R = numRounds sys.fri shape)
+    (hr : 4 + (TwoAdicOps.twoAdicity (F := F) + 2) ≤ r)
     (hsup : Supports l₁ (fsTranscript f ms (4 + (R + 2))))
     (hshape : Stark.shapeOk sys proof = true) (β γ acc : EF) (s : UState F EF D) {ζ : EF}
     (hβ : β = Function.surjInv M.surj (answer f ms 0).field)
@@ -933,6 +958,10 @@ private theorem shard_good_aux (M : StarkModel F EF K) (sys : System F D) (V : V
       (¬ Balanced (allItems M sys θ (M.baseRows (readMsg B m0 (committedRow l)).2) pre) →
         ((balPoly (allItems M sys θ (M.baseRows (readMsg B m0 (committedRow l)).2) pre)).eval
           (C (M.ext.toModel β))).eval (M.ext.toModel γ) ≠ 0) := by
+  -- The chain has at most `r` rounds.
+  have hr : 4 + (R + 2) ≤ r := by
+    have hle : R ≤ logMaxHeight sys.fri.logBlowup shape := hR ▸ Nat.sub_le _ _
+    omega
   -- The chain, read against the log, is doomed.
   have hd := sdoomed_of_goodLog hgood _ hr (hsup.of_prefix hl₁)
   rw [fsTranscript_eq_mkT] at hd hsup
@@ -964,10 +993,15 @@ private theorem shard_good_aux (M : StarkModel F EF K) (sys : System F D) (V : V
   obtain rfl : bF = _ := funext hbF
   obtain rfl : idx = _ := funext hidx
   -- The executable checks, and the verdict of the model verifier.
-  obtain ⟨hz, hc, hrunf, hpowC, hpowQ⟩ := run_of_check M sys f proof hshape
-    (fun ζ => by rw [claimShape_openingClaims sys proof hshape ζ, M.degree_eq]) htwo _ _ _ hα hζ
+  obtain ⟨_, hfinal, hz, hc, hrunf, hpowC, hpowQ⟩ := run_of_check M sys f proof hshape
+    (fun ζ => by rw [claimShape_openingClaims sys proof hshape ζ, M.degree_eq]) _ _ _ hα hζ
     hs h2 h3 h4 h5 hcheck
   obtain rfl : b = true := (hrun.run_eq hf).symm.trans hrunf
+  -- The shape is supported.
+  have hheight := logMaxHeight_starkShape_le hheightOk hshape M.extData.d
+  have hmargin : ∀ m ∈ (starkShape sys M.extData.d proof.active proof.logDegrees).flatten,
+      StrictMargin (M.coset (m.logDegree + sys.fri.logBlowup)) (2 ^ m.logDegree) θ :=
+    fun m hm => M.strictMargin_coset ((CertiFri.Exec.le_logMaxHeight hm).trans htwo) hθ
   -- The view of the chain.
   have hactive : proof.active.size = sys.circuits.size := by
     have h := hshape
@@ -1099,9 +1133,15 @@ private theorem shard_good_aux (M : StarkModel F EF K) (sys : System F D) (V : V
       (by rw [hcom 0 (by omega), h0]; exact hbal)
     rwa [hcom 0 (by omega), h0] at h
 
-/-- **An accepted proof in a good log has no failing constraint.** -/
+/-- **An accepted proof in a good log has no failing constraint.** Nothing is
+assumed about the shape of the opening of the proof: that it is supported
+follows from the accepting checks, for a system none of whose fixed traces is
+taller than the largest trace it supports (`hheightOk`) and an agreement `θ`
+inside the unique-decoding radius (`hθ`). The log is good for the rounds of the
+longest chain (`hr`). -/
 theorem shard_good (M : StarkModel F EF K) (sys : System F D) (V : Variant F EF D) (θ : ℝ)
-    (B : Bounds) (r : ℕ) (hfixed : sys.FixedOk) {l : Log (SAns F EF D K slots width)}
+    (B : Bounds) (r : ℕ) (hfixed : sys.FixedOk) (hheightOk : sys.HeightOk)
+    (hθ : 1 + (1 / 2 : ℝ) ^ sys.fri.logBlowup < 2 * θ) {l : Log (SAns F EF D K slots width)}
     (hgood : GoodLog M sys V θ B r l) {f : ∀ x, SAns F EF D K slots width x}
     (hf : ∀ x y, l.dlookup x = some y → f x = y)
     (proof : Proof F EF D (Array (List D)) (Array (List D))) (m0 mid : RawMsg F EF D)
@@ -1118,20 +1158,8 @@ theorem shard_good (M : StarkModel F EF K) (sys : System F D) (V : Variant F EF 
     (hlogs : hdr.logDegrees = proof.logDegrees)
     (hdig : proof.stage1Commit ∈ digestsOf B m0)
     (hdigFixed : ∀ c, sys.preprocessedCommit = some c → c ∈ digestsOf B m0)
-    -- The shape is supported.
-    (htwo : logMaxHeight sys.fri.logBlowup
-      (starkShape sys M.extData.d proof.active proof.logDegrees) ≤
-        TwoAdicOps.twoAdicity (F := F))
-    (hfinal : ∀ m ∈ (starkShape sys M.extData.d proof.active proof.logDegrees).flatten,
-      sys.fri.logFinalHeight ≤ m.logDegree + sys.fri.logBlowup)
-    (hmargin : ∀ m ∈ (starkShape sys M.extData.d proof.active proof.logDegrees).flatten,
-      StrictMargin (M.coset (m.logDegree + sys.fri.logBlowup)) (2 ^ m.logDegree) θ)
-    (hheight : logMaxHeight sys.fri.logBlowup
-      (starkShape sys M.extData.d proof.active proof.logDegrees) ≤
-        sys.maxLogDegree + sys.fri.logBlowup)
-    (hr : 4 + ((modelParams M.toFieldModel sys.fri
-      (starkShape sys M.extData.d proof.active proof.logDegrees)
-      (M.wellFormed sys.fri _ htwo)).rounds + 2) ≤ r)
+    -- The log is good for the rounds of every chain.
+    (hr : 4 + (TwoAdicOps.twoAdicity (F := F) + 2) ≤ r)
     -- The run of the executable verifier, from the lookup challenges on.
     (hshape : Stark.shapeOk sys proof = true) (β γ acc : EF) (s : UState F EF D)
     (hβ : β = Function.surjInv M.surj
@@ -1157,6 +1185,23 @@ theorem shard_good (M : StarkModel F EF K) (sys : System F D) (V : Variant F EF 
   obtain ⟨act, stage1, logs, claims⟩ := hdr
   dsimp only at hactive hstage1 hlogs hacc
   subst hactive hstage1 hlogs
+  have hlast := lastField_fsTranscriptA f (nextMsg M sys proof m0 mid)
+  -- The checks passed, so the first domain of the opening exists in the field.
+  obtain ⟨htwo, -⟩ := run_of_check M sys f proof hshape
+    (shape := starkShape sys M.extData.d proof.active proof.logDegrees)
+    (fun ζ => by rw [claimShape_openingClaims sys proof hshape ζ, M.degree_eq]) β γ acc rfl rfl hs
+    (show Observation.ext (rep M (lastField (fsTranscriptA f (nextMsg M sys proof m0 mid) 2))) ::
+        (mid ++ secondMessage proof) = _ by
+      rw [hlast 1, hγ]
+      rfl)
+    rfl
+    (show List.map Observation.ext (claimValues (openingClaims sys proof (rep M (lastField
+        (fsTranscriptA f (nextMsg M sys proof m0 mid) 4))))).toList = _ by
+      rw [hlast 3]
+      rfl)
+    (fun j => by
+      rw [Nat.add_comm 5 j]
+      rfl) hcheck
   -- The queries of the verification: the chain, then the model verifier.
   unfold shardComp at hout
   rw [dite_eq_left htwo, outcome_bind] at hout
@@ -1166,7 +1211,6 @@ theorem shard_good (M : StarkModel F EF K) (sys : System F D) (V : Variant F EF 
   obtain rfl := hder.eq_fsTranscriptA fun x y h => hfl₁ x y (dlookup_of_prefix h hver.prefix)
   have hsup := (supports_of_outcome_deriveA hder).of_prefix hver.prefix
   rw [fsTranscriptA_eq_fsTranscript] at hsup
-  have hlast := lastField_fsTranscriptA f (nextMsg M sys proof m0 mid)
   have hfield : ∀ j < 4 + ((modelParams M.toFieldModel sys.fri
       (starkShape sys M.extData.d proof.active proof.logDegrees)
       (M.wellFormed sys.fri _ htwo)).rounds + 2),
@@ -1180,9 +1224,10 @@ theorem shard_good (M : StarkModel F EF K) (sys : System F D) (V : Variant F EF 
       (starkShape sys M.extData.d proof.active proof.logDegrees)
       (M.wellFormed sys.fri _ htwo)).rounds =
       numRounds sys.fri (starkShape sys M.extData.d proof.active proof.logDegrees) := rfl
-  refine shard_good_aux M sys V θ B r hfixed hgood proof m0 mid hmid hl₁ hfl₁ hdec hpre
+  refine shard_good_aux M sys V θ B r hfixed hheightOk hθ hgood proof m0 mid hmid hl₁ hfl₁ hdec
+    hpre
     (ms := fun j => nextMsg M sys proof m0 mid j (fsTranscriptA f (nextMsg M sys proof m0 mid) j))
-    hhdr hdig hdigFixed rfl htwo hfinal hmargin hheight rfl hr hsup hshape β γ acc s hβ hγ
+    hhdr hdig hdigFixed rfl htwo rfl hr hsup hshape β γ acc s hβ hγ
     (congrArg (rep M) (hfield 3 (by omega))) rfl ?_ rfl ?_ (fun j => ?_) hs hacc hcheck
     (hfield 4 (by omega)) (fun i => ite_congr rfl (fun hi => hfield (5 + i) (by omega))
       fun _ => rfl)

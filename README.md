@@ -263,8 +263,8 @@ trees.
 `Unconditional.lean`). Let `δ ≥ 0` with `2 * δ + 2 ^ (-logBlowup) < 1`. The
 probability of the following event is at most
 `N * starkErr + ((S + 1) * r + 3) * N * (N - 1) / (2 * |D|)`: some answer
-function that agrees with the final log makes the verifier accept a *covered*
-proof, and some constraint value of some active circuit (a zero of its graph,
+function that agrees with the final log makes the verifier accept a proof
+within the size bounds (`Covered`), and some constraint value of some active circuit (a zero of its graph,
 or a lookup constraint) is not zero on some row of its trace domain. The
 constraint values are those of the polynomials that the committed columns
 decode to, at agreement `1 - δ`, against the log; they are functions of the
@@ -341,16 +341,16 @@ bound (`PcsSound.lean`); the refinement of the executable checks
   Goldilocks code of `CertiFriP3`.
 - **A system fixed before the adversary runs.** The transcript absorbs the
   sizes of the circuits, not their constraint graphs.
-- **`Covered`**, a condition on the proof the event is about:
-  - the numbers of shards, public claims and messages, and their lengths, are
-    within bounds that enter the errors, and all sizes are below the
-    characteristic;
-  - the first domain of the opening exists in the field and is no larger than
-    the largest trace the system supports, times the blowup. An accepted proof
-    meets this unless a fixed trace of the system is taller than the system
-    supports.
-
-  There is no condition on the heights of the traces.
+- **A well-formed system**: a circuit without a fixed trace has fixed-trace
+  width zero (`System.FixedOk`), no fixed trace is taller than the largest
+  trace the system supports (`System.HeightOk`), and that largest trace exists
+  in the field.
+- **`Covered`**, the only condition on the proof the event is about: the
+  numbers of shards, public claims and messages, and their lengths, are within
+  bounds. The bounds enter the errors, and all sizes are below the
+  characteristic. There is no condition on the shape of the proof or on the
+  heights of its traces: what the theorems need of them follows from
+  acceptance.
 - For the meaning of the conclusion: `Circuit.ZerosPlain` or
   `Circuit.LookupsPlain` as above, and a characteristic other than two.
 

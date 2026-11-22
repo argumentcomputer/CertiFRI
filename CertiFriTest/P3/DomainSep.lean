@@ -1,21 +1,81 @@
 import CertiFriP3.DomainSep
 
 /-!
-# Tests of domain-separated BLAKE3 hashers and challenger
+# Tests of native BLAKE3 `derive_key` domain separation (`multi-stark` `v6` parity)
 
-Checks of `CertiFriP3/DomainSep.lean`:
+Checks of `CertiFriP3/DomainSep.lean` and `CertiFriP3/Blake3.lean`:
 
+* Exact byte-for-byte parity with `multi-stark` `v6` (`p3_adapter/domain_blake3.rs`
+  and `cuda/kernels.cu`) on context keys (`v6MerkleLeafKey`, `v6MerkleCompressKey`)
+  and reference test vectors at 64, 512, 1024, 1025, and 4264 bytes (`MerkleLeaf`)
+  and 64-byte internal Merkle pair compression (`MerkleCompress`).
 * Identical 64-byte payloads hashed as a Merkle leaf (8 base elements), a
   Merkle 2-to-1 node (two 32-byte digests), and a Fiat–Shamir transcript buffer
-  produce three pairwise-distinct digests, all distinct from plain BLAKE3.
-* `baseHasherSep`, `extHasherSep`, and `challengerSep` work consistently on
-  Merkle openings and challenger transcripts, and custom `DomainSep` tags change
-  outputs as expected.
+  produce pairwise distinct digests, all distinct from plain BLAKE3.
+* 1-block `deriveKeyPair` matches streaming `deriveKey` on 64 bytes; 2-block
+  `deriveKeyPairXof48` matches streaming `deriveKeyXof48` on 96 bytes; and
+  the first 32 bytes of `deriveKeyXof48` match `deriveKey` identically.
+* `baseHasherSep`, `extHasherSep`, `ext3HasherSep`, `baseHasherSepXof48`,
+  `ext3HasherSepXof48`, `challengerSep`, and `challenger3Sep` work consistently
+  on Merkle openings and challenger transcripts.
 -/
 
 namespace CertiFriTest.P3.DomainSep
 
 open CertiFri CertiFri.P3
+
+/-! ## Exact `multi-stark` `v6` (`domain_blake3.rs` & `cuda/kernels.cu`) test vectors -/
+
+def v6Pattern (len : Nat) : ByteArray :=
+  ByteArray.mk (Array.ofFn (n := len) fun i => ((i.val * 37 + 13) % 256).toUInt8)
+
+-- Exact context keys shared with `cuda/kernels.cu` (`BLAKE3_V6_LEAF_CV`, `BLAKE3_V6_COMPRESS_CV`).
+#guard Blake3.deriveContextKey v6MerkleLeafContext == v6MerkleLeafKey
+#guard Blake3.deriveContextKey v6MerkleCompressContext == v6MerkleCompressKey
+#guard Blake3.deriveContextKey v6TranscriptSingleContext == v6TranscriptSingleKey
+#guard Blake3.deriveContextKey v6TranscriptBatchContext == v6TranscriptBatchKey
+#guard Blake3.deriveContextKey v6VkContext == v6VkKey
+
+-- Exact `domain_blake3.rs` `cuda_v6_blake3_and_ext3_vectors_match_rust` MerkleLeaf vectors
+-- across single-block (64B), multi-block (512B), 1-chunk (1024B), and multi-chunk (1025B, 4264B).
+#guard (Blake3Domain.merkleLeaf.hash (v6Pattern 64)).toHex
+  == "4059736d0564475319baa815a76396039b1922ce8b8c51985ec1489f48e4581a"
+#guard (Blake3Domain.merkleLeaf.hash (v6Pattern 512)).toHex
+  == "58ec79936d612be378b23c2cfbb876f93179b825100d3ba77c2a8fd189deae51"
+#guard (Blake3Domain.merkleLeaf.hash (v6Pattern 1024)).toHex
+  == "0f237b3cbe5c88760fcf0305435c2b6d762142697aa21133b6508af2bd228e9c"
+#guard (Blake3Domain.merkleLeaf.hash (v6Pattern 1025)).toHex
+  == "1efbf193b24ebcabf1c230b0f7f2c30265d0a82272db4a19341767e688849358"
+#guard (Blake3Domain.merkleLeaf.hash (v6Pattern 4264)).toHex
+  == "bb19b2a12d999d55cc3bb2caf75c085e201c6b387519dfa2cb25eec6b9b54136"
+
+-- Exact `domain_blake3.rs` MerkleCompress 64-byte pair vector (`(0..64u8)`).
+def ramp64 : ByteArray := ByteArray.mk (Array.ofFn (n := 64) fun i => i.val.toUInt8)
+def rampLeft : Digest := (Digest.ofBytes? (ramp64.extract 0 32)).getD default
+def rampRight : Digest := (Digest.ofBytes? (ramp64.extract 32 64)).getD default
+
+#guard (Blake3Domain.merkleCompress.hash ramp64).toHex
+  == "8b14c7db6f612da11fa63c6fbec9783e35f74ab3dedf6f382fff8ace42e1b379"
+-- 1-block `deriveKeyPair` matches general streaming `deriveKey` on 64 bytes.
+#guard Blake3.deriveKeyPair v6MerkleCompressKey rampLeft rampRight
+  == Blake3Domain.merkleCompress.hash ramp64
+#guard baseHasherSep.compress rampLeft rampRight
+  == Blake3Domain.merkleCompress.hash ramp64
+
+/-! ## Pairwise separation across all 6 `Blake3Domain` modes -/
+
+def allDomains : List Blake3Domain :=
+  [.plain, .merkleLeaf, .merkleCompress, .transcriptSingle, .transcriptBatch, .verifyingKey]
+
+#guard
+  let digests := allDomains.map fun d => d.hash ramp64
+  digests.eraseDups.length == 6
+
+#guard
+  let digests := allDomains.map fun d => d.hash (v6Pattern 1025)
+  digests.eraseDups.length == 6
+
+/-! ## Role separation & Merkle/challenger integration -/
 
 def d0 : Digest :=
   (Digest.ofHex? "0000000000000000000000000000000000000000000000000000000000000000").getD default
@@ -36,9 +96,9 @@ def matchingRow : Array Goldilocks :=
 #guard baseHasher.hashRows matchingRow == baseHasher.compress d0 d1
 #guard (baseHasher.hashRows matchingRow).toBytes == blake3 (d0.toBytes ++ d1.toBytes)
 
--- Domain-separated BLAKE3 separates all three roles and differs from plain BLAKE3.
-def sepLeaf : Digest := (baseHasherSep).hashRows matchingRow
-def sepNode : Digest := (baseHasherSep).compress d0 d1
+-- Native `derive_key` BLAKE3 separates all three roles and differs from plain BLAKE3.
+def sepLeaf : Digest := baseHasherSep.hashRows matchingRow
+def sepNode : Digest := baseHasherSep.compress d0 d1
 def sepTranscript : ByteArray := blake3Transcript .standard (d0.toBytes ++ d1.toBytes)
 def plainDigest : Digest := baseHasher.hashRows matchingRow
 
@@ -48,16 +108,18 @@ def plainDigest : Digest := baseHasher.hashRows matchingRow
 #guard sepLeaf != plainDigest
 #guard sepNode != plainDigest
 #guard sepTranscript != plainDigest.toBytes
+-- Block-streaming `baseHasherSep.hashRows` matches byte-oriented `deriveKey`.
+#guard sepLeaf == Blake3Domain.merkleLeaf.hash (Hashers.rowBytes matchingRow)
 
--- Extension hasher matches base hasher on flattened coordinates under domain separation.
+-- Extension hasher matches base hasher on flattened coordinates under `derive_key`.
 def extMatchingRow : Array GoldilocksExt :=
   #[⟨Goldilocks.ofUInt64 0, Goldilocks.ofUInt64 0⟩,
     ⟨Goldilocks.ofUInt64 0, Goldilocks.ofUInt64 0⟩,
     ⟨Goldilocks.ofUInt64 1, Goldilocks.ofUInt64 2⟩,
     ⟨Goldilocks.ofUInt64 3, Goldilocks.ofUInt64 4⟩]
 
-#guard (extHasherSep).hashRows extMatchingRow == (baseHasherSep).hashRows matchingRow
-#guard (extHasherSep).compress d0 d1 == (baseHasherSep).compress d0 d1
+#guard extHasherSep.hashRows extMatchingRow == baseHasherSep.hashRows matchingRow
+#guard extHasherSep.compress d0 d1 == baseHasherSep.compress d0 d1
 
 -- Merkle opening check passes with `baseHasherSep` on a 2-leaf matrix and rejects tampered leaves.
 #guard
@@ -73,23 +135,45 @@ def extMatchingRow : Array GoldilocksExt :=
     && !Merkle.verifyOpening h root dims 0 #[row1] [leaf1]
     && !Merkle.verifyOpening baseHasher root dims 0 #[row0] [leaf1]
 
--- Domain-separated challenger produces distinct challenges from stock challenger.
+-- Single vs batch `v6` challengers differ from each other and from plain challenger.
 #guard
   let init := ChallengerState.new ByteArray.empty
   let sPlain := challenger.observe init (.digest d1)
-  let sSep := (challengerSep).observe init (.digest d1)
-  (challenger.sampleExt sPlain).1 != ((challengerSep).sampleExt sSep).1
+  let sSingle := (challengerSep .v6Single).observe init (.digest d1)
+  let sBatch := (challengerSep .v6Batch).observe init (.digest d1)
+  (challenger.sampleExt sPlain).1 != ((challengerSep .v6Single).sampleExt sSingle).1
+    && ((challengerSep .v6Single).sampleExt sSingle).1
+        != ((challengerSep .v6Batch).sampleExt sBatch).1
 
--- Custom tags separate from standard tags.
-def customSep : DomainSep where
-  leafTag := 0x10
-  nodeTag := 0x20
-  transcriptTag := 0x30
-  leaf_ne_node := by decide
-  leaf_ne_transcript := by decide
-  node_ne_transcript := by decide
+/-! ## 48-byte (384-bit) BLAKE3 XOF checks -/
 
-#guard (baseHasherSep customSep).hashRows matchingRow != (baseHasherSep).hashRows matchingRow
-#guard (baseHasherSep customSep).compress d0 d1 != (baseHasherSep).compress d0 d1
+-- First 32 bytes of 48B XOF coincide with 32B digest across single- and multi-chunk inputs.
+#guard (Blake3Domain.merkleLeaf.hashXof48 (v6Pattern 64)).prefix32
+  == Blake3Domain.merkleLeaf.hash (v6Pattern 64)
+#guard (Blake3Domain.merkleLeaf.hashXof48 (v6Pattern 4264)).prefix32
+  == Blake3Domain.merkleLeaf.hash (v6Pattern 4264)
+
+-- 2-block `deriveKeyPairXof48` matches streaming 96-byte `deriveKeyXof48` byte-for-byte.
+#guard
+  let a := Blake3Domain.merkleLeaf.hashXof48 (v6Pattern 64)
+  let b := Blake3Domain.merkleLeaf.hashXof48 (v6Pattern 512)
+  a.toBytes.size == 48 && b.toBytes.size == 48
+    && Digest48.ofBytes? a.toBytes == some a
+    && Digest48.ofHex? a.toHex == some a
+    && Blake3.deriveKeyPairXof48 v6MerkleCompressKey a b
+        == Blake3Domain.merkleCompress.hashXof48 (a.toBytes ++ b.toBytes)
+
+-- 48-byte XOF Merkle opening verification passes and rejects tampered leaves.
+#guard
+  let h := baseHasherSepXof48
+  let row0 := #[Goldilocks.ofUInt64 10, Goldilocks.ofUInt64 20]
+  let row1 := #[Goldilocks.ofUInt64 30, Goldilocks.ofUInt64 40]
+  let leaf0 := h.hashRows row0
+  let leaf1 := h.hashRows row1
+  let root := h.compress leaf0 leaf1
+  let dims := #[{ width := 2, logHeight := 1 : Dimensions }]
+  Merkle.verifyOpening h root dims 0 #[row0] [leaf1]
+    && Merkle.verifyOpening h root dims 1 #[row1] [leaf0]
+    && !Merkle.verifyOpening h root dims 0 #[row1] [leaf1]
 
 end CertiFriTest.P3.DomainSep

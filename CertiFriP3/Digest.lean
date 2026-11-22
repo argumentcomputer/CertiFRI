@@ -102,4 +102,87 @@ instance : Repr Digest := ⟨fun d _ => Std.Format.text d.toHex⟩
 
 end Digest
 
+/-- A 48-byte (384-bit) BLAKE3 XOF digest, as twelve little-endian 32-bit words.
+Achieves `191.71` bits of classical collision resistance (under incremental sponge
+chaining, `c = 3/2`) and `128.0` bits of BHT quantum collision resistance
+(`2^(384/3) = 2^128`), fitting in a single 64-byte BLAKE3 root output block. -/
+structure Digest48 where
+  /-- Bytes 0 to 3. -/
+  w0 : UInt32
+  /-- Bytes 4 to 7. -/
+  w1 : UInt32
+  /-- Bytes 8 to 11. -/
+  w2 : UInt32
+  /-- Bytes 12 to 15. -/
+  w3 : UInt32
+  /-- Bytes 16 to 19. -/
+  w4 : UInt32
+  /-- Bytes 20 to 23. -/
+  w5 : UInt32
+  /-- Bytes 24 to 27. -/
+  w6 : UInt32
+  /-- Bytes 28 to 31. -/
+  w7 : UInt32
+  /-- Bytes 32 to 35. -/
+  w8 : UInt32
+  /-- Bytes 36 to 39. -/
+  w9 : UInt32
+  /-- Bytes 40 to 43. -/
+  w10 : UInt32
+  /-- Bytes 44 to 47. -/
+  w11 : UInt32
+  deriving DecidableEq, Inhabited
+
+namespace Digest48
+
+open LittleEndian
+
+/-- The first 32 bytes of a 48-byte XOF digest (matching the 32-byte digest). -/
+def prefix32 (d : Digest48) : Digest :=
+  ⟨d.w0, d.w1, d.w2, d.w3, d.w4, d.w5, d.w6, d.w7⟩
+
+/-- The 48 bytes of the digest. -/
+def toBytes (d : Digest48) : ByteArray :=
+  [d.w0, d.w1, d.w2, d.w3, d.w4, d.w5, d.w6, d.w7, d.w8, d.w9, d.w10, d.w11].foldl
+    pushWord32 (ByteArray.emptyWithCapacity 48)
+
+/-- The 48-byte digest with the given bytes, if there are exactly 48 of them. -/
+def ofBytes? (bytes : ByteArray) : Option Digest48 :=
+  if bytes.size = 48 then
+    some ⟨word32 bytes 0, word32 bytes 4, word32 bytes 8, word32 bytes 12,
+      word32 bytes 16, word32 bytes 20, word32 bytes 24, word32 bytes 28,
+      word32 bytes 32, word32 bytes 36, word32 bytes 40, word32 bytes 44⟩
+  else none
+
+private def hexDigit (n : UInt8) : Char :=
+  if n < 10 then Char.ofNat (48 + n.toNat) else Char.ofNat (87 + n.toNat)
+
+private def hexValue? (c : Char) : Option UInt8 :=
+  let n := c.toNat
+  if 48 ≤ n ∧ n ≤ 57 then some (n - 48).toUInt8
+  else if 97 ≤ n ∧ n ≤ 102 then some (n - 87).toUInt8
+  else if 65 ≤ n ∧ n ≤ 70 then some (n - 55).toUInt8
+  else none
+
+private def hexBytes? : List Char → ByteArray → Option ByteArray
+  | [], acc => some acc
+  | [_], _ => none
+  | hi :: lo :: rest, acc =>
+    match hexValue? hi, hexValue? lo with
+    | some h, some l => hexBytes? rest (acc.push (h <<< 4 ||| l))
+    | _, _ => none
+
+/-- The 48-byte digest as 96 hexadecimal digits in lower case, first byte first. -/
+def toHex (d : Digest48) : String :=
+  String.ofList <| d.toBytes.toList.flatMap fun (byte : UInt8) =>
+    [hexDigit (byte >>> 4), hexDigit (byte &&& 15)]
+
+/-- The 48-byte digest written as 96 hexadecimal digits, first byte first. -/
+def ofHex? (text : String) : Option Digest48 :=
+  (hexBytes? text.toList ByteArray.empty).bind ofBytes?
+
+instance : Repr Digest48 := ⟨fun d _ => Std.Format.text d.toHex⟩
+
+end Digest48
+
 end CertiFri.P3

@@ -93,3 +93,9 @@ import CertiFriProofs.Theory.ProximityGap.Johnson
 import CertiFriProofs.Theory.ProximityGap.JohnsonMCA
 import CertiFriProofs.Theory.ProximityGap.GuruswamiSudan
 import CertiFriProofs.Exec.SoundnessJohnson
+import CertiFriProofs.P3.DigestCard
+import CertiFriProofs.Theory.Oracle.SpongeCommitted
+import CertiFriProofs.Exec.SoundnessSponge
+import CertiFriProofs.Theory.ProximityGap.TensorMCA
+import CertiFriProofs.Exec.SoundnessTensor
+import CertiFriProofs.Audit128

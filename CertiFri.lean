@@ -15,6 +15,7 @@ import CertiFri.Stark.Graph
 import CertiFri.Stark.Logup
 import CertiFri.Stark.System
 import CertiFri.Stark.Verifier
+import CertiFri.TensorBatching
 
 /-!
 # CertiFri

@@ -11,35 +11,29 @@ stability of `Opens`.
 
 * `Present digestsOf r l d`: the digest `d` is present in the log `l`. It is the
   answer of a hash entry, one of the two inputs of a logged `node` query, or one
-  of the digests `digestsOf m` of a message `m` among the first `r` messages of
-  a logged challenge query. (`digestsOf` says which digests a prover message
-  contains; `r` is the number of rounds.)
+  of the digests `digestsOf j m` of the `j`-th message `m` (`j < r`) of a logged
+  challenge query. (`digestsOf` is round-indexed so rounds with different numbers
+  of roots are counted tightly.)
 * `Hit digestsOf r l x y`: the bad event. `x` is a hash query and its answer `y`
-  is present in `l`.
+  is present in `l`. Challenge queries are never hits.
 
 ## Results
 
-* `exists_finset_present`: at most `(K * r + 3) * l.length` digests are present
-  in `l`, when a message contains at most `K` digests.
-* `fractionLE_hit`, `prob_hasBad_hit_le`: so at most a fraction
-  `(K * r + 3) * l.length / card D` of the answers to a query is a hit, and a
-  computation with at most `Q` queries from the empty log leaves a log with a
-  hit with probability at most `(K * r + 3) * Q * (Q - 1) / (2 * card D)`.
+* `exists_finset_present`: at most `presentCap M l` digests are present in `l`,
+  where each challenge entry contributes at most `M` digests (the total across
+  rounds `< r`) and each hash entry contributes at most `3`.
+* `prob_hasBad_hit_le_potential`: a computation with at most `Q` queries from
+  the empty log leaves a log with a hit with probability at most
+  `hitPotential M 0 Q / card D`, accounting for the fact that challenge queries
+  have zero hit probability while hash queries add at most `3` digests.
+* `prob_hasBad_hit_le`: closed-form corollary
+  `(max M 3 + 3) * Q ^ 2 / (4 * card D)`.
 * `hasBad_hit_of_logCollision`: a collision is a hit, so a log without a hit
   has no collision.
 * `Opens.of_append_of_not_hit` (**stability**): if `root` is present in `l` and
   no entry of `l ++ t` after `l` is a hit, an opening under `root` in `l ++ t`
   is in `l`. `opens_append_iff_of_not_hit` and `opens_concat_iff_of_not_hit`
   state it as an equivalence, for several new entries and for one.
-
-Only the first `r` messages of a challenge query count as present. A challenge
-query may hold a transcript of any length, so without this cut the number of
-present digests is not bounded by the length of the log, and the bad-event
-theorem, which needs a bound for every log, does not apply. The messages a
-verifier of `r` rounds reads are among the first `r` (`present_of_mentions`).
-
-Not covered: digests that enter play in another way than through the log (for
-example digests fixed in the statement).
 -/
 
 namespace CertiFri.Oracle
@@ -53,35 +47,40 @@ open OracleComp Merkle MerkleRO
 /-! ## Digests present in a log -/
 
 /-- The digests a hash entry brings into play: its answer, and the two inputs
-of a `node` query. A challenge entry brings none. -/
+of a `node` query. A challenge entry brings none here. -/
 def hashDigests : (x : FSQuery Msg Chal (HashQuery T D)) → MerkleAnswer Msg Chal T D x → List D
   | .chal _ _, _ => []
   | .other (.rows _), y => [y]
   | .other (.node a b), y => [a, b, y]
 
+/-- The digests of the first `r` messages of a query, using round-indexed `digestsOf`. -/
+def chalDigests (digestsOf : ℕ → Msg → List D) (r : ℕ) (x : FSQuery Msg Chal (HashQuery T D)) :
+    List D :=
+  ((x.msgs.take r).zipIdx).flatMap fun p => digestsOf p.2 p.1
+
 /-- The digests an entry of the log brings into play: those of the first `r`
 messages of a challenge query, and those of a hash entry. -/
-def entryDigests (digestsOf : Msg → List D) (r : ℕ) (e : Sigma (MerkleAnswer Msg Chal T D)) :
+def entryDigests (digestsOf : ℕ → Msg → List D) (r : ℕ) (e : Sigma (MerkleAnswer Msg Chal T D)) :
     List D :=
-  (e.1.msgs.take r).flatMap digestsOf ++ hashDigests e.1 e.2
+  chalDigests digestsOf r e.1 ++ hashDigests e.1 e.2
 
 /-- The digest `d` is present in the log `l`: it is the answer of a hash entry,
 one of the two inputs of a logged `node` query, or one of the digests of a
 message among the first `r` messages of a logged challenge query. -/
-def Present (digestsOf : Msg → List D) (r : ℕ) (l : Log (MerkleAnswer Msg Chal T D)) (d : D) :
+def Present (digestsOf : ℕ → Msg → List D) (r : ℕ) (l : Log (MerkleAnswer Msg Chal T D)) (d : D) :
     Prop :=
   ∃ e ∈ l, d ∈ entryDigests digestsOf r e
 
 /-- The bad event of a frozen tree: the answer `y` to the hash query `x` is a
 digest present in the log `l`. A challenge is never a hit. -/
-def Hit (digestsOf : Msg → List D) (r : ℕ) (l : Log (MerkleAnswer Msg Chal T D)) :
+def Hit (digestsOf : ℕ → Msg → List D) (r : ℕ) (l : Log (MerkleAnswer Msg Chal T D)) :
     (x : FSQuery Msg Chal (HashQuery T D)) → MerkleAnswer Msg Chal T D x → Prop
   | .chal _ _, _ => False
   | .other _, y => Present digestsOf r l y
 
 section Present
 
-variable {digestsOf : Msg → List D} {r : ℕ} {l l' : Log (MerkleAnswer Msg Chal T D)}
+variable {digestsOf : ℕ → Msg → List D} {r : ℕ} {l l' : Log (MerkleAnswer Msg Chal T D)}
 
 /-- A digest present in a log is present in every log that contains its entries. -/
 theorem Present.mono {d : D} (h : Present digestsOf r l d) (hl : l ⊆ l') :
@@ -104,10 +103,11 @@ theorem present_of_mem_node {a b y : D}
 /-- The digests of a message that a challenge query of the log holds as its
 message of a round below `r` are present. -/
 theorem present_of_mentions {j : ℕ} {m : Msg} {d : D} (h : Mentions l j m) (hj : j < r)
-    (hd : d ∈ digestsOf m) : Present digestsOf r l d := by
+    (hd : d ∈ digestsOf j m) : Present digestsOf r l d := by
   obtain ⟨e, he, hm⟩ := h
-  refine ⟨e, he, List.mem_append_left _ (List.mem_flatMap.mpr ⟨m, ?_, hd⟩)⟩
-  exact List.mem_of_getElem? ((List.getElem?_take_of_lt hj).trans hm)
+  refine ⟨e, he, List.mem_append_left _ (List.mem_flatMap.mpr ⟨(m, j), ?_, hd⟩)⟩
+  rw [List.mem_zipIdx_iff_getElem?]
+  exact (List.getElem?_take_of_lt hj).trans hm
 
 /-- `Hit` on a hash query, unfolded. -/
 theorem hit_other {q : HashQuery T D} {y : D} :
@@ -142,102 +142,319 @@ theorem not_logCollision_of_not_hasBad_hit (h : ¬ HasBad (Hit digestsOf r) l) :
 
 end Present
 
-/-! ## Counting the present digests -/
+/-! ## Counting the present digests with separate challenge and hash weights -/
 
 namespace MerkleRO
 
-/-- A list of lists of length at most `K` flattens to at most `K` elements per
-member. -/
-theorem length_flatMap_le {α β : Type*} (f : α → List β) {K : ℕ} (hK : ∀ a, (f a).length ≤ K) :
-    ∀ l : List α, (l.flatMap f).length ≤ K * l.length
-  | [] => by simp
-  | a :: l => by
-    have h₁ := length_flatMap_le f hK l
-    have h₂ := hK a
-    rw [List.flatMap_cons, List.length_append, List.length_cons, Nat.mul_succ]
-    omega
+/-- The weight an entry adds to the upper bound on present digests: `M` for a
+challenge entry and `3` for a hash entry. -/
+def entryCap (M : ℕ) (x : FSQuery Msg Chal (HashQuery T D)) : ℕ :=
+  match x with
+  | .chal _ _ => M
+  | .other _ => 3
 
-/-- The sum of the first `Q` natural numbers, as a real number. -/
-theorem sum_range_cast (Q : ℕ) : ∑ i ∈ Finset.range Q, (i : ℝ) = Q * (Q - 1) / 2 := by
-  induction Q with
-  | zero => simp
-  | succ Q ih =>
-    rw [Finset.sum_range_succ, ih]
-    push_cast
-    ring
+/-- Upper bound on the number of digests present in a log `l`: `M` per challenge
+entry and `3` per hash entry. -/
+def presentCap (M : ℕ) (l : Log (MerkleAnswer Msg Chal T D)) : ℕ :=
+  (l.map fun e => entryCap M e.1).sum
+
+@[simp] theorem presentCap_nil (M : ℕ) :
+    presentCap (Msg := Msg) (Chal := Chal) (T := T) (D := D) M [] = 0 := rfl
+
+theorem presentCap_append_singleton (M : ℕ) (l : Log (MerkleAnswer Msg Chal T D))
+    (e : Sigma (MerkleAnswer Msg Chal T D)) :
+    presentCap M (l ++ [e]) = presentCap M l + entryCap M e.1 := by
+  simp [presentCap]
+
+/-- The Bellman potential for the hit probability (multiplied by `|D|`):
+starting with at most `p` present digests and at most `q` queries remaining,
+where each challenge query adds `M` digests with hit probability `0` and each
+hash query adds `3` digests with hit probability `p / |D|`. -/
+noncomputable def hitPotential (M p q : ℕ) : ℝ :=
+  (Finset.range (q + 1)).sup' Finset.nonempty_range_add_one fun h =>
+    (h : ℝ) * ((p : ℝ) + M * (q - h : ℕ)) + (3 : ℝ) * h * (h - 1 : ℕ) / 2
+
+theorem hitPotential_nonneg (M p q : ℕ) : 0 ≤ hitPotential M p q := by
+  unfold hitPotential
+  have h0 : (0 : ℕ) ∈ Finset.range (q + 1) := Finset.mem_range.mpr (Nat.succ_pos q)
+  have hle := Finset.le_sup' (f := fun h : ℕ =>
+    (h : ℝ) * ((p : ℝ) + M * (q - h : ℕ)) + (3 : ℝ) * h * (h - 1 : ℕ) / 2) h0
+  have hval : ((0 : ℕ) : ℝ) * ((p : ℝ) + M * (q - 0 : ℕ)) + (3 : ℝ) * (0 : ℕ) * (0 - 1 : ℕ) / 2 = 0 := by
+    simp
+  exact hval ▸ hle
+
+theorem hitPotential_mono_q (M p q : ℕ) : hitPotential M p q ≤ hitPotential M p (q + 1) := by
+  unfold hitPotential
+  refine Finset.sup'_le _ _ fun h hh => ?_
+  have hlt : h < q + 1 := Finset.mem_range.mp hh
+  have hmem : h ∈ Finset.range (q + 2) := Finset.mem_range.mpr (by omega)
+  refine le_trans ?_ (Finset.le_sup' (f := fun h : ℕ =>
+    (h : ℝ) * ((p : ℝ) + M * (q + 1 - h : ℕ)) + (3 : ℝ) * h * (h - 1 : ℕ) / 2) hmem)
+  have hsub : ((q - h : ℕ) : ℝ) ≤ ((q + 1 - h : ℕ) : ℝ) := by exact_mod_cast (by omega : q - h ≤ q + 1 - h)
+  gcongr
+
+theorem hitPotential_chal_step (M p q : ℕ) :
+    hitPotential M (p + M) q ≤ hitPotential M p (q + 1) := by
+  unfold hitPotential
+  refine Finset.sup'_le _ _ fun h hh => ?_
+  have hlt : h < q + 1 := Finset.mem_range.mp hh
+  have hmem : h ∈ Finset.range (q + 2) := Finset.mem_range.mpr (by omega)
+  refine le_trans ?_ (Finset.le_sup' (f := fun h : ℕ =>
+    (h : ℝ) * ((p : ℝ) + M * (q + 1 - h : ℕ)) + (3 : ℝ) * h * (h - 1 : ℕ) / 2) hmem)
+  have hsub : ((q + 1 - h : ℕ) : ℝ) = ((q - h : ℕ) : ℝ) + 1 := by
+    exact_mod_cast (by omega : q + 1 - h = q - h + 1)
+  rw [hsub]
+  push_cast
+  linarith
+
+theorem hitPotential_hash_step (M p q : ℕ) :
+    (p : ℝ) + hitPotential M (p + 3) q ≤ hitPotential M p (q + 1) := by
+  unfold hitPotential
+  rw [add_comm, Finset.sup'_add]
+  refine Finset.sup'_le _ _ fun h hh => ?_
+  have hlt : h < q + 1 := Finset.mem_range.mp hh
+  have hmem : h + 1 ∈ Finset.range (q + 2) := Finset.mem_range.mpr (by omega)
+  refine le_trans ?_ (Finset.le_sup' (f := fun h' : ℕ =>
+    (h' : ℝ) * ((p : ℝ) + M * (q + 1 - h' : ℕ)) + (3 : ℝ) * h' * (h' - 1 : ℕ) / 2) hmem)
+  have hsub1 : q + 1 - (h + 1) = q - h := by omega
+  have hsub2 : h + 1 - 1 = h := by omega
+  rw [hsub1, hsub2]
+  have h3 : (3 : ℝ) * (h : ℝ) + 3 * (h : ℝ) * ((h - 1 : ℕ) : ℝ) / 2 =
+      3 * ((h + 1 : ℕ) : ℝ) * (h : ℝ) / 2 := by
+    cases h with
+    | zero => simp
+    | succ k =>
+      simp only [Nat.add_sub_cancel]
+      push_cast
+      ring
+  have hM : (0 : ℝ) ≤ (M : ℝ) * ((q - h : ℕ) : ℝ) := by positivity
+  push_cast at h3 ⊢
+  nlinarith
+
+/-- Closed-form upper bound on `hitPotential M 0 Q`:
+`hitPotential M 0 Q ≤ (max M 3 + 3) * Q ^ 2 / 4`. -/
+theorem hitPotential_zero_le (M Q : ℕ) :
+    hitPotential M 0 Q ≤ ((max M 3 + 3 : ℕ) : ℝ) * (Q : ℝ) ^ 2 / 4 := by
+  unfold hitPotential
+  refine Finset.sup'_le _ _ fun h hh => ?_
+  have hle : h ≤ Q := Nat.lt_succ_iff.mp (Finset.mem_range.mp hh)
+  set M' : ℕ := max M 3
+  have hMM' : (M : ℝ) ≤ (M' : ℝ) := by exact_mod_cast le_max_left M 3
+  have h3M' : (3 : ℝ) ≤ (M' : ℝ) := by exact_mod_cast le_max_right M 3
+  have hsub : ((Q - h : ℕ) : ℝ) = (Q : ℝ) - (h : ℝ) := Nat.cast_sub hle
+  have hh1 : ((h - 1 : ℕ) : ℝ) ≤ (h : ℝ) := by exact_mod_cast Nat.sub_le h 1
+  have hstep1 : (h : ℝ) * ((0 : ℕ) + (M : ℝ) * ((Q - h : ℕ) : ℝ)) +
+      3 * (h : ℝ) * ((h - 1 : ℕ) : ℝ) / 2 ≤
+      (h : ℝ) * ((M' : ℝ) * ((Q : ℝ) - (h : ℝ))) + 3 * (h : ℝ) * (h : ℝ) / 2 := by
+    rw [Nat.cast_zero, zero_add, hsub]
+    have hnn1 : 0 ≤ (Q : ℝ) - (h : ℝ) := sub_nonneg.mpr (Nat.cast_le.mpr hle)
+    have h1 : (h : ℝ) * ((M : ℝ) * ((Q : ℝ) - (h : ℝ))) ≤
+        (h : ℝ) * ((M' : ℝ) * ((Q : ℝ) - (h : ℝ))) := by gcongr
+    have h2 : 3 * (h : ℝ) * ((h - 1 : ℕ) : ℝ) / 2 ≤ 3 * (h : ℝ) * (h : ℝ) / 2 := by gcongr
+    linarith
+  refine hstep1.trans ?_
+  have hpos : (0 : ℝ) < 4 * (M' : ℝ) - 6 := by linarith
+  have hkey : 0 ≤ ((4 * (M' : ℝ) - 6) * (h : ℝ) - 2 * (M' : ℝ) * (Q : ℝ)) ^ 2 +
+      6 * ((M' : ℝ) - 3) * (Q : ℝ) ^ 2 := by
+    have hsq1 : 0 ≤ ((4 * (M' : ℝ) - 6) * (h : ℝ) - 2 * (M' : ℝ) * (Q : ℝ)) ^ 2 := sq_nonneg _
+    have hsq2 : 0 ≤ (Q : ℝ) ^ 2 := sq_nonneg _
+    nlinarith
+  have hmul : (4 * (M' : ℝ) - 6) *
+      (((M' : ℝ) + 3) * (Q : ℝ) ^ 2 - 4 * ((h : ℝ) * ((M' : ℝ) * ((Q : ℝ) - (h : ℝ))) +
+        3 * (h : ℝ) * (h : ℝ) / 2)) =
+      ((4 * (M' : ℝ) - 6) * (h : ℝ) - 2 * (M' : ℝ) * (Q : ℝ)) ^ 2 +
+        6 * ((M' : ℝ) - 3) * (Q : ℝ) ^ 2 := by ring
+  have hdiff : 0 ≤ ((M' : ℝ) + 3) * (Q : ℝ) ^ 2 -
+      4 * ((h : ℝ) * ((M' : ℝ) * ((Q : ℝ) - (h : ℝ))) + 3 * (h : ℝ) * (h : ℝ) / 2) := by
+    nlinarith
+  push_cast
+  linarith
+
+/-- Length of `flatMap` over a `zipIdx` list bounded by a sum of per-index bounds. -/
+theorem length_flatMap_zipIdx_le {α β : Type*} (f : ℕ → α → List β) (bound : ℕ → ℕ)
+    (hbound : ∀ j a, (f j a).length ≤ bound j) :
+    ∀ (l : List α) (k : ℕ),
+      ((l.zipIdx k).flatMap fun p => f p.2 p.1).length ≤
+        ∑ j ∈ Finset.range l.length, bound (k + j)
+  | [], _ => by simp
+  | a :: l, k => by
+    rw [List.zipIdx_cons, List.flatMap_cons, List.length_append, List.length_cons,
+      Finset.sum_range_succ', Nat.add_zero]
+    have ih := length_flatMap_zipIdx_le f bound hbound l (k + 1)
+    have hsum : ∑ j ∈ Finset.range l.length, bound (k + 1 + j) =
+        ∑ j ∈ Finset.range l.length, bound (k + (j + 1)) :=
+      Finset.sum_congr rfl fun j _ => by rw [Nat.add_assoc, Nat.add_comm 1 j]
+    rw [hsum] at ih
+    have ha := hbound k a
+    simp only [Nat.add_zero]
+    omega
 
 end MerkleRO
 
 section Count
 
-variable {digestsOf : Msg → List D} {r K : ℕ}
+variable {digestsOf : ℕ → Msg → List D} {r M : ℕ}
 
-/-- An entry brings at most `K * r + 3` digests into play, when a message
-contains at most `K` digests. -/
-theorem length_entryDigests_le (hK : ∀ m, (digestsOf m).length ≤ K)
-    (e : Sigma (MerkleAnswer Msg Chal T D)) : (entryDigests digestsOf r e).length ≤ K * r + 3 := by
-  have h₁ : ((e.1.msgs.take r).flatMap digestsOf).length ≤ K * r :=
-    (length_flatMap_le digestsOf hK _).trans (Nat.mul_le_mul_left K (List.length_take_le r _))
-  have h₂ : (hashDigests e.1 e.2).length ≤ 3 := by
-    obtain ⟨x, y⟩ := e
-    cases x with
-    | chal t m => exact Nat.zero_le 3
-    | other q => cases q <;> exact Nat.le_of_ble_eq_true rfl
-  rw [entryDigests, List.length_append]
-  omega
+/-- An entry brings at most `entryCap M e.1` digests into play when every
+challenge query brings at most `M` digests across rounds `< r`. -/
+theorem length_entryDigests_le
+    (hM : ∀ (x : FSQuery Msg Chal (HashQuery T D)), (chalDigests digestsOf r x).length ≤ M)
+    (e : Sigma (MerkleAnswer Msg Chal T D)) :
+    (entryDigests digestsOf r e).length ≤ entryCap M e.1 := by
+  obtain ⟨x, y⟩ := e
+  cases x with
+  | chal t m =>
+    simp only [entryDigests, hashDigests, List.append_nil, entryCap]
+    exact hM (.chal t m)
+  | other q =>
+    simp only [entryDigests, chalDigests, FSQuery.msgs, List.take_nil, List.zipIdx_nil,
+      List.flatMap_nil, List.nil_append, entryCap]
+    cases q with
+    | rows _ => exact show 1 ≤ 3 by decide
+    | node _ _ => exact le_refl 3
 
-/-- **The number of present digests.** When a message contains at most `K`
-digests, the digests present in a log `l` lie in a set of at most
-`(K * r + 3) * l.length` elements. -/
-theorem exists_finset_present (hK : ∀ m, (digestsOf m).length ≤ K)
+/-- **The number of present digests.** The digests present in a log `l` lie in a
+set of at most `presentCap M l` elements. -/
+theorem exists_finset_present
+    (hM : ∀ (x : FSQuery Msg Chal (HashQuery T D)), (chalDigests digestsOf r x).length ≤ M)
     (l : Log (MerkleAnswer Msg Chal T D)) :
-    ∃ S : Finset D, S.card ≤ (K * r + 3) * l.length ∧ ∀ d, Present digestsOf r l d → d ∈ S := by
+    ∃ S : Finset D, S.card ≤ presentCap M l ∧ ∀ d, Present digestsOf r l d → d ∈ S := by
   classical
   refine ⟨(l.flatMap (entryDigests digestsOf r)).toFinset, ?_, fun d hd => ?_⟩
-  · exact (List.toFinset_card_le _).trans (length_flatMap_le _ (length_entryDigests_le hK) l)
+  · refine (List.toFinset_card_le _).trans ?_
+    induction l with
+    | nil => simp [presentCap]
+    | cons e l ih =>
+      rw [List.flatMap_cons, List.length_append, presentCap, List.map_cons, List.sum_cons]
+      have he := length_entryDigests_le hM e
+      change (entryDigests digestsOf r e).length + (l.flatMap (entryDigests digestsOf r)).length ≤
+        entryCap M e.1 + presentCap M l
+      omega
   · rw [List.mem_toFinset, List.mem_flatMap]
     exact hd
 
 variable [Fintype D] [Nonempty D]
 
-/-- At most a fraction `(K * r + 3) * l.length / card D` of the digests is
-present in a log `l`. -/
-theorem fractionLE_present (hK : ∀ m, (digestsOf m).length ≤ K)
+/-- At most a fraction `presentCap M l / card D` of the digests is present in a log `l`. -/
+theorem fractionLE_present
+    (hM : ∀ (x : FSQuery Msg Chal (HashQuery T D)), (chalDigests digestsOf r x).length ≤ M)
     (l : Log (MerkleAnswer Msg Chal T D)) :
     FractionLE (fun y : D => Present digestsOf r l y)
-      ((K * r + 3) * l.length / Fintype.card D) := by
-  obtain ⟨S, hS, hmem⟩ := exists_finset_present (r := r) hK l
+      ((presentCap M l : ℝ) / Fintype.card D) := by
+  obtain ⟨S, hS, hmem⟩ := exists_finset_present (r := r) hM l
   refine ⟨S, ?_, hmem⟩
   rw [div_mul_cancel₀ _ (Nat.cast_ne_zero.mpr Fintype.card_ne_zero)]
   exact_mod_cast hS
 
-variable [∀ i, Fintype (Chal i)]
+variable [DecidableEq (FSQuery Msg Chal (HashQuery T D))] [∀ i, Fintype (Chal i)]
+  [∀ i, Nonempty (Chal i)] {α : Type w}
 
-/-- **The fraction of hits.** For every log `l` and every query, at most a
-fraction `(K * r + 3) * l.length / card D` of the answers is a hit. -/
-theorem fractionLE_hit (hK : ∀ m, (digestsOf m).length ≤ K)
+/-- **The probability of a hit, from any log, via the Bellman potential.** -/
+theorem prob_hasBadFrom_hit_le
+    (hM : ∀ (x : FSQuery Msg Chal (HashQuery T D)), (chalDigests digestsOf r x).length ≤ M)
+    {c : OracleComp (MerkleAnswer Msg Chal T D) α} {Q : ℕ} (hc : c.QueryBound Q)
     (l : Log (MerkleAnswer Msg Chal T D)) :
-    ∀ x : FSQuery Msg Chal (HashQuery T D),
-      FractionLE (Hit digestsOf r l x) ((K * r + 3) * l.length / Fintype.card D)
-  | .chal _ _ => (FractionLE.false.mono_right (by positivity)).mono_left fun _ h => h
-  | .other _ => fractionLE_present hK l
+    prob (fun _ l' => HasBadFrom (Hit digestsOf r) l.length l') c l
+      ≤ hitPotential M (presentCap M l) Q / Fintype.card D := by
+  classical
+  have hDpos : (0 : ℝ) < Fintype.card D := Nat.cast_pos.mpr Fintype.card_pos
+  induction c generalizing l Q with
+  | pure a =>
+    rw [prob_pure, ite_eq_right (not_hasBadFrom_of_length_le le_rfl)]
+    exact div_nonneg (hitPotential_nonneg M _ Q) hDpos.le
+  | queryBind x k ih =>
+    cases Q with
+    | zero => exact absurd hc (queryBound_queryBind_zero x k)
+    | succ Q =>
+      cases hx : l.dlookup x with
+      | some y =>
+        rw [prob_queryBind_of_lookup hx]
+        exact (ih y (hc y) l).trans
+          (div_le_div_of_nonneg_right (hitPotential_mono_q M _ Q) hDpos.le)
+      | none =>
+        have hYpos : (0 : ℝ) < Fintype.card (MerkleAnswer Msg Chal T D x) :=
+          Nat.cast_pos.mpr Fintype.card_pos
+        set B := hitPotential M (presentCap M l + entryCap M x) Q / Fintype.card D with hBdef
+        have hB0 : 0 ≤ B := div_nonneg (hitPotential_nonneg M _ Q) hDpos.le
+        have hstep : ∀ y : MerkleAnswer Msg Chal T D x,
+            prob (fun _ l' => HasBadFrom (Hit digestsOf r) l.length l') (k y) (l ++ [⟨x, y⟩])
+              ≤ (if Hit digestsOf r l x y then 1 else 0) + B := by
+          intro y
+          by_cases hb : Hit digestsOf r l x y
+          · rw [ite_eq_left hb]
+            exact (prob_le_one _ _ _).trans (le_add_of_nonneg_right hB0)
+          · rw [ite_eq_right hb, zero_add]
+            refine le_trans (prob_mono_of_outcome fun a l' ha h => ?_)
+              ((ih y (hc y) (l ++ [⟨x, y⟩])).trans (le_of_eq ?_))
+            · obtain ⟨t, rfl⟩ := ha.prefix
+              rw [List.append_assoc, List.singleton_append] at h ⊢
+              rw [List.length_append, List.length_singleton]
+              exact (hasBadFrom_length_cons h).resolve_left hb
+            · rw [presentCap_append_singleton]
+        rw [prob_queryBind_of_fresh hx, div_le_iff₀ hYpos]
+        cases x with
+        | chal t m =>
+          have hzero : ∀ y, Hit digestsOf r l (.chal t m) y = False := fun _ => rfl
+          have hsum : ∑ y : MerkleAnswer Msg Chal T D (.chal t m),
+              prob (fun _ l' => HasBadFrom (Hit digestsOf r) l.length l') (k y)
+                (l ++ [⟨.chal t m, y⟩]) ≤
+              Fintype.card (MerkleAnswer Msg Chal T D (.chal t m)) * B := by
+            calc ∑ y, prob (fun _ l' => HasBadFrom (Hit digestsOf r) l.length l') (k y)
+                    (l ++ [⟨.chal t m, y⟩])
+                ≤ ∑ _y : MerkleAnswer Msg Chal T D (.chal t m), B :=
+                  Finset.sum_le_sum fun y _ => by simpa [hzero y] using hstep y
+              _ = Fintype.card (MerkleAnswer Msg Chal T D (.chal t m)) * B := by
+                  rw [Finset.sum_const, Finset.card_univ, nsmul_eq_mul]
+          refine hsum.trans ?_
+          rw [mul_comm]
+          refine mul_le_mul_of_nonneg_right ?_ hYpos.le
+          exact div_le_div_of_nonneg_right (hitPotential_chal_step M (presentCap M l) Q) hDpos.le
+        | other q =>
+          have hfrac : FractionLE (Hit digestsOf r l (.other q))
+              ((presentCap M l : ℝ) / Fintype.card D) :=
+            fractionLE_present hM l
+          calc ∑ y : D, prob (fun _ l' => HasBadFrom (Hit digestsOf r) l.length l') (k y)
+                  (l ++ [⟨.other q, y⟩])
+              ≤ ∑ y : D, ((if Hit digestsOf r l (.other q) y then (1 : ℝ) else 0) + B) :=
+                Finset.sum_le_sum fun y _ => hstep y
+            _ = (∑ y : D, if Hit digestsOf r l (.other q) y then (1 : ℝ) else 0) +
+                  Fintype.card D * B := by
+                rw [Finset.sum_add_distrib, Finset.sum_const, Finset.card_univ, nsmul_eq_mul]
+            _ ≤ ((presentCap M l : ℝ) / Fintype.card D) * Fintype.card D + Fintype.card D * B :=
+                add_le_add_left hfrac.sum_ite_le _
+            _ = ((presentCap M l : ℝ) + hitPotential M (presentCap M l + 3) Q) /
+                  Fintype.card D * Fintype.card D := by
+                rw [hBdef, entryCap]
+                field_simp
+            _ ≤ (hitPotential M (presentCap M l) (Q + 1) / Fintype.card D) * Fintype.card D :=
+                mul_le_mul_of_nonneg_right
+                  (div_le_div_of_nonneg_right (hitPotential_hash_step M (presentCap M l) Q) hDpos.le)
+                  hDpos.le
 
-variable [DecidableEq (FSQuery Msg Chal (HashQuery T D))] [∀ i, Nonempty (Chal i)] {α : Type w}
-
-/-- **The probability of a hit.** When a message contains at most `K` digests,
-a computation that makes at most `Q` queries from the empty log leaves a log
-with an entry that is a hit with respect to the entries before it with
-probability at most `(K * r + 3) * Q * (Q - 1) / (2 * card D)`. -/
-theorem prob_hasBad_hit_le (hK : ∀ m, (digestsOf m).length ≤ K)
+/-- **The probability of a hit, via the Bellman potential.** -/
+theorem prob_hasBad_hit_le_potential
+    (hM : ∀ (x : FSQuery Msg Chal (HashQuery T D)), (chalDigests digestsOf r x).length ≤ M)
     {c : OracleComp (MerkleAnswer Msg Chal T D) α} {Q : ℕ} (hc : c.QueryBound Q) :
     prob (fun _ l => HasBad (Hit digestsOf r) l) c []
-      ≤ (K * r + 3) * Q * (Q - 1) / (2 * Fintype.card D) := by
-  have h := prob_hasBad_le (bad := Hit digestsOf r)
-    (ε := fun n => (K * r + 3) * n / Fintype.card D) (fun n => by positivity)
-    (fun l x _ => fractionLE_hit hK l x) hc
-  refine h.trans (le_of_eq ?_)
-  rw [← Finset.sum_div, ← Finset.mul_sum, sum_range_cast]
-  ring
+      ≤ hitPotential M 0 Q / Fintype.card D := by
+  simpa only [HasBad, List.length_nil, presentCap_nil] using prob_hasBadFrom_hit_le hM hc []
+
+/-- **The probability of a hit (tight closed form).** When every challenge query
+contains at most `M` digests across the first `r` rounds, a computation that makes
+at most `Q` queries from the empty log leaves a log with a hit with probability at
+most `(max M 3 + 3) * Q ^ 2 / (4 * card D)`. -/
+theorem prob_hasBad_hit_le
+    (hM : ∀ (x : FSQuery Msg Chal (HashQuery T D)), (chalDigests digestsOf r x).length ≤ M)
+    {c : OracleComp (MerkleAnswer Msg Chal T D) α} {Q : ℕ} (hc : c.QueryBound Q) :
+    prob (fun _ l => HasBad (Hit digestsOf r) l) c []
+      ≤ ((max M 3 + 3 : ℕ) : ℝ) * (Q : ℝ) ^ 2 / (4 * Fintype.card D) := by
+  refine (prob_hasBad_hit_le_potential hM hc).trans ?_
+  have hle := hitPotential_zero_le M Q
+  have hD : (0 : ℝ) ≤ Fintype.card D := Nat.cast_nonneg _
+  calc hitPotential M 0 Q / Fintype.card D
+      ≤ (((max M 3 + 3 : ℕ) : ℝ) * (Q : ℝ) ^ 2 / 4) / Fintype.card D :=
+        div_le_div_of_nonneg_right hle hD
+    _ = ((max M 3 + 3 : ℕ) : ℝ) * (Q : ℝ) ^ 2 / (4 * Fintype.card D) := by ring
 
 end Count
 
@@ -245,7 +462,7 @@ end Count
 
 section Stable
 
-variable [DecidableEq (FSQuery Msg Chal (HashQuery T D))] {digestsOf : Msg → List D} {r : ℕ}
+variable [DecidableEq (FSQuery Msg Chal (HashQuery T D))] {digestsOf : ℕ → Msg → List D} {r : ℕ}
   {l t : Log (MerkleAnswer Msg Chal T D)} {root : D} {dims : Array Dimensions} {index : ℕ}
   {rows : Array (Array T)}
 

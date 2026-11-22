@@ -106,7 +106,7 @@ whatever the adversary, as long as it makes at most `Q` oracle queries, the
 probability that the executable verifier accepts its attempt while the claims
 of the attempt fail is at most
 
-    N * εmax + ((batches + 1) * (rounds + 2) + 3) * N * (N - 1) / (2 * |D|),
+    N * εmax + (max (batches + rounds) 3 + 3) * N ^ 2 / (4 * |D|),
 
 with `N = Q + (rounds + 2) + P.verifierQueries`. The doc comment of `soundness`
 says what "accepts" and "the claims fail" mean.
@@ -139,8 +139,9 @@ theorem soundness_of_curveCA (hca : CurveCA K udThreshold)
             (attempt res.1).points (attempt res.1).values)) (committedRow l)))
       (experiment m params shape wf adv attempt) [] ≤
       (Q + ((modelParams m params shape wf).rounds + 2) + (modelParams m params shape wf).verifierQueries) * εmax +
-        (((modelParams m params shape wf).batches + 1) * ((modelParams m params shape wf).rounds + 2) + 3) * (Q + ((modelParams m params shape wf).rounds + 2) + (modelParams m params shape wf).verifierQueries) *
-          (Q + ((modelParams m params shape wf).rounds + 2) + (modelParams m params shape wf).verifierQueries - 1) / (2 * Fintype.card D) :=
+        ((max ((modelParams m params shape wf).batches + (modelParams m params shape wf).rounds) 3 + 3 : ℕ) : ℝ) *
+          (Q + ((modelParams m params shape wf).rounds + 2) + (modelParams m params shape wf).verifierQueries) ^ 2 /
+          (4 * Fintype.card D) :=
   (modelParams m params shape wf).soundness_grind_view_of_imp_of_curveCA hca (powBits params shape)
     (view m params shape) (logBlowup := params.logBlowup) (logFinalPolyLen := params.logFinalPolyLen)
     (by
@@ -190,8 +191,9 @@ theorem soundness_of_curveCA_of_claimRefs (hca : CurveCA K udThreshold)
             (attempt res.1).points (attempt res.1).values)) (committedRow l)))
       (experiment m params shape wf adv attempt) [] ≤
       (Q + ((modelParams m params shape wf).rounds + 2) + (modelParams m params shape wf).verifierQueries) * εmax +
-        (((modelParams m params shape wf).batches + 1) * ((modelParams m params shape wf).rounds + 2) + 3) * (Q + ((modelParams m params shape wf).rounds + 2) + (modelParams m params shape wf).verifierQueries) *
-          (Q + ((modelParams m params shape wf).rounds + 2) + (modelParams m params shape wf).verifierQueries - 1) / (2 * Fintype.card D) := by
+        ((max ((modelParams m params shape wf).batches + (modelParams m params shape wf).rounds) 3 + 3 : ℕ) : ℝ) *
+          (Q + ((modelParams m params shape wf).rounds + 2) + (modelParams m params shape wf).verifierQueries) ^ 2 /
+          (4 * Fintype.card D) := by
   refine soundness_of_curveCA m params shape wf hca hheight hδ hrate (le_trans ?_ hα) hβ hq hadv
     attempt
   have hsum : (∑ j ∈ Finset.range (numRounds params shape + 1),

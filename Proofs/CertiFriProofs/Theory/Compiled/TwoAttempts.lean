@@ -27,7 +27,7 @@ about two openings of one commitment needs.
 
 With `N` the number of oracle queries of the whole experiment and
 
-    bound N = N * εmax + ((batches + 1) * (rounds + 2) + 3) * N * (N - 1) / (2 * |D|):
+    bound N = N * εmax + (max (batches + rounds) 3 + 3) * N ^ 2 / (4 * |D|):
 
 * `Params.AcceptsLog`: the acceptance event for a log. Some total answer
   function that agrees with the log makes the model verifier accept the proof
@@ -139,7 +139,7 @@ theorem accepts_of_acceptsLog {M : Type} [DecidableEq M] {bits : ℕ → ℕ}
     {l₀ l l₁ l' : Log (MerkleAnswer M (GrindChal bits (Chal P.ldt P.queries)) F D)} {b : Bool}
     (hexp : Outcome (fsExperiment (P.rounds + 2) adv msgs) l₀ out l)
     (hver : Outcome (P.verifyGrindView bits view pf out.2) l b l₁) (hl : l₁ <+: l')
-    (hacc : P.AcceptsLog bits view pf (msgs out.1) l') {digests : M → List D} {r : ℕ}
+    (hacc : P.AcceptsLog bits view pf (msgs out.1) l') {digests : ℕ → M → List D} {r : ℕ}
     (hno : ¬ HasBad (Hit digests r) l') :
     PowPasses out.2 ∧
       Accepts P.ldt P.shift
@@ -170,7 +170,7 @@ verifier accepts on the final log (`AcceptsLog`) and that the claims of the
 adversary's first message, read through `view` and from the final log, fail.
 Then `E` has probability at most
 
-    N * εmax + ((batches + 1) * (rounds + 2) + 3) * N * (N - 1) / (2 * |D|),
+    N * εmax + (max (batches + rounds) 3 + 3) * N ^ 2 / (4 * |D|),
 
 with `N = Q + (rounds + 2) + verifierQueries + R`.
 
@@ -198,8 +198,8 @@ theorem soundness_grind_view_bind {M : Type} [DecidableEq M] (bits : ℕ → ℕ
         ClaimsFail P.ldt P.shift θ (P.claims (view (msgs res.1 0)) (committedRow l'))) :
     prob E ((P.experimentGrindView bits view adv msgs proofOf).bind rest) [] ≤
       (Q + (P.rounds + 2) + P.verifierQueries + R) * εmax +
-        ((P.batches + 1) * (P.rounds + 2) + 3) * (Q + (P.rounds + 2) + P.verifierQueries + R) *
-          (Q + (P.rounds + 2) + P.verifierQueries + R - 1) / (2 * Fintype.card D) := by
+        ((max (P.batches + P.rounds) 3 + 3 : ℕ) : ℝ) *
+          (Q + (P.rounds + 2) + P.verifierQueries + R) ^ 2 / (4 * Fintype.card D) := by
   have hassoc : (P.experimentGrindView bits view adv msgs proofOf).bind rest =
       (fsExperiment (P.rounds + 2) adv msgs).bind fun out =>
         ((P.verifyGrindView bits view (proofOf out.1) out.2).bind fun b =>
@@ -281,7 +281,7 @@ oracle queries: the probability that the model verifier accepts the first
 attempt on the final log of the experiment (`AcceptsLog`) while the claims of
 its first message, read through `view` and from the final log, fail is at most
 
-    N * εmax + ((batches + 1) * (rounds + 2) + 3) * N * (N - 1) / (2 * |D|),
+    N * εmax + (max (batches + rounds) 3 + 3) * N ^ 2 / (4 * |D|),
 
 with `N = Q + 2 * ((rounds + 2) + verifierQueries)`. The final log holds the
 queries of the verification of the second attempt as well. The hypotheses are
@@ -302,8 +302,8 @@ theorem soundness_grind_view₂_first {M : Type} [DecidableEq M] (bits : ℕ →
         ClaimsFail P.ldt P.shift θ (P.claims (view (msgs₁ res.1 0)) (committedRow l)))
       (P.experimentGrindView₂ bits view adv msgs₁ msgs₂ proofOf₁ proofOf₂) [] ≤
       (Q + 2 * ((P.rounds + 2) + P.verifierQueries)) * εmax +
-        ((P.batches + 1) * (P.rounds + 2) + 3) * (Q + 2 * ((P.rounds + 2) + P.verifierQueries)) *
-          (Q + 2 * ((P.rounds + 2) + P.verifierQueries) - 1) / (2 * Fintype.card D) := by
+        ((max (P.batches + P.rounds) 3 + 3 : ℕ) : ℝ) *
+          (Q + 2 * ((P.rounds + 2) + P.verifierQueries)) ^ 2 / (4 * Fintype.card D) := by
   have h := P.soundness_grind_view_bind bits view hθ hmca hstep hα hβ hq hadv msgs₁ proofOf₁
     (rest := fun res => (derive _ (msgs₂ res.1) (P.rounds + 2)).bind fun t =>
       (P.verifyGrindView bits view (proofOf₂ res.1) t).bind fun b => .pure (res.1, res.2, b))
@@ -329,7 +329,7 @@ queries: the probability that the model verifier accepts the second attempt on
 the final log of the experiment (`AcceptsLog`) while the claims of its first
 message, read through `view` and from the final log, fail is at most
 
-    N * εmax + ((batches + 1) * (rounds + 2) + 3) * N * (N - 1) / (2 * |D|),
+    N * εmax + (max (batches + rounds) 3 + 3) * N ^ 2 / (4 * |D|),
 
 with `N = Q + 2 * ((rounds + 2) + verifierQueries)`. The hypotheses are those
 of `soundness_grind_view_of_accepts`. -/
@@ -349,8 +349,8 @@ theorem soundness_grind_view₂_second {M : Type} [DecidableEq M] (bits : ℕ �
         ClaimsFail P.ldt P.shift θ (P.claims (view (msgs₂ res.1 0)) (committedRow l)))
       (P.experimentGrindView₂ bits view adv msgs₁ msgs₂ proofOf₁ proofOf₂) [] ≤
       (Q + 2 * ((P.rounds + 2) + P.verifierQueries)) * εmax +
-        ((P.batches + 1) * (P.rounds + 2) + 3) * (Q + 2 * ((P.rounds + 2) + P.verifierQueries)) *
-          (Q + 2 * ((P.rounds + 2) + P.verifierQueries) - 1) / (2 * Fintype.card D) := by
+        ((max (P.batches + P.rounds) 3 + 3 : ℕ) : ℝ) *
+          (Q + 2 * ((P.rounds + 2) + P.verifierQueries)) ^ 2 / (4 * Fintype.card D) := by
   have h := P.soundness_grind_view_bind bits view hθ hmca hstep hα hβ hq
     (P.queryBound_experimentGrindView bits view hadv msgs₁ proofOf₁)
     (fun res => msgs₂ res.1) (fun res => proofOf₂ res.1)
@@ -376,7 +376,7 @@ of its two attempts the model verifier accepts on the final log of the
 experiment (`AcceptsLog`) while the claims of the first message of that
 attempt, read through `view` and from the final log, fail is at most
 
-    2 * (N * εmax + ((batches + 1) * (rounds + 2) + 3) * N * (N - 1) / (2 * |D|)),
+    2 * (N * εmax + (max (batches + rounds) 3 + 3) * N ^ 2 / (4 * |D|)),
 
 with `N = Q + 2 * ((rounds + 2) + verifierQueries)`, the number of oracle
 queries of the experiment.
@@ -408,8 +408,8 @@ theorem soundness_grind_view₂ {M : Type} [DecidableEq M] (bits : ℕ → ℕ)
           ClaimsFail P.ldt P.shift θ (P.claims (view (msgs₂ res.1 0)) (committedRow l))))
       (P.experimentGrindView₂ bits view adv msgs₁ msgs₂ proofOf₁ proofOf₂) [] ≤
       2 * ((Q + 2 * ((P.rounds + 2) + P.verifierQueries)) * εmax +
-        ((P.batches + 1) * (P.rounds + 2) + 3) * (Q + 2 * ((P.rounds + 2) + P.verifierQueries)) *
-          (Q + 2 * ((P.rounds + 2) + P.verifierQueries) - 1) / (2 * Fintype.card D)) := by
+        ((max (P.batches + P.rounds) 3 + 3 : ℕ) : ℝ) *
+          (Q + 2 * ((P.rounds + 2) + P.verifierQueries)) ^ 2 / (4 * Fintype.card D)) := by
   rw [two_mul]
   exact (prob_or_le _ _ _ _).trans (add_le_add
     (P.soundness_grind_view₂_first bits view hθ hmca hstep hα hβ hq hadv msgs₁ msgs₂ proofOf₁

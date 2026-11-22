@@ -86,7 +86,7 @@ Let no committed column be shorter than the final height, and let `δ ≥ 0` wit
 at most `Q` oracle queries, the probability that `Fri.verify` accepts its
 attempt while the claims fail at agreement `1 - δ` is at most
 
-    N * εmax + ((batches + 1) * (rounds + 2) + 3) * N * (N - 1) / (2 * |D|),
+    N * εmax + (max (batches + rounds) 3 + 3) * N ^ 2 / (4 * |D|),
 
 with `N = Q + (rounds + 2) + verifierQueries`, provided `εmax` bounds the error
 of every round. With `n = logMaxHeight params.logBlowup shape` and
@@ -119,12 +119,10 @@ theorem soundness_uniqueDecoding
       (experiment m params shape wf adv attempt) [] ≤
       (Q + ((modelParams m params shape wf).rounds + 2) +
           (modelParams m params shape wf).verifierQueries) * εmax +
-        (((modelParams m params shape wf).batches + 1) *
-            ((modelParams m params shape wf).rounds + 2) + 3) *
+        ((max ((modelParams m params shape wf).batches +
+            (modelParams m params shape wf).rounds) 3 + 3 : ℕ) : ℝ) *
           (Q + ((modelParams m params shape wf).rounds + 2) +
-            (modelParams m params shape wf).verifierQueries) *
-          (Q + ((modelParams m params shape wf).rounds + 2) +
-            (modelParams m params shape wf).verifierQueries - 1) / (2 * Fintype.card D) :=
+            (modelParams m params shape wf).verifierQueries) ^ 2 / (4 * Fintype.card D) :=
   soundness_of_curveCA_of_claimRefs m params shape wf (curveCA_udThreshold K) hheight hδ hrate
     hα hβ hq hadv attempt
 

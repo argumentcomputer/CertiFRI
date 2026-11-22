@@ -136,7 +136,7 @@ output and the final log that holds only when the model verifier accepted.
 Then the probability that `E` holds while the claims of the adversary's first
 message, read through `view`, fail is at most
 
-    N * εmax + ((batches + 1) * (rounds + 2) + 3) * N * (N - 1) / (2 * |D|),
+    N * εmax + (max (batches + rounds) 3 + 3) * N ^ 2 / (4 * |D|),
 
 with `N = Q + (rounds + 2) + P.verifierQueries`. -/
 theorem soundness_grind_view_of_imp_of_curveCA (hca : CurveCA F udThreshold)
@@ -162,8 +162,8 @@ theorem soundness_grind_view_of_imp_of_curveCA (hca : CurveCA F udThreshold)
         ClaimsFail P.ldt P.shift (1 - δ) (P.claims (view (msgs res.1 0)) (committedRow l)))
       (P.experimentGrindView bits view adv msgs proofOf) [] ≤
       (Q + (P.rounds + 2) + P.verifierQueries) * εmax +
-        ((P.batches + 1) * (P.rounds + 2) + 3) * (Q + (P.rounds + 2) + P.verifierQueries) *
-          (Q + (P.rounds + 2) + P.verifierQueries - 1) / (2 * Fintype.card D) := by
+        ((max (P.batches + P.rounds) 3 + 3 : ℕ) : ℝ) * (Q + (P.rounds + 2) + P.verifierQueries) ^ 2 /
+          (4 * Fintype.card D) := by
   have hθ : (0 : ℝ) ≤ 1 - δ := by
     have := pow_nonneg (by norm_num : (0 : ℝ) ≤ 1 / 2) logBlowup
     linarith
@@ -185,7 +185,7 @@ makes at most `Q` oracle queries: in the experiment `experimentGrindView`, the
 probability that the model verifier accepts while the claims of the adversary's
 first message, read through `view`, fail is at most
 
-    N * εmax + ((batches + 1) * (rounds + 2) + 3) * N * (N - 1) / (2 * |D|),
+    N * εmax + (max (batches + rounds) 3 + 3) * N ^ 2 / (4 * |D|),
 
 with `N = Q + (rounds + 2) + P.verifierQueries`. The number `εmax` bounds the
 error of every round as in `soundness_grind_view_of_imp_of_curveCA`. -/
@@ -205,8 +205,8 @@ theorem soundness_grind_view_of_curveCA (hca : CurveCA F udThreshold)
         ClaimsFail P.ldt P.shift (1 - δ) (P.claims (view (msgs res.1 0)) (committedRow l)))
       (P.experimentGrindView bits view adv msgs proofOf) [] ≤
       (Q + (P.rounds + 2) + P.verifierQueries) * εmax +
-        ((P.batches + 1) * (P.rounds + 2) + 3) * (Q + (P.rounds + 2) + P.verifierQueries) *
-          (Q + (P.rounds + 2) + P.verifierQueries - 1) / (2 * Fintype.card D) := by
+        ((max (P.batches + P.rounds) 3 + 3 : ℕ) : ℝ) * (Q + (P.rounds + 2) + P.verifierQueries) ^ 2 /
+          (4 * Fintype.card D) := by
   have hθ : (0 : ℝ) ≤ 1 - δ := by
     have := pow_nonneg (by norm_num : (0 : ℝ) ≤ 1 / 2) logBlowup
     linarith

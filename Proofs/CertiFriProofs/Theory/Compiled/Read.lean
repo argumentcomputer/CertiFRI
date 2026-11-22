@@ -206,25 +206,76 @@ def Msg.point [Zero F] {batches : ℕ} (msg : Msg F D batches) (j k : ℕ) : F :
 def Msg.value [Zero F] {batches : ℕ} (msg : Msg F D batches) (j k : ℕ) : F :=
   (msg.values.getD j []).getD k 0
 
-/-- The Merkle roots a message contains: the input roots and the root of a
-folding round. -/
+/-- The Merkle roots a message contains at round `j`: `inputRoots` in round `0`,
+`commitRoot` in folding rounds `1 .. rounds`, and none in the final round. -/
+def digestsOfAt {batches : ℕ} (rounds : ℕ) (j : ℕ) (msg : Msg F D batches) : List D :=
+  if j = 0 then List.ofFn msg.inputRoots
+  else if j ≤ rounds then [msg.commitRoot]
+  else []
+
+/-- The Merkle roots a message contains across all fields. -/
 def digestsOf {batches : ℕ} (msg : Msg F D batches) : List D :=
   List.ofFn msg.inputRoots ++ [msg.commitRoot]
+
+/-- The round-`j` digest bound of a message: `batches` at round `0`, `1` at
+folding rounds `1 .. rounds`, and `0` after. -/
+def digestsBound (batches rounds : ℕ) (j : ℕ) : ℕ :=
+  if j = 0 then batches else if j ≤ rounds then 1 else 0
+
+theorem length_digestsOfAt {batches : ℕ} (rounds j : ℕ) (msg : Msg F D batches) :
+    (digestsOfAt rounds j msg).length = digestsBound batches rounds j := by
+  unfold digestsOfAt digestsBound
+  split
+  · simp
+  · split <;> simp
+
+theorem sum_digestsBound (batches rounds : ℕ) :
+    ∑ j ∈ Finset.range (rounds + 2), digestsBound batches rounds j = batches + rounds := by
+  rw [Finset.sum_range_succ, Finset.sum_range_succ']
+  have h0 : digestsBound batches rounds 0 = batches := by simp [digestsBound]
+  have hlast : digestsBound batches rounds (rounds + 1) = 0 := by simp [digestsBound]
+  have hmid : ∑ k ∈ Finset.range rounds, digestsBound batches rounds (k + 1) = rounds := by
+    calc ∑ k ∈ Finset.range rounds, digestsBound batches rounds (k + 1)
+        = ∑ _k ∈ Finset.range rounds, 1 := Finset.sum_congr rfl fun k hk => by
+          have hk' : k < rounds := Finset.mem_range.mp hk
+          simp [digestsBound, Nat.succ_le_of_lt hk']
+      _ = rounds := by simp
+  omega
+
+/-- Every challenge query brings at most `batches + rounds` digests into play
+across the `rounds + 2` rounds. -/
+theorem length_chalDigests_le {M : Type} {C : ℕ → Type} {batches : ℕ} (rounds : ℕ)
+    (view : M → Msg F D batches) (x : FSQuery M C (HashQuery F D)) :
+    (chalDigests (fun j m => digestsOfAt rounds j (view m)) (rounds + 2) x).length ≤
+      batches + rounds := by
+  unfold chalDigests
+  refine (MerkleRO.length_flatMap_zipIdx_le (fun j m => digestsOfAt rounds j (view m))
+    (digestsBound batches rounds) (fun j m => (length_digestsOfAt rounds j (view m)).le)
+    (x.msgs.take (rounds + 2)) 0).trans ?_
+  have hlen : (x.msgs.take (rounds + 2)).length ≤ rounds + 2 := List.length_take_le _ _
+  have hsub : Finset.range (x.msgs.take (rounds + 2)).length ⊆ Finset.range (rounds + 2) :=
+    Finset.range_mono hlen
+  calc ∑ j ∈ Finset.range (x.msgs.take (rounds + 2)).length, digestsBound batches rounds (0 + j)
+      = ∑ j ∈ Finset.range (x.msgs.take (rounds + 2)).length, digestsBound batches rounds j := by
+        simp
+    _ ≤ ∑ j ∈ Finset.range (rounds + 2), digestsBound batches rounds j :=
+        Finset.sum_le_sum_of_subset hsub
+    _ = batches + rounds := sum_digestsBound batches rounds
 
 /-- A message contains one root per input batch and one more. -/
 theorem length_digestsOf {batches : ℕ} (msg : Msg F D batches) :
     (digestsOf msg).length = batches + 1 := by
   rw [digestsOf, List.length_append, List.length_ofFn, List.length_singleton]
 
-/-- The input roots of a message are among its roots. -/
-theorem inputRoots_mem_digestsOf {batches : ℕ} (msg : Msg F D batches) (b : Fin batches) :
-    msg.inputRoots b ∈ digestsOf msg :=
-  List.mem_append_left _ (List.mem_ofFn.mpr ⟨b, rfl⟩)
+/-- The input roots of a message are among its round-`0` roots. -/
+theorem inputRoots_mem_digestsOfAt {batches : ℕ} (rounds : ℕ) (msg : Msg F D batches)
+    (b : Fin batches) : msg.inputRoots b ∈ digestsOfAt rounds 0 msg := by
+  simp [digestsOfAt, List.mem_ofFn]
 
-/-- The root of a folding round is among the roots of its message. -/
-theorem commitRoot_mem_digestsOf {batches : ℕ} (msg : Msg F D batches) :
-    msg.commitRoot ∈ digestsOf msg :=
-  List.mem_append_right _ (List.mem_singleton_self _)
+/-- The root of a folding round is among its round-`j` roots (`1 ≤ j ≤ rounds`). -/
+theorem commitRoot_mem_digestsOfAt {batches : ℕ} {rounds j : ℕ} (hj0 : j ≠ 0) (hjr : j ≤ rounds)
+    (msg : Msg F D batches) : msg.commitRoot ∈ digestsOfAt rounds j msg := by
+  simp [digestsOfAt, hj0, hjr]
 
 /-! ## Functions given by their values at indexed points -/
 
@@ -296,45 +347,53 @@ noncomputable def finalWord (coeffs : List F) (x : F) : F :=
   (polyOfCoeffs (coeffs.take P.finalDegree)).eval x
 
 /-- The message of the oracle-model protocol that the message `msg` of round
-`j` stands for, given the rows the roots commit to. The claims are read in
-every round, and are those of the input roots of `msg`; the oracle-model
-protocol looks at them in round `0` only. The word is the codeword under
-`commitRoot` in a round `j ≤ rounds`, and the final word after that. -/
+`j` stands for, given the rows the roots commit to. Round `0` reads only
+`claims` (from `inputRoots`), rounds `1 .. rounds` read only `commitWord`
+(from `commitRoot`), and rounds past `rounds` read only `finalWord` (no roots). -/
 noncomputable def read (j : ℕ) (msg : Msg F D P.batches) (committed : Committed F D) :
     PcsRbr.Msg F P.numClaims where
-  claims := P.claims msg committed
+  claims := if j = 0 then P.claims msg committed else fun _ _ => ⟨fun _ => 0, 0, 0⟩
   word :=
-    if j ≤ P.rounds then P.commitWord (j - 1) (committed msg.commitRoot (P.commitDims (j - 1)) 0)
+    if j = 0 then fun _ => 0
+    else if j ≤ P.rounds then P.commitWord (j - 1) (committed msg.commitRoot (P.commitDims (j - 1)) 0)
     else P.finalWord msg.finalCoeffs
 
-/-- The claims of a message as read in round `j` are `P.claims`. -/
-@[simp] theorem read_claims (j : ℕ) (msg : Msg F D P.batches) (committed : Committed F D) :
-    (P.read j msg committed).claims = P.claims msg committed := rfl
+/-- The claims of a message as read in round `0` are `P.claims`. -/
+@[simp] theorem read_claims_zero (msg : Msg F D P.batches) (committed : Committed F D) :
+    (P.read 0 msg committed).claims = P.claims msg committed := rfl
 
 /-- The word of the message of folding round `i`. -/
 theorem read_word_of_lt {i : ℕ} (hi : i < P.rounds) (msg : Msg F D P.batches)
     (committed : Committed F D) :
     (P.read (i + 1) msg committed).word =
       P.commitWord i (committed msg.commitRoot (P.commitDims i) 0) := by
-  simp only [read, ite_eq_left (Nat.succ_le_of_lt hi), Nat.add_sub_cancel]
+  simp only [read, Nat.succ_ne_zero, ↓reduceIte, ite_eq_left (Nat.succ_le_of_lt hi),
+    Nat.add_sub_cancel]
 
 /-- The word of the last message is the final word. -/
 theorem read_word_last (msg : Msg F D P.batches) (committed : Committed F D) :
     (P.read (P.rounds + 1) msg committed).word = P.finalWord msg.finalCoeffs := by
-  simp only [read, ite_eq_right (Nat.not_succ_le_self _)]
+  simp only [read, Nat.succ_ne_zero, ↓reduceIte, ite_eq_right (Nat.not_succ_le_self _)]
 
-/-- **The reading looks only at the roots of the message.** Two families of
-committed rows that agree at the roots in `digestsOf msg` give the same
-reading of `msg`. -/
+/-- **The reading of round `j` looks only at the roots of round `j`.** Two
+families of committed rows that agree at the roots in `digestsOfAt P.rounds j msg`
+give the same reading of `msg` in round `j`. -/
 theorem read_congr (j : ℕ) (msg : Msg F D P.batches) (c c' : Committed F D)
-    (h : ∀ root ∈ digestsOf msg, c root = c' root) : P.read j msg c = P.read j msg c' := by
-  have hin : ∀ b, c (msg.inputRoots b) = c' (msg.inputRoots b) := fun b =>
-    h _ (inputRoots_mem_digestsOf msg b)
-  have hcommit : c msg.commitRoot = c' msg.commitRoot := h _ (commitRoot_mem_digestsOf msg)
-  have hclaims : P.claims msg c = P.claims msg c' := by
-    funext j k
-    simp only [claims, hin]
-  simp only [read, hclaims, hcommit]
+    (h : ∀ root ∈ digestsOfAt P.rounds j msg, c root = c' root) :
+    P.read j msg c = P.read j msg c' := by
+  by_cases hj0 : j = 0
+  · subst hj0
+    have hin : ∀ b, c (msg.inputRoots b) = c' (msg.inputRoots b) := fun b =>
+      h _ (inputRoots_mem_digestsOfAt P.rounds msg b)
+    have hclaims : P.claims msg c = P.claims msg c' := by
+      funext l k
+      simp only [claims, hin]
+    simp only [read, ↓reduceIte, hclaims]
+  · by_cases hjr : j ≤ P.rounds
+    · have hcommit : c msg.commitRoot = c' msg.commitRoot :=
+        h _ (commitRoot_mem_digestsOfAt hj0 hjr msg)
+      simp only [read, hj0, ↓reduceIte, hjr, hcommit]
+    · simp only [read, hj0, ↓reduceIte, hjr]
 
 /-- The function of a claim, at the coset point of the index `i`: the entry of
 the claimed column in row `i` of the claimed matrix. -/

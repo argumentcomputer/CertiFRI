@@ -211,7 +211,7 @@ adversary, as long as it makes at most `Q` oracle queries: the probability that
 the executable verifier accepts its attempt while the claims of the attempt
 fail is at most
 
-    N * εmax + ((batches + 1) * (rounds + 2) + 3) * N * (N - 1) / (2 * |D|),
+    N * εmax + (max (batches + rounds) 3 + 3) * N ^ 2 / (4 * |D|),
 
 where `N = Q + (rounds + 2) + P.verifierQueries` counts the oracle queries of
 the experiment, `batches = shape.length`, `rounds = numRounds params shape`,
@@ -264,8 +264,9 @@ theorem soundness {θ : ℝ} (hθ : 0 ≤ θ) {εα εβ : ℕ → ℝ} {εmax :
             (attempt res.1).points (attempt res.1).values)) (committedRow l)))
       (experiment m params shape wf adv attempt) [] ≤
       (Q + ((modelParams m params shape wf).rounds + 2) + (modelParams m params shape wf).verifierQueries) * εmax +
-        (((modelParams m params shape wf).batches + 1) * ((modelParams m params shape wf).rounds + 2) + 3) * (Q + ((modelParams m params shape wf).rounds + 2) + (modelParams m params shape wf).verifierQueries) *
-          (Q + ((modelParams m params shape wf).rounds + 2) + (modelParams m params shape wf).verifierQueries - 1) / (2 * Fintype.card D) :=
+        ((max ((modelParams m params shape wf).batches + (modelParams m params shape wf).rounds) 3 + 3 : ℕ) : ℝ) *
+          (Q + ((modelParams m params shape wf).rounds + 2) + (modelParams m params shape wf).verifierQueries) ^ 2 /
+          (4 * Fintype.card D) :=
   (modelParams m params shape wf).soundness_grind_view_of_imp (powBits params shape)
     (view m params shape) hθ hmca hstep
     (by rw [powBits_zero, pow_zero, div_one]; exact hα)
@@ -307,8 +308,9 @@ theorem soundness_of_relDist
             (attempt res.1).points (attempt res.1).values)) (committedRow l)))
       (experiment m params shape wf adv attempt) [] ≤
       (Q + ((modelParams m params shape wf).rounds + 2) + (modelParams m params shape wf).verifierQueries) * εmax +
-        (((modelParams m params shape wf).batches + 1) * ((modelParams m params shape wf).rounds + 2) + 3) * (Q + ((modelParams m params shape wf).rounds + 2) + (modelParams m params shape wf).verifierQueries) *
-          (Q + ((modelParams m params shape wf).rounds + 2) + (modelParams m params shape wf).verifierQueries - 1) / (2 * Fintype.card D) :=
+        ((max ((modelParams m params shape wf).batches + (modelParams m params shape wf).rounds) 3 + 3 : ℕ) : ℝ) *
+          (Q + ((modelParams m params shape wf).rounds + 2) + (modelParams m params shape wf).verifierQueries) ^ 2 /
+          (4 * Fintype.card D) :=
   (modelParams m params shape wf).soundness_grind_view_of_imp_of_relDist (powBits params shape)
     (view m params shape) (logBlowup := params.logBlowup) (logFinalPolyLen := params.logFinalPolyLen)
     (by

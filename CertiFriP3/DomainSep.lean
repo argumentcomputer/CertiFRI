@@ -345,6 +345,37 @@ theorem extRowBytes_injective {r₁ r₂ : Array GoldilocksExt}
   dsimp only at hpair
   rw [goldilocksBytes_injective hpair.1, goldilocksBytes_injective hpair.2]
 
+private def ext3Bytes (e : GoldilocksExt3) : List UInt8 :=
+  goldilocksBytes e.c0 ++ goldilocksBytes e.c1 ++ goldilocksBytes e.c2
+
+private theorem foldl_ext3PushBytes_toList (acc : ByteArray) (xs : List GoldilocksExt3) :
+    (xs.foldl GoldilocksExt3.pushBytes acc).data.toList =
+      acc.data.toList ++ xs.flatMap ext3Bytes := by
+  induction xs generalizing acc with
+  | nil => simp
+  | cons e xs ih =>
+    simp only [List.foldl_cons, List.flatMap_cons, ih, GoldilocksExt3.pushBytes, pushBytes_toList,
+      ext3Bytes, List.append_assoc]
+
+/-- `Hashers.ext3RowBytes` is injective on cubic-extension rows. -/
+theorem ext3RowBytes_injective {r₁ r₂ : Array GoldilocksExt3}
+    (h : Hashers.ext3RowBytes r₁ = Hashers.ext3RowBytes r₂) : r₁ = r₂ := by
+  have hlist : (Hashers.ext3RowBytes r₁).data.toList = (Hashers.ext3RowBytes r₂).data.toList :=
+    congrArg (fun b => b.data.toList) h
+  simp only [Hashers.ext3RowBytes, ← Array.foldl_toList, foldl_ext3PushBytes_toList] at hlist
+  have hnil : ∀ n, (ByteArray.emptyWithCapacity n).data.toList = [] := fun _ => rfl
+  rw [hnil, hnil, List.nil_append, List.nil_append] at hlist
+  refine Array.toList_inj.mp
+    (flatMap_fixed_pos_injective (k := 24) (by decide)
+      (fun e => by simp [ext3Bytes, goldilocksBytes])
+      (fun e₁ e₂ he => ?_) hlist)
+  have h12 := List.append_inj he (by simp [goldilocksBytes])
+  have h01 := List.append_inj h12.1 (by simp [goldilocksBytes])
+  cases e₁; cases e₂
+  dsimp only at h12 h01
+  rw [goldilocksBytes_injective h01.1, goldilocksBytes_injective h01.2,
+    goldilocksBytes_injective h12.2]
+
 end DomainSep
 
 /-! ## Opt-in domain-separated hashers and challenger -/
@@ -361,6 +392,12 @@ def extHasherSep (sep : DomainSep := .standard) : MerkleHasher GoldilocksExt Dig
   hashRows row := Blake3.hash (sep.leafBytes (Hashers.extRowBytes row))
   compress left right := Blake3.hash (sep.nodeBytes left right)
 
+/-- Opt-in domain-separated Merkle hasher over `GoldilocksExt3` using BLAKE3 with
+explicit distinct leaf and internal-node tags. -/
+def ext3HasherSep (sep : DomainSep := .standard) : MerkleHasher GoldilocksExt3 Digest where
+  hashRows row := Blake3.hash (sep.leafBytes (Hashers.ext3RowBytes row))
+  compress left right := Blake3.hash (sep.nodeBytes left right)
+
 /-- Opt-in domain-separated BLAKE3 byte hash for the Fiat–Shamir challenger. -/
 def blake3Transcript (sep : DomainSep := .standard) (input : ByteArray) : ByteArray :=
   blake3 (sep.transcriptBytes input)
@@ -370,5 +407,11 @@ prefixing every transcript hash with `sep.transcriptTag`. -/
 def challengerSep (sep : DomainSep := .standard) :
     Challenger ChallengerState Goldilocks GoldilocksExt Digest :=
   challengerWith (blake3Transcript sep)
+
+/-- Opt-in domain-separated BLAKE3 challenger over `Goldilocks` / `GoldilocksExt3`,
+prefixing every transcript hash with `sep.transcriptTag`. -/
+def challenger3Sep (sep : DomainSep := .standard) :
+    Challenger ChallengerState Goldilocks GoldilocksExt3 Digest :=
+  challenger3With (blake3Transcript sep)
 
 end CertiFri.P3

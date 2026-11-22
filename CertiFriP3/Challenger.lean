@@ -1,5 +1,6 @@
 import CertiFri.Challenger
 import CertiFriP3.GoldilocksExt
+import CertiFriP3.GoldilocksExt3
 import CertiFriP3.Blake3
 
 /-!
@@ -143,6 +144,14 @@ def sampleExt (hash : ByteArray → ByteArray) (s : ChallengerState) :
   let second := sampleBase hash first.2
   (⟨first.1, second.1⟩, second.2)
 
+/-- Sample a cubic-extension element: three base elements, `c0`, `c1`, `c2`. -/
+def sampleExt3 (hash : ByteArray → ByteArray) (s : ChallengerState) :
+    GoldilocksExt3 × ChallengerState :=
+  let first := sampleBase hash s
+  let second := sampleBase hash first.2
+  let third := sampleBase hash second.2
+  (⟨first.1, second.1, third.1⟩, third.2)
+
 /-- Sample an integer below `2 ^ bits`: Plonky3's `sample_bits`, the low bits
 of one sampled word. From 64 bits on, the whole word. -/
 def sampleBits (hash : ByteArray → ByteArray) (s : ChallengerState) (bits : Nat) :
@@ -156,6 +165,13 @@ def sampleBits (hash : ByteArray → ByteArray) (s : ChallengerState) (bits : Na
 def observe (s : ChallengerState) : Observation Goldilocks GoldilocksExt Digest → ChallengerState
   | .base a => s.observeBytes (a.pushBytes ByteArray.empty)
   | .ext e => s.observeBytes (e.c1.pushBytes (e.c0.pushBytes ByteArray.empty))
+  | .digest d => s.observeBytes d.toBytes
+
+/-- Observe one value for the cubic extension: a base element as 8 bytes, a
+cubic-extension element as 24 bytes (`c0`, `c1`, `c2`), a digest as 32 bytes. -/
+def observe3 (s : ChallengerState) : Observation Goldilocks GoldilocksExt3 Digest → ChallengerState
+  | .base a => s.observeBytes (a.pushBytes ByteArray.empty)
+  | .ext e => s.observeBytes (e.pushBytes ByteArray.empty)
   | .digest d => s.observeBytes d.toBytes
 
 end ChallengerState
@@ -172,5 +188,17 @@ def challengerWith (hash : ByteArray → ByteArray) :
 `SerializingChallenger64<Goldilocks, HashChallenger<u8, Blake3, 32>>`. -/
 def challenger : Challenger ChallengerState Goldilocks GoldilocksExt Digest :=
   challengerWith blake3
+
+/-- Plonky3's `SerializingChallenger64<Goldilocks, HashChallenger<u8, H, 32>>`
+instantiated for the cubic trinomial extension `GoldilocksExt3`. -/
+def challenger3With (hash : ByteArray → ByteArray) :
+    Challenger ChallengerState Goldilocks GoldilocksExt3 Digest where
+  observe := ChallengerState.observe3
+  sampleExt := ChallengerState.sampleExt3 hash
+  sampleBits := ChallengerState.sampleBits hash
+
+/-- The BLAKE3 challenger for `Goldilocks` / `GoldilocksExt3`. -/
+def challenger3 : Challenger ChallengerState Goldilocks GoldilocksExt3 Digest :=
+  challenger3With blake3
 
 end CertiFri.P3

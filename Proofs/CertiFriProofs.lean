@@ -87,3 +87,5 @@ import CertiFriProofs.P3.GoldilocksModel
 import CertiFriProofs.P3.BabyBearModel
 import CertiFriProofs.P3.Bn254Model
 import CertiFriProofs.P3.GoldilocksSoundness
+import CertiFriProofs.P3.Goldilocks
+import CertiFriProofs.P3.GoldilocksExt3

@@ -60,7 +60,7 @@ structure Block where
   m13 : UInt32
   m14 : UInt32
   m15 : UInt32
-  deriving Inhabited
+  deriving Inhabited, DecidableEq
 
 /-- The 16 words of state of the compression function, `v0` to `v15`. -/
 structure State where
@@ -80,6 +80,7 @@ structure State where
   v13 : UInt32
   v14 : UInt32
   v15 : UInt32
+  deriving DecidableEq
 
 /-- The initialization vector, which is the key of the plain mode. -/
 def iv : Digest :=
@@ -96,6 +97,15 @@ def flagParent : UInt32 := 4
 
 /-- Flag of the last compression of all. -/
 def flagRoot : UInt32 := 8
+
+/-- Flag of the keyed hash mode (`1 << 4`). -/
+def flagKeyedHash : UInt32 := 16
+
+/-- Flag for hashing a `derive_key` context string into a 32-byte context key (`1 << 5`). -/
+def flagDeriveKeyContext : UInt32 := 32
+
+/-- Flag for hashing key material under a `derive_key` context key (`1 << 6`). -/
+def flagDeriveKeyMaterial : UInt32 := 64
 
 /-- The quarter round: mixes two message words into four words of state. The
 rotations are to the right by 16, 12, 8 and 7 bits. -/
@@ -252,10 +262,176 @@ compression, which is both the only block of the only chunk and the root. -/
 def hashPair (a b : Digest) : Digest :=
   compress iv (pairBlock a b) 0 64 (flagChunkStart ||| flagChunkEnd ||| flagRoot)
 
+/-! ## Keyed / `derive_key` mode and 48-byte (384-bit) XOF output
+
+Native BLAKE3 `derive_key` replaces `iv` with the 8-word context key derived
+under `flagDeriveKeyContext` and ORs `flagDeriveKeyMaterial` into every block
+and parent compression. A 64-byte Merkle internal node (`left || right`) stays
+a single 1-block compression (`deriveKeyPair`).
+
+A 48-byte XOF digest (`Digest48`) reads words `0..11` of the single 16-word
+root compression output block (zero extra root compressions), and compressing
+two 48-byte digests (`96` bytes) takes two 64-byte blocks (`deriveKeyPairXof48`). -/
+
+/-- The root compression function producing 48 bytes (words `0..11` of the
+16-word BLAKE3 output block, `counter = 0`). Words `0..7` coincide with
+`compress`, and words `8..11` are `s.v8 ^^^ cv.w0` through `s.v11 ^^^ cv.w3`. -/
+def compressXof48 (cv : Digest) (m : Block) (counter : UInt64) (blockLen flags : UInt32) :
+    Digest48 :=
+  let s := rounds 7
+    ⟨cv.w0, cv.w1, cv.w2, cv.w3, cv.w4, cv.w5, cv.w6, cv.w7, iv.w0, iv.w1, iv.w2, iv.w3,
+      counter.toUInt32, (counter >>> 32).toUInt32, blockLen, flags⟩ m
+  ⟨s.v0 ^^^ s.v8, s.v1 ^^^ s.v9, s.v2 ^^^ s.v10, s.v3 ^^^ s.v11,
+   s.v4 ^^^ s.v12, s.v5 ^^^ s.v13, s.v6 ^^^ s.v14, s.v7 ^^^ s.v15,
+   s.v8 ^^^ cv.w0, s.v9 ^^^ cv.w1, s.v10 ^^^ cv.w2, s.v11 ^^^ cv.w3⟩
+
+/-- The 48-byte XOF digest of a root node (`counter = 0` root output block). -/
+def Node.rootDigest48 (n : Node) : Digest48 :=
+  compressXof48 n.cv n.block n.counter n.blockLen (n.flags ||| flagRoot)
+
+/-- The parent of two chaining values under explicit key and domain flags. -/
+def parentNodeWith (key : Digest) (flags : UInt32) (left right : Digest) : Node :=
+  { cv := key, block := pairBlock left right, counter := 0, blockLen := 64,
+    flags := flagParent ||| flags }
+
+/-- Compress `count` non-final blocks of a chunk under explicit domain `flags`. -/
+def chainBlocksWith (flags : UInt32) (block : Nat → Block) (first : Nat) (counter : UInt64) :
+    (count j : Nat) → Digest → Digest
+  | 0, _, cv => cv
+  | count + 1, j, cv =>
+    chainBlocksWith flags block first counter count (j + 1)
+      (compress cv (block (first + j)) counter 64
+        (flags ||| if j = 0 then flagChunkStart else 0))
+
+/-- Chunk `chunk` of a message under explicit `key` and domain `flags`. -/
+def chunkNodeWith (key : Digest) (flags : UInt32) (len : Nat) (block : Nat → Block)
+    (chunk : Nat) : Node :=
+  let chunkLen := min 1024 (len - 1024 * chunk)
+  let blocks := max 1 ((chunkLen + 63) / 64)
+  let counter := chunk.toUInt64
+  { cv := chainBlocksWith flags block (16 * chunk) counter (blocks - 1) 0 key
+    block := block (16 * chunk + (blocks - 1))
+    counter := counter
+    blockLen := (chunkLen - 64 * (blocks - 1)).toUInt32
+    flags := flags ||| if blocks = 1 then flagChunkStart ||| flagChunkEnd else flagChunkEnd }
+
+/-- Push a non-final chunk chaining value onto the Merkle stack under `key` and `flags`. -/
+def pushChunkWith (key : Digest) (flags : UInt32) :
+    (stack : List Digest) → (cv : Digest) → (total : Nat) → List Digest
+  | [], cv, _ => [cv]
+  | top :: stack, cv, total =>
+    if total % 2 = 0 then
+      pushChunkWith key flags stack (parentNodeWith key flags top cv).chainingValue (total / 2)
+    else cv :: top :: stack
+
+/-- Push `count` non-final chunks onto the stack under `key` and `flags`. -/
+def pushChunksWith (key : Digest) (flags : UInt32) (len : Nat) (block : Nat → Block) :
+    (count chunk : Nat) → (stack : List Digest) → List Digest
+  | 0, _, stack => stack
+  | count + 1, chunk, stack =>
+    pushChunksWith key flags len block count (chunk + 1)
+      (pushChunkWith key flags stack (chunkNodeWith key flags len block chunk).chainingValue
+        (chunk + 1))
+
+/-- Merge the last node with the stack under `key` and `flags`, returning the root `Node`. -/
+def finishNodeWith (key : Digest) (flags : UInt32) : (stack : List Digest) → Node → Node
+  | [], node => node
+  | top :: stack, node => finishNodeWith key flags stack
+      (parentNodeWith key flags top node.chainingValue)
+
+/-- Root compression node for a message of `len` bytes under `key` and domain `flags`. -/
+def rootNodeWith (key : Digest) (flags : UInt32) (len : Nat) (block : Nat → Block) : Node :=
+  let chunks := max 1 ((len + 1023) / 1024)
+  finishNodeWith key flags (pushChunksWith key flags len block (chunks - 1) 0 [])
+    (chunkNodeWith key flags len block (chunks - 1))
+
+/-- 32-byte BLAKE3 digest of a message under explicit `key` and domain `flags`. -/
+def hashBlocksWith (key : Digest) (flags : UInt32) (len : Nat) (block : Nat → Block) : Digest :=
+  (rootNodeWith key flags len block).rootDigest
+
+/-- 48-byte BLAKE3 XOF digest of a message under explicit `key` and domain `flags`. -/
+def hashBlocksWithXof48 (key : Digest) (flags : UInt32) (len : Nat) (block : Nat → Block) :
+    Digest48 :=
+  (rootNodeWith key flags len block).rootDigest48
+
+/-- Precompute the 8-word BLAKE3 `derive_key` context key for a UTF-8 context string
+using `iv` and `flagDeriveKeyContext` (`1 << 5`). Matches `blake3::derive_key` and
+`multi-stark`'s `derive_context_key` for every context string. -/
+def deriveContextKey (ctx : String) : Digest :=
+  let bs := ctx.toUTF8
+  hashBlocksWith iv flagDeriveKeyContext bs.size (bytesBlock bs)
+
+/-- 32-byte BLAKE3 `derive_key` hash from a precomputed `contextKey` and block reader. -/
+def deriveKeyBlocks (contextKey : Digest) (len : Nat) (block : Nat → Block) : Digest :=
+  hashBlocksWith contextKey flagDeriveKeyMaterial len block
+
+/-- 32-byte BLAKE3 `derive_key` hash of a byte array under a precomputed `contextKey`. -/
+def deriveKeyWithKey (contextKey : Digest) (bytes : ByteArray) : Digest :=
+  deriveKeyBlocks contextKey bytes.size (bytesBlock bytes)
+
+/-- 32-byte BLAKE3 `derive_key` hash of `bytes` under context string `ctx`. -/
+def deriveKey (ctx : String) (bytes : ByteArray) : Digest :=
+  deriveKeyWithKey (deriveContextKey ctx) bytes
+
+/-- 32-byte BLAKE3 `derive_key` 2-to-1 compression of two 32-byte digests:
+**one** 64-byte compression block using the precomputed `contextKey` and
+`flagChunkStart ||| flagChunkEnd ||| flagRoot ||| flagDeriveKeyMaterial`. -/
+def deriveKeyPair (contextKey : Digest) (a b : Digest) : Digest :=
+  compress contextKey (pairBlock a b) 0 64
+    (flagChunkStart ||| flagChunkEnd ||| flagRoot ||| flagDeriveKeyMaterial)
+
+/-- 48-byte BLAKE3 XOF hash in plain mode (`iv`, `flags = 0`). -/
+def hashXof48 (bytes : ByteArray) : Digest48 :=
+  hashBlocksWithXof48 iv 0 bytes.size (bytesBlock bytes)
+
+/-- 48-byte BLAKE3 `derive_key` XOF hash from a precomputed `contextKey` and block reader. -/
+def deriveKeyBlocksXof48 (contextKey : Digest) (len : Nat) (block : Nat → Block) : Digest48 :=
+  hashBlocksWithXof48 contextKey flagDeriveKeyMaterial len block
+
+/-- 48-byte BLAKE3 `derive_key` XOF hash of `bytes` under a precomputed `contextKey`. -/
+def deriveKeyWithKeyXof48 (contextKey : Digest) (bytes : ByteArray) : Digest48 :=
+  deriveKeyBlocksXof48 contextKey bytes.size (bytesBlock bytes)
+
+/-- 48-byte BLAKE3 `derive_key` XOF hash of `bytes` under context string `ctx`. -/
+def deriveKeyXof48 (ctx : String) (bytes : ByteArray) : Digest48 :=
+  deriveKeyWithKeyXof48 (deriveContextKey ctx) bytes
+
+/-- First 64-byte block of two 48-byte digests (`a` = 12 words, `b.w0..b.w3` = 4 words). -/
+def pair48Block0 (a b : Digest48) : Block :=
+  ⟨a.w0, a.w1, a.w2, a.w3, a.w4, a.w5, a.w6, a.w7, a.w8, a.w9, a.w10, a.w11,
+   b.w0, b.w1, b.w2, b.w3⟩
+
+/-- Second 64-byte block of two 48-byte digests (`b.w4..b.w11` = 8 words = 32 bytes, zero-padded). -/
+def pair48Block1 (b : Digest48) : Block :=
+  ⟨b.w4, b.w5, b.w6, b.w7, b.w8, b.w9, b.w10, b.w11, 0, 0, 0, 0, 0, 0, 0, 0⟩
+
+/-- 48-byte BLAKE3 `derive_key` XOF 2-to-1 compression of two 48-byte digests
+(`96` bytes = 2 compression blocks, 1 root output block). -/
+def deriveKeyPairXof48 (contextKey : Digest) (a b : Digest48) : Digest48 :=
+  let cv1 := compress contextKey (pair48Block0 a b) 0 64
+    (flagChunkStart ||| flagDeriveKeyMaterial)
+  compressXof48 cv1 (pair48Block1 b) 0 32
+    (flagChunkEnd ||| flagRoot ||| flagDeriveKeyMaterial)
+
+/-- The first 32 bytes of `compressXof48` coincide with `compress`. -/
+theorem compressXof48_prefix32 (cv : Digest) (m : Block) (counter : UInt64)
+    (blockLen flags : UInt32) :
+    (compressXof48 cv m counter blockLen flags).prefix32 =
+      compress cv m counter blockLen flags :=
+  rfl
+
 end Blake3
 
 /-- BLAKE3 in its plain mode: the 32-byte digest of a message of any length. -/
 def blake3 (bytes : ByteArray) : ByteArray :=
   (Blake3.hash bytes).toBytes
+
+/-- BLAKE3 in its native `derive_key` mode: the 32-byte digest under context `ctx`. -/
+def blake3DeriveKey (ctx : String) (bytes : ByteArray) : ByteArray :=
+  (Blake3.deriveKey ctx bytes).toBytes
+
+/-- BLAKE3 in its native `derive_key` mode with 48-byte (384-bit) XOF output. -/
+def blake3DeriveKeyXof48 (ctx : String) (bytes : ByteArray) : ByteArray :=
+  (Blake3.deriveKeyXof48 ctx bytes).toBytes
 
 end CertiFri.P3

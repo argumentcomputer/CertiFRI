@@ -11,6 +11,7 @@ import CertiFri.Schedule
 import CertiFri.Shape
 import CertiFri.Verifier
 import CertiFri.Pcs
+import CertiFri.TensorBatching
 
 /-!
 # CertiFri

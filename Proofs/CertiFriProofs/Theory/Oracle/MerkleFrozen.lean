@@ -520,4 +520,554 @@ theorem opens_concat_iff_of_not_hit {e : Sigma (MerkleAnswer Msg Chal T D)}
 
 end Stable
 
+/-! ## Incremental sponge chaining (`entryCap = 1`, collision prefactor `c = 3 / 2`)
+
+In full-transcript Fiat–Shamir (`FSQuery`), each challenge query repeats every
+prior round's Merkle roots, giving `entryCap = M ≈ batches + rounds` and a
+collision prefactor `c = (max M 3 + 3) / 4` (e.g., `7.75` for `M = 28`, limiting
+32-byte digests to `126.52` bits).
+
+In an incremental sponge (`SpongeQuery`), each challenge step `i` takes only
+the previous chaining digest `prev : D` and step `i`'s message `m` (bringing at
+most `M ≤ 3` digests into play — specifically **`M = 1`** when each Merkle root
+is absorbed individually), and outputs `(nextState, chal_i) : D × Chal i`.
+
+We track two disjoint bad events simultaneously:
+* `SpongeHit` (on `.chal` queries only): `nextState` collides with the initial
+  state `s₀` or any previously seen sponge state (`prev` or `nextState`),
+  increasing the sponge-state count by `2` per challenge query (`0` per hash).
+* `SpongeMerkleHit` (on `.other` hash queries only): the hash output hits any
+  Merkle digest already in play (`M ≤ 3` per challenge query, `3` per hash).
+
+A joint Bellman potential `jointHitPotential M pM pS q` proves that for ANY
+`M ≤ 3` (including `M = 1`, `entryCap = 1`) and any `Q`-query computation from
+the empty log,
+  `prob (HasBad (JointHit s₀ stepDigestsOf r)) c [] ≤ 3 * Q ^ 2 / (2 * |D|)`.
+This shrinks the BCS collision prefactor from `7.75` to the optimal `3 / 2`
+(`126.52b → 127.71b` on 32-byte BLAKE3 with zero prover cost, and `191.71b`
+classical / `128.0b` BHT quantum on 48-byte BLAKE3 XOF). -/
+
+/-- Queries to an incremental sponge + auxiliary random oracle:
+`.chal i prev m` absorbs step `i`'s message `m` into sponge chaining state `prev`
+and returns `(nextState, chal_i)`; `.other q` queries the auxiliary oracle. -/
+inductive SpongeQuery (Msg : Type u) (D : Type) (X' : Type w) : Type max u w
+  | chal (i : ℕ) (prev : D) (m : Msg)
+  | other (q : X')
+  deriving DecidableEq
+
+/-- Answer type of an incremental sponge + auxiliary random oracle. -/
+def SpongeAnswer (Chal : ℕ → Type) (D : Type) {X' : Type w} (Y' : X' → Type) :
+    SpongeQuery Msg D X' → Type
+  | .chal i _ _ => D × Chal i
+  | .other q => Y' q
+
+instance {X' : Type w} {Y' : X' → Type} [Fintype D] [∀ i, Fintype (Chal i)] [∀ q, Fintype (Y' q)] :
+    ∀ x : SpongeQuery Msg D X', Fintype (SpongeAnswer Chal D Y' x)
+  | .chal _ _ _ => inferInstanceAs (Fintype (D × Chal _))
+  | .other q => inferInstanceAs (Fintype (Y' q))
+
+instance {X' : Type w} {Y' : X' → Type} [Nonempty D] [∀ i, Nonempty (Chal i)]
+    [∀ q, Nonempty (Y' q)] :
+    ∀ x : SpongeQuery Msg D X', Nonempty (SpongeAnswer Chal D Y' x)
+  | .chal _ _ _ => inferInstanceAs (Nonempty (D × Chal _))
+  | .other q => inferInstanceAs (Nonempty (Y' q))
+
+/-- Incremental sponge + Merkle hash random oracle answers. -/
+abbrev SpongeMerkleAnswer (Msg : Type u) (Chal : ℕ → Type) (T D : Type) :
+    SpongeQuery Msg D (HashQuery T D) → Type :=
+  SpongeAnswer (Msg := Msg) Chal D (fun _ : HashQuery T D => D)
+
+/-- Sponge chaining states (`prev` and `nextState`) introduced by a log entry. -/
+def spongeStates {X' : Type w} {Y' : X' → Type} :
+    (x : SpongeQuery Msg D X') → SpongeAnswer Chal D Y' x → List D
+  | .chal _ prev _, (next, _) => [prev, next]
+  | .other _, _ => []
+
+/-- A sponge state `s` is present in `l` if `s = s₀` or `s` appears as the
+input or output chaining state of some `.chal` entry in `l`. -/
+def SpongePresent {X' : Type w} {Y' : X' → Type} (s₀ : D)
+    (l : Log (SpongeAnswer (Msg := Msg) Chal D Y')) (s : D) : Prop :=
+  s = s₀ ∨ ∃ e ∈ l, s ∈ spongeStates e.1 e.2
+
+/-- Sponge collision / cycle / init-hit bad event: a `.chal` query's output
+state `next` hits an already-present sponge state. -/
+def SpongeHit {X' : Type w} {Y' : X' → Type} (s₀ : D)
+    (l : Log (SpongeAnswer (Msg := Msg) Chal D Y')) :
+    (x : SpongeQuery Msg D X') → SpongeAnswer Chal D Y' x → Prop
+  | .chal _ _ _, (next, _) => SpongePresent s₀ l next
+  | .other _, _ => False
+
+/-- Merkle digests brought into play by a hash entry of a sponge log. -/
+def spongeHashDigests :
+    (x : SpongeQuery Msg D (HashQuery T D)) → SpongeMerkleAnswer Msg Chal T D x → List D
+  | .chal _ _ _, _ => []
+  | .other (.rows _), y => [y]
+  | .other (.node a b), y => [a, b, y]
+
+/-- Merkle digests brought into play by a single incremental sponge step `i < r`. -/
+def spongeChalDigests (stepDigestsOf : ℕ → Msg → List D) (r : ℕ) :
+    SpongeQuery Msg D (HashQuery T D) → List D
+  | .chal i _ m => if i < r then stepDigestsOf i m else []
+  | .other _ => []
+
+/-- Merkle digests brought into play by an entry of a sponge-Merkle log. -/
+def spongeEntryDigests (stepDigestsOf : ℕ → Msg → List D) (r : ℕ)
+    (e : Sigma (SpongeMerkleAnswer Msg Chal T D)) : List D :=
+  spongeChalDigests stepDigestsOf r e.1 ++ spongeHashDigests e.1 e.2
+
+/-- A Merkle digest `d` is present in a sponge-Merkle log `l`. -/
+def SpongeMerklePresent (stepDigestsOf : ℕ → Msg → List D) (r : ℕ)
+    (l : Log (SpongeMerkleAnswer Msg Chal T D)) (d : D) : Prop :=
+  ∃ e ∈ l, d ∈ spongeEntryDigests stepDigestsOf r e
+
+/-- Merkle hit in a sponge-Merkle log (only on `.other` hash queries). -/
+def SpongeMerkleHit (stepDigestsOf : ℕ → Msg → List D) (r : ℕ)
+    (l : Log (SpongeMerkleAnswer Msg Chal T D)) :
+    (x : SpongeQuery Msg D (HashQuery T D)) → SpongeMerkleAnswer Msg Chal T D x → Prop
+  | .chal _ _ _, _ => False
+  | .other _, y => SpongeMerklePresent stepDigestsOf r l y
+
+/-- Joint bad event for incremental sponge chaining + frozen Merkle trees:
+`SpongeHit` on `.chal` queries and `SpongeMerkleHit` on `.other` hash queries. -/
+def JointHit (s₀ : D) (stepDigestsOf : ℕ → Msg → List D) (r : ℕ)
+    (l : Log (SpongeMerkleAnswer Msg Chal T D)) :
+    (x : SpongeQuery Msg D (HashQuery T D)) → SpongeMerkleAnswer Msg Chal T D x → Prop
+  | .chal _ _ _, (next, _) => SpongePresent s₀ l next
+  | .other _, y => SpongeMerklePresent stepDigestsOf r l y
+
+theorem SpongePresent.mono {X' : Type w} {Y' : X' → Type} {s₀ : D}
+    {l l' : Log (SpongeAnswer (Msg := Msg) Chal D Y')} {s : D}
+    (h : SpongePresent s₀ l s) (hl : l ⊆ l') : SpongePresent s₀ l' s :=
+  h.imp id fun ⟨e, he, hs⟩ => ⟨e, hl he, hs⟩
+
+theorem SpongeMerklePresent.mono {stepDigestsOf : ℕ → Msg → List D} {r : ℕ}
+    {l l' : Log (SpongeMerkleAnswer Msg Chal T D)} {d : D}
+    (h : SpongeMerklePresent stepDigestsOf r l d) (hl : l ⊆ l') :
+    SpongeMerklePresent stepDigestsOf r l' d := by
+  obtain ⟨e, he, hd⟩ := h
+  exact ⟨e, hl he, hd⟩
+
+theorem jointHit_of_spongeHit {s₀ : D} {stepDigestsOf : ℕ → Msg → List D} {r : ℕ}
+    {l : Log (SpongeMerkleAnswer Msg Chal T D)}
+    {x : SpongeQuery Msg D (HashQuery T D)} {y : SpongeMerkleAnswer Msg Chal T D x}
+    (h : SpongeHit s₀ l x y) : JointHit s₀ stepDigestsOf r l x y := by
+  cases x with
+  | chal i prev m => exact h
+  | other q => exact False.elim h
+
+theorem jointHit_of_spongeMerkleHit {s₀ : D} {stepDigestsOf : ℕ → Msg → List D} {r : ℕ}
+    {l : Log (SpongeMerkleAnswer Msg Chal T D)}
+    {x : SpongeQuery Msg D (HashQuery T D)} {y : SpongeMerkleAnswer Msg Chal T D x}
+    (h : SpongeMerkleHit stepDigestsOf r l x y) : JointHit s₀ stepDigestsOf r l x y := by
+  cases x with
+  | chal i prev m => exact False.elim h
+  | other q => exact h
+
+namespace MerkleRO
+
+/-- Per-entry Merkle digest cap under incremental sponge chaining: `M` for a
+challenge step (specifically `M = 1` for single-root absorption) and `3` for a
+Merkle hash query. -/
+def spongeMerkleEntryCap (M : ℕ) (x : SpongeQuery Msg D (HashQuery T D)) : ℕ :=
+  match x with
+  | .chal _ _ _ => M
+  | .other _ => 3
+
+/-- Upper bound on the number of Merkle digests present in a sponge-Merkle log. -/
+def spongeMerkleCap (M : ℕ) (l : Log (SpongeMerkleAnswer Msg Chal T D)) : ℕ :=
+  (l.map fun e => spongeMerkleEntryCap M e.1).sum
+
+/-- Per-entry sponge state cap: `2` (`prev` and `next`) for a challenge step,
+`0` for a Merkle hash query. -/
+def spongeStateEntryCap (x : SpongeQuery Msg D (HashQuery T D)) : ℕ :=
+  match x with
+  | .chal _ _ _ => 2
+  | .other _ => 0
+
+/-- Upper bound on the number of sponge states present in a sponge-Merkle log
+(`1` for the initial state `s₀`, plus `2` per challenge entry). -/
+def spongeStateCap (l : Log (SpongeMerkleAnswer Msg Chal T D)) : ℕ :=
+  1 + (l.map fun e => spongeStateEntryCap e.1).sum
+
+@[simp] theorem spongeMerkleCap_nil (M : ℕ) :
+    spongeMerkleCap (Msg := Msg) (Chal := Chal) (T := T) (D := D) M [] = 0 := rfl
+
+@[simp] theorem spongeStateCap_nil :
+    spongeStateCap (Msg := Msg) (Chal := Chal) (T := T) (D := D) [] = 1 := rfl
+
+theorem spongeMerkleCap_append_singleton (M : ℕ) (l : Log (SpongeMerkleAnswer Msg Chal T D))
+    (e : Sigma (SpongeMerkleAnswer Msg Chal T D)) :
+    spongeMerkleCap M (l ++ [e]) = spongeMerkleCap M l + spongeMerkleEntryCap M e.1 := by
+  simp [spongeMerkleCap]
+
+theorem spongeStateCap_append_singleton (l : Log (SpongeMerkleAnswer Msg Chal T D))
+    (e : Sigma (SpongeMerkleAnswer Msg Chal T D)) :
+    spongeStateCap (l ++ [e]) = spongeStateCap l + spongeStateEntryCap e.1 := by
+  simp [spongeStateCap, Nat.add_assoc]
+
+/-- Joint Bellman potential (multiplied by `|D|`) for `JointHit`:
+starting with at most `pM` Merkle digests and `pS` sponge states in play and
+at most `q` queries remaining, where each `.chal` query hits with probability
+`≤ pS / |D|` and adds `(M, 2)` while each `.other` hash query hits with
+probability `≤ pM / |D|` and adds `(3, 0)`. -/
+noncomputable def jointHitPotential (M pM pS q : ℕ) : ℝ :=
+  (Finset.range (q + 1)).sup' Finset.nonempty_range_add_one fun h =>
+    (h : ℝ) * ((pM : ℝ) + M * (q - h : ℕ)) + (3 : ℝ) * h * (h - 1 : ℕ) / 2
+      + ((q - h : ℕ) : ℝ) * (pS : ℝ) + ((q - h : ℕ) : ℝ) * ((q - h - 1 : ℕ) : ℝ)
+
+theorem jointHitPotential_nonneg (M pM pS q : ℕ) : 0 ≤ jointHitPotential M pM pS q := by
+  unfold jointHitPotential
+  have h0 : (0 : ℕ) ∈ Finset.range (q + 1) := Finset.mem_range.mpr (Nat.succ_pos q)
+  have hle := Finset.le_sup' (f := fun h : ℕ =>
+    (h : ℝ) * ((pM : ℝ) + M * (q - h : ℕ)) + (3 : ℝ) * h * (h - 1 : ℕ) / 2
+      + ((q - h : ℕ) : ℝ) * (pS : ℝ) + ((q - h : ℕ) : ℝ) * ((q - h - 1 : ℕ) : ℝ)) h0
+  refine le_trans ?_ hle
+  positivity
+
+theorem jointHitPotential_mono_q (M pM pS q : ℕ) :
+    jointHitPotential M pM pS q ≤ jointHitPotential M pM pS (q + 1) := by
+  unfold jointHitPotential
+  refine Finset.sup'_le _ _ fun h hh => ?_
+  have hlt : h < q + 1 := Finset.mem_range.mp hh
+  have hmem : h ∈ Finset.range (q + 2) := Finset.mem_range.mpr (by omega)
+  refine le_trans ?_ (Finset.le_sup' (f := fun h : ℕ =>
+    (h : ℝ) * ((pM : ℝ) + M * (q + 1 - h : ℕ)) + (3 : ℝ) * h * (h - 1 : ℕ) / 2
+      + ((q + 1 - h : ℕ) : ℝ) * (pS : ℝ) + ((q + 1 - h : ℕ) : ℝ) * ((q + 1 - h - 1 : ℕ) : ℝ)) hmem)
+  have hsub1 : ((q - h : ℕ) : ℝ) ≤ ((q + 1 - h : ℕ) : ℝ) := by
+    exact_mod_cast (by omega : q - h ≤ q + 1 - h)
+  have hsub2 : ((q - h - 1 : ℕ) : ℝ) ≤ ((q + 1 - h - 1 : ℕ) : ℝ) := by
+    exact_mod_cast (by omega : q - h - 1 ≤ q + 1 - h - 1)
+  gcongr
+
+theorem jointHitPotential_chal_step (M pM pS q : ℕ) :
+    (pS : ℝ) + jointHitPotential M (pM + M) (pS + 2) q ≤ jointHitPotential M pM pS (q + 1) := by
+  unfold jointHitPotential
+  rw [add_comm, Finset.sup'_add]
+  refine Finset.sup'_le _ _ fun h hh => ?_
+  have hlt : h < q + 1 := Finset.mem_range.mp hh
+  have hmem : h ∈ Finset.range (q + 2) := Finset.mem_range.mpr (by omega)
+  refine le_trans ?_ (Finset.le_sup' (f := fun h' : ℕ =>
+    (h' : ℝ) * ((pM : ℝ) + M * (q + 1 - h' : ℕ)) + (3 : ℝ) * h' * (h' - 1 : ℕ) / 2
+      + ((q + 1 - h' : ℕ) : ℝ) * (pS : ℝ) + ((q + 1 - h' : ℕ) : ℝ) * ((q + 1 - h' - 1 : ℕ) : ℝ)) hmem)
+  have hsub1 : ((q + 1 - h : ℕ) : ℝ) = ((q - h : ℕ) : ℝ) + 1 := by
+    exact_mod_cast (by omega : q + 1 - h = q - h + 1)
+  have hsub2 : q + 1 - h - 1 = q - h := by omega
+  have hc : (2 : ℝ) * ((q - h : ℕ) : ℝ) + ((q - h : ℕ) : ℝ) * ((q - h - 1 : ℕ) : ℝ) =
+      (((q - h : ℕ) : ℝ) + 1) * ((q - h : ℕ) : ℝ) := by
+    generalize q - h = c
+    cases c with
+    | zero => simp
+    | succ k =>
+      simp only [Nat.add_sub_cancel]
+      push_cast
+      ring
+  rw [hsub1, hsub2]
+  push_cast
+  linarith
+
+theorem jointHitPotential_hash_step (M pM pS q : ℕ) :
+    (pM : ℝ) + jointHitPotential M (pM + 3) pS q ≤ jointHitPotential M pM pS (q + 1) := by
+  unfold jointHitPotential
+  rw [add_comm, Finset.sup'_add]
+  refine Finset.sup'_le _ _ fun h hh => ?_
+  have hlt : h < q + 1 := Finset.mem_range.mp hh
+  have hmem : h + 1 ∈ Finset.range (q + 2) := Finset.mem_range.mpr (by omega)
+  refine le_trans ?_ (Finset.le_sup' (f := fun h' : ℕ =>
+    (h' : ℝ) * ((pM : ℝ) + M * (q + 1 - h' : ℕ)) + (3 : ℝ) * h' * (h' - 1 : ℕ) / 2
+      + ((q + 1 - h' : ℕ) : ℝ) * (pS : ℝ) + ((q + 1 - h' : ℕ) : ℝ) * ((q + 1 - h' - 1 : ℕ) : ℝ)) hmem)
+  have hsub1 : q + 1 - (h + 1) = q - h := by omega
+  have hsub2 : h + 1 - 1 = h := by omega
+  rw [hsub1, hsub2]
+  have h3 : (3 : ℝ) * (h : ℝ) + 3 * (h : ℝ) * ((h - 1 : ℕ) : ℝ) / 2 =
+      3 * ((h + 1 : ℕ) : ℝ) * (h : ℝ) / 2 := by
+    cases h with
+    | zero => simp
+    | succ k =>
+      simp only [Nat.add_sub_cancel]
+      push_cast
+      ring
+  have hM : (0 : ℝ) ≤ (M : ℝ) * ((q - h : ℕ) : ℝ) := by positivity
+  push_cast at h3 ⊢
+  nlinarith
+
+/-- **Optimal closed-form bound (`c = 3 / 2`) for incremental sponge chaining.**
+Whenever each sponge step brings at most `M ≤ 3` Merkle digests into play
+(in particular `M = 1`, `entryCap = 1`),
+`jointHitPotential M 0 1 Q ≤ 3 * Q ^ 2 / 2`. -/
+theorem jointHitPotential_zero_one_le {M : ℕ} (hM : M ≤ 3) (Q : ℕ) :
+    jointHitPotential M 0 1 Q ≤ 3 * (Q : ℝ) ^ 2 / 2 := by
+  unfold jointHitPotential
+  refine Finset.sup'_le _ _ fun h hh => ?_
+  have hle : h ≤ Q := Nat.lt_succ_iff.mp (Finset.mem_range.mp hh)
+  have hMr : (M : ℝ) ≤ 3 := by exact_mod_cast hM
+  have hsub : ((Q - h : ℕ) : ℝ) = (Q : ℝ) - (h : ℝ) := Nat.cast_sub hle
+  have hh1 : ((h - 1 : ℕ) : ℝ) ≤ (h : ℝ) := by exact_mod_cast Nat.sub_le h 1
+  have hc_eq : ((Q - h : ℕ) : ℝ) * 1 + ((Q - h : ℕ) : ℝ) * ((Q - h - 1 : ℕ) : ℝ) =
+      ((Q - h : ℕ) : ℝ) ^ 2 := by
+    generalize Q - h = c
+    cases c with
+    | zero => simp
+    | succ k =>
+      simp only [Nat.add_sub_cancel]
+      push_cast
+      ring
+  have hnn_c : (0 : ℝ) ≤ (Q : ℝ) - (h : ℝ) := sub_nonneg.mpr (Nat.cast_le.mpr hle)
+  have h1 : (h : ℝ) * ((0 : ℕ) + (M : ℝ) * ((Q - h : ℕ) : ℝ)) ≤
+      3 * (h : ℝ) * ((Q : ℝ) - (h : ℝ)) := by
+    rw [Nat.cast_zero, zero_add, hsub]
+    have hmul : (0 : ℝ) ≤ (h : ℝ) * ((Q : ℝ) - (h : ℝ)) := mul_nonneg (Nat.cast_nonneg h) hnn_c
+    nlinarith
+  have h2 : (3 : ℝ) * (h : ℝ) * ((h - 1 : ℕ) : ℝ) / 2 ≤ 3 * (h : ℝ) ^ 2 / 2 := by
+    have : (3 : ℝ) * (h : ℝ) * ((h - 1 : ℕ) : ℝ) ≤ 3 * (h : ℝ) * (h : ℝ) := by gcongr
+    linarith [sq (h : ℝ)]
+  have hquad : 3 * (h : ℝ) * ((Q : ℝ) - (h : ℝ)) + 3 * (h : ℝ) ^ 2 / 2 +
+      ((Q : ℝ) - (h : ℝ)) ^ 2 ≤ 3 * (Q : ℝ) ^ 2 / 2 := by
+    have hsq : 0 ≤ ((Q : ℝ) - (h : ℝ)) ^ 2 := sq_nonneg _
+    linarith
+  rw [Nat.cast_one, add_assoc _ (((Q - h : ℕ) : ℝ) * 1), hc_eq, hsub]
+  rw [hsub] at h1
+  exact (add_le_add (add_le_add h1 h2) le_rfl).trans hquad
+
+/-- Specialization of `jointHitPotential_zero_one_le` to single-root incremental
+absorption (`entryCap = 1`). -/
+theorem jointHitPotential_entryCap_one_le (Q : ℕ) :
+    jointHitPotential 1 0 1 Q ≤ 3 * (Q : ℝ) ^ 2 / 2 :=
+  jointHitPotential_zero_one_le (by decide) Q
+
+end MerkleRO
+
+section SpongeCount
+
+variable {s₀ : D} {stepDigestsOf : ℕ → Msg → List D} {r M : ℕ}
+
+theorem length_spongeEntryDigests_le
+    (hM : ∀ i < r, ∀ m, (stepDigestsOf i m).length ≤ M)
+    (e : Sigma (SpongeMerkleAnswer Msg Chal T D)) :
+    (spongeEntryDigests stepDigestsOf r e).length ≤ spongeMerkleEntryCap M e.1 := by
+  obtain ⟨x, y⟩ := e
+  cases x with
+  | chal i prev m =>
+    simp only [spongeEntryDigests, spongeHashDigests, List.append_nil, spongeChalDigests,
+      spongeMerkleEntryCap]
+    split_ifs with hi
+    · exact hM i hi m
+    · exact Nat.zero_le M
+  | other q =>
+    simp only [spongeEntryDigests, spongeChalDigests, List.nil_append, spongeMerkleEntryCap]
+    cases q with
+    | rows _ => exact show 1 ≤ 3 by decide
+    | node _ _ => exact le_refl 3
+
+theorem exists_finset_spongeMerklePresent
+    (hM : ∀ i < r, ∀ m, (stepDigestsOf i m).length ≤ M)
+    (l : Log (SpongeMerkleAnswer Msg Chal T D)) :
+    ∃ S : Finset D, S.card ≤ spongeMerkleCap M l ∧
+      ∀ d, SpongeMerklePresent stepDigestsOf r l d → d ∈ S := by
+  classical
+  refine ⟨(l.flatMap (spongeEntryDigests stepDigestsOf r)).toFinset, ?_, fun d hd => ?_⟩
+  · refine (List.toFinset_card_le _).trans ?_
+    induction l with
+    | nil => simp [spongeMerkleCap]
+    | cons e l ih =>
+      rw [List.flatMap_cons, List.length_append, spongeMerkleCap, List.map_cons, List.sum_cons]
+      have he := length_spongeEntryDigests_le hM e
+      change (spongeEntryDigests stepDigestsOf r e).length +
+          (l.flatMap (spongeEntryDigests stepDigestsOf r)).length ≤
+        spongeMerkleEntryCap M e.1 + spongeMerkleCap M l
+      omega
+  · rw [List.mem_toFinset, List.mem_flatMap]
+    exact hd
+
+theorem exists_finset_spongePresent (s₀ : D) (l : Log (SpongeMerkleAnswer Msg Chal T D)) :
+    ∃ S : Finset D, S.card ≤ spongeStateCap l ∧ ∀ s, SpongePresent s₀ l s → s ∈ S := by
+  classical
+  refine ⟨(s₀ :: l.flatMap fun e => spongeStates e.1 e.2).toFinset, ?_, fun s hs => ?_⟩
+  · refine (List.toFinset_card_le _).trans ?_
+    rw [List.length_cons, spongeStateCap]
+    suffices h : (l.flatMap fun e => spongeStates e.1 e.2).length ≤
+        (l.map fun e => spongeStateEntryCap e.1).sum by omega
+    induction l with
+    | nil => simp
+    | cons e l ih =>
+      rw [List.flatMap_cons, List.length_append, List.map_cons, List.sum_cons]
+      have he : (spongeStates e.1 e.2).length ≤ spongeStateEntryCap e.1 := by
+        obtain ⟨x, y⟩ := e
+        cases x with
+        | chal i prev m =>
+          obtain ⟨next, c⟩ := y
+          simp [spongeStates, spongeStateEntryCap]
+        | other q => simp [spongeStates, spongeStateEntryCap]
+      omega
+  · rw [List.mem_toFinset, List.mem_cons]
+    rcases hs with rfl | ⟨e, he, hs⟩
+    · exact Or.inl rfl
+    · exact Or.inr (List.mem_flatMap.mpr ⟨e, he, hs⟩)
+
+variable [Fintype D] [Nonempty D]
+
+theorem fractionLE_spongeMerklePresent
+    (hM : ∀ i < r, ∀ m, (stepDigestsOf i m).length ≤ M)
+    (l : Log (SpongeMerkleAnswer Msg Chal T D)) :
+    FractionLE (fun y : D => SpongeMerklePresent stepDigestsOf r l y)
+      ((spongeMerkleCap M l : ℝ) / Fintype.card D) := by
+  obtain ⟨S, hS, hmem⟩ := exists_finset_spongeMerklePresent (r := r) hM l
+  refine ⟨S, ?_, hmem⟩
+  rw [div_mul_cancel₀ _ (Nat.cast_ne_zero.mpr Fintype.card_ne_zero)]
+  exact_mod_cast hS
+
+theorem fractionLE_spongePresent [∀ i, Fintype (Chal i)] [∀ i, Nonempty (Chal i)]
+    (s₀ : D) (l : Log (SpongeMerkleAnswer Msg Chal T D)) (i : ℕ) :
+    FractionLE (fun y : D × Chal i => SpongePresent s₀ l y.1)
+      ((spongeStateCap l : ℝ) / Fintype.card D) := by
+  obtain ⟨S, hS, hmem⟩ := exists_finset_spongePresent s₀ l
+  refine ⟨S ×ˢ (Finset.univ : Finset (Chal i)), ?_, fun y hy =>
+    Finset.mem_product.mpr ⟨hmem y.1 hy, Finset.mem_univ y.2⟩⟩
+  rw [Finset.card_product, Finset.card_univ, Fintype.card_prod]
+  have hDne : (Fintype.card D : ℝ) ≠ 0 := Nat.cast_ne_zero.mpr Fintype.card_ne_zero
+  have hScast : (S.card : ℝ) ≤ (spongeStateCap l : ℝ) := by exact_mod_cast hS
+  have hC0 : (0 : ℝ) ≤ Fintype.card (Chal i) := Nat.cast_nonneg _
+  calc ((S.card * Fintype.card (Chal i) : ℕ) : ℝ)
+      = (S.card : ℝ) * (Fintype.card (Chal i) : ℝ) := by push_cast; ring
+    _ ≤ (spongeStateCap l : ℝ) * (Fintype.card (Chal i) : ℝ) :=
+        mul_le_mul_of_nonneg_right hScast hC0
+    _ = ((spongeStateCap l : ℝ) / Fintype.card D) *
+          ((Fintype.card D * Fintype.card (Chal i) : ℕ) : ℝ) := by
+        push_cast
+        field_simp
+
+variable [DecidableEq (SpongeQuery Msg D (HashQuery T D))] [∀ i, Fintype (Chal i)]
+  [∀ i, Nonempty (Chal i)] {α : Type w}
+
+/-- **Joint hit probability from any log, via the joint Bellman potential.** -/
+theorem prob_hasBadFrom_jointHit_le
+    (hM : ∀ i < r, ∀ m, (stepDigestsOf i m).length ≤ M)
+    {c : OracleComp (SpongeMerkleAnswer Msg Chal T D) α} {Q : ℕ} (hc : c.QueryBound Q)
+    (l : Log (SpongeMerkleAnswer Msg Chal T D)) :
+    prob (fun _ l' => HasBadFrom (JointHit s₀ stepDigestsOf r) l.length l') c l
+      ≤ jointHitPotential M (spongeMerkleCap M l) (spongeStateCap l) Q / Fintype.card D := by
+  classical
+  have hDpos : (0 : ℝ) < Fintype.card D := Nat.cast_pos.mpr Fintype.card_pos
+  induction c generalizing l Q with
+  | pure a =>
+    rw [prob_pure, ite_eq_right (not_hasBadFrom_of_length_le le_rfl)]
+    exact div_nonneg (jointHitPotential_nonneg M _ _ Q) hDpos.le
+  | queryBind x k ih =>
+    cases Q with
+    | zero => exact absurd hc (queryBound_queryBind_zero x k)
+    | succ Q =>
+      cases hx : l.dlookup x with
+      | some y =>
+        rw [prob_queryBind_of_lookup hx]
+        exact (ih y (hc y) l).trans
+          (div_le_div_of_nonneg_right (jointHitPotential_mono_q M _ _ Q) hDpos.le)
+      | none =>
+        have hYpos : (0 : ℝ) < Fintype.card (SpongeMerkleAnswer Msg Chal T D x) :=
+          Nat.cast_pos.mpr Fintype.card_pos
+        set B := jointHitPotential M (spongeMerkleCap M l + spongeMerkleEntryCap M x)
+            (spongeStateCap l + spongeStateEntryCap x) Q / Fintype.card D with hBdef
+        have hB0 : 0 ≤ B := div_nonneg (jointHitPotential_nonneg M _ _ Q) hDpos.le
+        have hstep : ∀ y : SpongeMerkleAnswer Msg Chal T D x,
+            prob (fun _ l' => HasBadFrom (JointHit s₀ stepDigestsOf r) l.length l') (k y)
+                (l ++ [⟨x, y⟩])
+              ≤ (if JointHit s₀ stepDigestsOf r l x y then 1 else 0) + B := by
+          intro y
+          by_cases hb : JointHit s₀ stepDigestsOf r l x y
+          · rw [ite_eq_left hb]
+            exact (prob_le_one _ _ _).trans (le_add_of_nonneg_right hB0)
+          · rw [ite_eq_right hb, zero_add]
+            refine le_trans (prob_mono_of_outcome fun a l' ha h => ?_)
+              ((ih y (hc y) (l ++ [⟨x, y⟩])).trans (le_of_eq ?_))
+            · obtain ⟨t, rfl⟩ := ha.prefix
+              rw [List.append_assoc, List.singleton_append] at h ⊢
+              rw [List.length_append, List.length_singleton]
+              exact (hasBadFrom_length_cons h).resolve_left hb
+            · rw [spongeMerkleCap_append_singleton, spongeStateCap_append_singleton]
+        rw [prob_queryBind_of_fresh hx, div_le_iff₀ hYpos]
+        cases x with
+        | chal i prev m =>
+          have hfrac : FractionLE (JointHit s₀ stepDigestsOf r l (.chal i prev m))
+              ((spongeStateCap l : ℝ) / Fintype.card D) :=
+            fractionLE_spongePresent s₀ l i
+          calc ∑ y : D × Chal i,
+                prob (fun _ l' => HasBadFrom (JointHit s₀ stepDigestsOf r) l.length l') (k y)
+                  (l ++ [⟨.chal i prev m, y⟩])
+              ≤ ∑ y : D × Chal i,
+                  ((if JointHit s₀ stepDigestsOf r l (.chal i prev m) y then (1 : ℝ) else 0) + B) :=
+                Finset.sum_le_sum fun y _ => hstep y
+            _ = (∑ y : D × Chal i,
+                    if JointHit s₀ stepDigestsOf r l (.chal i prev m) y then (1 : ℝ) else 0) +
+                  Fintype.card (D × Chal i) * B := by
+                rw [Finset.sum_add_distrib, Finset.sum_const, Finset.card_univ, nsmul_eq_mul]
+            _ ≤ ((spongeStateCap l : ℝ) / Fintype.card D) * Fintype.card (D × Chal i) +
+                  Fintype.card (D × Chal i) * B :=
+                add_le_add_left hfrac.sum_ite_le _
+            _ = ((spongeStateCap l : ℝ) +
+                    jointHitPotential M (spongeMerkleCap M l + M) (spongeStateCap l + 2) Q) /
+                  Fintype.card D * Fintype.card (D × Chal i) := by
+                rw [hBdef, spongeMerkleEntryCap, spongeStateEntryCap]
+                field_simp
+            _ ≤ (jointHitPotential M (spongeMerkleCap M l) (spongeStateCap l) (Q + 1) /
+                  Fintype.card D) * Fintype.card (D × Chal i) :=
+                mul_le_mul_of_nonneg_right
+                  (div_le_div_of_nonneg_right
+                    (jointHitPotential_chal_step M (spongeMerkleCap M l) (spongeStateCap l) Q)
+                    hDpos.le)
+                  hYpos.le
+        | other q =>
+          have hfrac : FractionLE (JointHit s₀ stepDigestsOf r l (.other q))
+              ((spongeMerkleCap M l : ℝ) / Fintype.card D) :=
+            fractionLE_spongeMerklePresent hM l
+          calc ∑ y : D,
+                prob (fun _ l' => HasBadFrom (JointHit s₀ stepDigestsOf r) l.length l') (k y)
+                  (l ++ [⟨.other q, y⟩])
+              ≤ ∑ y : D,
+                  ((if JointHit s₀ stepDigestsOf r l (.other q) y then (1 : ℝ) else 0) + B) :=
+                Finset.sum_le_sum fun y _ => hstep y
+            _ = (∑ y : D, if JointHit s₀ stepDigestsOf r l (.other q) y then (1 : ℝ) else 0) +
+                  Fintype.card D * B := by
+                rw [Finset.sum_add_distrib, Finset.sum_const, Finset.card_univ, nsmul_eq_mul]
+            _ ≤ ((spongeMerkleCap M l : ℝ) / Fintype.card D) * Fintype.card D +
+                  Fintype.card D * B :=
+                add_le_add_left hfrac.sum_ite_le _
+            _ = ((spongeMerkleCap M l : ℝ) +
+                    jointHitPotential M (spongeMerkleCap M l + 3) (spongeStateCap l) Q) /
+                  Fintype.card D * Fintype.card D := by
+                simp only [hBdef, spongeMerkleEntryCap, spongeStateEntryCap, Nat.add_zero]
+                field_simp
+            _ ≤ (jointHitPotential M (spongeMerkleCap M l) (spongeStateCap l) (Q + 1) /
+                  Fintype.card D) * Fintype.card D :=
+                mul_le_mul_of_nonneg_right
+                  (div_le_div_of_nonneg_right
+                    (jointHitPotential_hash_step M (spongeMerkleCap M l) (spongeStateCap l) Q)
+                    hDpos.le)
+                  hDpos.le
+
+/-- **Joint hit probability from the empty log, via the Bellman potential.** -/
+theorem prob_hasBad_jointHit_le_potential
+    (hM : ∀ i < r, ∀ m, (stepDigestsOf i m).length ≤ M)
+    {c : OracleComp (SpongeMerkleAnswer Msg Chal T D) α} {Q : ℕ} (hc : c.QueryBound Q) :
+    prob (fun _ l => HasBad (JointHit s₀ stepDigestsOf r) l) c []
+      ≤ jointHitPotential M 0 1 Q / Fintype.card D := by
+  simpa only [HasBad, List.length_nil, spongeMerkleCap_nil, spongeStateCap_nil] using
+    prob_hasBadFrom_jointHit_le (s₀ := s₀) hM hc []
+
+/-- **Tight incremental sponge BCS collision bound (`c = 3 / 2`).**
+When each sponge challenge step brings at most `M ≤ 3` Merkle digests into play
+(in particular **`M = 1`**, `entryCap = 1`), any `Q`-query computation from the
+empty log triggers a Merkle or sponge hit with probability at most
+`3 * Q ^ 2 / (2 * card D)`. -/
+theorem prob_hasBad_jointHit_le {M : ℕ} (hM3 : M ≤ 3)
+    (hM : ∀ i < r, ∀ m, (stepDigestsOf i m).length ≤ M)
+    {c : OracleComp (SpongeMerkleAnswer Msg Chal T D) α} {Q : ℕ} (hc : c.QueryBound Q) :
+    prob (fun _ l => HasBad (JointHit s₀ stepDigestsOf r) l) c []
+      ≤ 3 * (Q : ℝ) ^ 2 / (2 * Fintype.card D) := by
+  refine (prob_hasBad_jointHit_le_potential (s₀ := s₀) hM hc).trans ?_
+  have hle := jointHitPotential_zero_one_le hM3 Q
+  have hD : (0 : ℝ) ≤ Fintype.card D := Nat.cast_nonneg _
+  calc jointHitPotential M 0 1 Q / Fintype.card D
+      ≤ (3 * (Q : ℝ) ^ 2 / 2) / Fintype.card D := div_le_div_of_nonneg_right hle hD
+    _ = 3 * (Q : ℝ) ^ 2 / (2 * Fintype.card D) := by ring
+
+end SpongeCount
+
 end CertiFri.Oracle

@@ -45,3 +45,5 @@ import CertiFriProofs.Exec.Completeness
 import CertiFriProofs.Exec.HonestProver.Prover
 import CertiFriProofs.Exec.HonestProver.Fields
 import CertiFriProofs.Exec.HonestProver
+import CertiFriProofs.P3.Goldilocks
+import CertiFriProofs.P3.GoldilocksExt3

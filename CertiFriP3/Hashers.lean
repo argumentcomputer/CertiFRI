@@ -1,5 +1,6 @@
 import CertiFri.Merkle
 import CertiFriP3.GoldilocksExt
+import CertiFriP3.GoldilocksExt3
 import CertiFriP3.Blake3
 
 /-!
@@ -50,6 +51,11 @@ def extRowBytes (row : Array GoldilocksExt) : ByteArray :=
   row.foldl (fun bytes e => Goldilocks.pushBytes (Goldilocks.pushBytes bytes e.c0) e.c1)
     (ByteArray.emptyWithCapacity (16 * row.size))
 
+/-- The bytes hashed for a row of cubic-extension elements: 24 bytes per
+element, coordinates `c0`, `c1`, `c2` in order. -/
+def ext3RowBytes (row : Array GoldilocksExt3) : ByteArray :=
+  row.foldl GoldilocksExt3.pushBytes (ByteArray.emptyWithCapacity (24 * row.size))
+
 /-- The canonical word of element `i` of a row, or zero past the end. -/
 @[inline] def wordOrZero (row : Array Goldilocks) (i : Nat) : UInt64 :=
   if h : i < row.size then row[i].val else 0
@@ -80,6 +86,23 @@ def extRowBlock (row : Array GoldilocksExt) (i : Nat) : Block :=
   let e3 := row[j + 3]?.getD default
   wordsBlock e0.c0.val e0.c1.val e1.c0.val e1.c1.val e2.c0.val e2.c1.val e3.c0.val e3.c1.val
 
+/-- The canonical word at base-coordinate index `k` of a cubic-extension row,
+or zero past the end. -/
+@[inline] def ext3WordOrZero (row : Array GoldilocksExt3) (k : Nat) : UInt64 :=
+  let e := row[k / 3]?.getD default
+  match k % 3 with
+  | 0 => e.c0.val
+  | 1 => e.c1.val
+  | _ => e.c2.val
+
+/-- Block `i` of `ext3RowBytes row`, padded with zeros: base coordinates
+`8 * i` to `8 * i + 7`. -/
+def ext3RowBlock (row : Array GoldilocksExt3) (i : Nat) : Block :=
+  let j := 8 * i
+  wordsBlock (ext3WordOrZero row j) (ext3WordOrZero row (j + 1)) (ext3WordOrZero row (j + 2))
+    (ext3WordOrZero row (j + 3)) (ext3WordOrZero row (j + 4)) (ext3WordOrZero row (j + 5))
+    (ext3WordOrZero row (j + 6)) (ext3WordOrZero row (j + 7))
+
 end Hashers
 
 /-- The hasher of Merkle trees over Goldilocks: `SerializingHasher<Blake3>` on
@@ -92,6 +115,12 @@ def baseHasher : MerkleHasher Goldilocks Digest where
 base tree hashes: rows are flattened to their base coordinates. -/
 def extHasher : MerkleHasher GoldilocksExt Digest where
   hashRows row := Blake3.hashBlocks (16 * row.size) (Hashers.extRowBlock row)
+  compress := Blake3.hashPair
+
+/-- The hasher of Merkle trees over the cubic trinomial extension
+`GoldilocksExt3`: rows are flattened to their three base coordinates. -/
+def ext3Hasher : MerkleHasher GoldilocksExt3 Digest where
+  hashRows row := Blake3.hashBlocks (24 * row.size) (Hashers.ext3RowBlock row)
   compress := Blake3.hashPair
 
 end CertiFri.P3

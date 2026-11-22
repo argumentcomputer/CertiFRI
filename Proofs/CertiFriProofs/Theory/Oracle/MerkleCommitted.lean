@@ -124,7 +124,7 @@ theorem committedRow_append_chal (l : Log (MerkleAnswer Msg Chal T D)) {j : ℕ}
     committedRow (l ++ [⟨.chal t msg, c⟩]) root dims = committedRow l root dims :=
   committedRow_congr fun _ _ => opens_append_chal t msg c
 
-variable {digestsOf : Msg → List D} {r : ℕ}
+variable {digestsOf : ℕ → Msg → List D} {r : ℕ}
 
 /-- **The committed rows of a present root are frozen.** If `root` is present
 in the log `l`, and no entry of `l ++ t` after `l` is a hit with respect to the
@@ -147,13 +147,13 @@ end Row
 
 /-- **Readings built from committed rows are settled.** Let `read j m c` read
 the prover message `m` of round `j` from the committed rows `c`, such that in a
-round below `r` it only looks at the rows of the digests `digestsOf m`, and from
-round `r` on it does not look at `c`. Then the interpretation that reads every
-message from the committed rows of the log is settled by the challenge queries,
-up to the bad event `Hit`. -/
-theorem settles_of_committedRow {Msg₂ : Type u₂} (digestsOf : Msg → List D) (r : ℕ)
+round below `r` it only looks at the rows of the digests `digestsOf j m`, and
+from round `r` on it does not look at `c`. Then the interpretation that reads
+every message from the committed rows of the log is settled by the challenge
+queries, up to the bad event `Hit`. -/
+theorem settles_of_committedRow {Msg₂ : Type u₂} (digestsOf : ℕ → Msg → List D) (r : ℕ)
     (read : ℕ → Msg → (D → Array Dimensions → ℕ → ℕ → Option (Array T)) → Msg₂)
-    (hread : ∀ j m c c', j < r → (∀ root ∈ digestsOf m, c root = c' root) →
+    (hread : ∀ j m c c', j < r → (∀ root ∈ digestsOf j m, c root = c' root) →
       read j m c = read j m c')
     (hconst : ∀ j m c c', r ≤ j → read j m c = read j m c') :
     Settles (fun (l : Log (MerkleAnswer Msg Chal T D)) j m => read j m (committedRow l))
@@ -177,20 +177,22 @@ variable [∀ i, Fintype (Chal i)] [∀ i, Nonempty (Chal i)] [Fintype D] [Nonem
 
 /-- **Fiat–Shamir when the messages are Merkle roots.** The state function
 `doomed` of the underlying protocol is round-by-round sound for `r` rounds with
-every error at most `εmax`, and the empty transcript is doomed. A prover message
-contains at most `K` digests, and `read j m c` reads the message `m` of round
-`j` from the committed rows `c` of the digests it contains. An adversary makes
-at most `Q` queries and outputs prover messages, the verifier derives the
-challenges and then runs `rest`, with at most `R` queries. Suppose that after an
-outcome of the experiment, the event `E` of `rest` in a log without a hit
-implies that the transcript, read from the committed rows of that log, is not
-doomed. Then `E` happens with probability at most
-`N * εmax + (K * r + 3) * N * (N - 1) / (2 * card D)`, where `N = Q + r + R`. -/
+every error at most `εmax`, and the empty transcript is doomed. Every challenge
+query contains at most `M` digests across rounds `< r` (under round-indexed
+`digestsOf`), and `read j m c` reads the message `m` of round `j` from the
+committed rows `c` of the digests in `digestsOf j m`. An adversary makes at most
+`Q` queries and outputs prover messages, the verifier derives the challenges and
+then runs `rest`, with at most `R` queries. Suppose that after an outcome of the
+experiment, the event `E` of `rest` in a log without a hit implies that the
+transcript, read from the committed rows of that log, is not doomed. Then `E`
+happens with probability at most
+`N * εmax + (max M 3 + 3) * N ^ 2 / (4 * card D)`, where `N = Q + r + R`. -/
 theorem prob_fsExperiment_bind_committedRow_le (hsound : RbrSound r doomed ε)
     (hε : ∀ i < r, ε i ≤ εmax) (h0 : 0 ≤ εmax) (hnil : doomed 0 .nil)
-    {digestsOf : Msg → List D} {K : ℕ} (hK : ∀ m, (digestsOf m).length ≤ K)
+    {digestsOf : ℕ → Msg → List D} {M : ℕ}
+    (hM : ∀ (x : FSQuery Msg Chal (HashQuery T D)), (chalDigests digestsOf r x).length ≤ M)
     {read : ℕ → Msg → (D → Array Dimensions → ℕ → ℕ → Option (Array T)) → Msg₂}
-    (hread : ∀ j m c c', (∀ root ∈ digestsOf m, c root = c' root) → read j m c = read j m c')
+    (hread : ∀ j m c c', (∀ root ∈ digestsOf j m, c root = c' root) → read j m c = read j m c')
     {adv : OracleComp (MerkleAnswer Msg Chal T D) α} {Q : ℕ} (hadv : adv.QueryBound Q)
     (msgs : α → ℕ → Msg)
     {rest : α × Transcript Msg Chal r → OracleComp (MerkleAnswer Msg Chal T D) β} {R : ℕ}
@@ -202,7 +204,7 @@ theorem prob_fsExperiment_bind_committedRow_le (hsound : RbrSound r doomed ε)
       ¬ doomed r (out.2.mapIdx fun j m => read j m (committedRow l'))) :
     prob E ((fsExperiment r adv msgs).bind rest) []
       ≤ (Q + r + R) * εmax
-        + (K * r + 3) * (Q + r + R) * (Q + r + R - 1) / (2 * Fintype.card D) := by
+        + ((max M 3 + 3 : ℕ) : ℝ) * ((Q : ℝ) + r + R) ^ 2 / (4 * Fintype.card D) := by
   -- From round `r` on, a message is read without the log.
   have hset := settles_of_committedRow (Chal := Chal) digestsOf r
     (fun j m c => read j m (if j < r then c else fun _ _ _ _ => none))
@@ -216,9 +218,9 @@ theorem prob_fsExperiment_bind_committedRow_le (hsound : RbrSound r doomed ε)
           have hjr : j < r := out.2.length_msgs ▸ (List.getElem?_eq_some_iff.mp hj).1
           simp only [hjr, ↓reduceIte]]
       exact hE out l b l' hout hrun hb hno
-  have hhit := prob_hasBad_hit_le (r := r) hK
+  have hhit := prob_hasBad_hit_le (r := r) hM
     ((queryBound_fsExperiment (r := r) hadv msgs).bind hrest)
-  push_cast at hhit
+  rw [show ((Q + r + R : ℕ) : ℝ) = (Q : ℝ) + r + R by push_cast; rfl] at hhit
   exact (prob_le_prob_and_not_add E (fun _ l => HasBad (Hit digestsOf r) l) _ _).trans
     (add_le_add hflip hhit)
 

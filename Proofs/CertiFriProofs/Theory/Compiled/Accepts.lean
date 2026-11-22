@@ -357,8 +357,8 @@ final log commits to, is accepted by the oracle-model protocol. -/
 theorem accepts_of_outcome_verify {pf : Proof F D P.batches P.queries}
     {t : Transcript (Msg F D P.batches) (Chal P.ldt P.queries) (P.rounds + 2)}
     {l l' : Log (MerkleAnswer (Msg F D P.batches) (Chal P.ldt P.queries) F D)}
-    (hrun : Outcome (P.verify pf t) l true l') {r : ℕ}
-    (hno : ¬ HasBad (Hit digestsOf r) l') :
+    (hrun : Outcome (P.verify pf t) l true l') {digests : ℕ → Msg F D P.batches → List D} {r : ℕ}
+    (hno : ¬ HasBad (Hit digests r) l') :
     Accepts P.ldt P.shift (t.mapIdx fun j m => P.read j m (committedRow l')) :=
   P.accepts_of_outcome_verifyWith t hrun (not_logCollision_of_not_hasBad_hit hno)
 
@@ -374,7 +374,8 @@ theorem accepts_of_outcome_verifyGrindView {M : Type} {bits : ℕ → ℕ}
     {view : M → Msg F D P.batches} {pf : Proof F D P.batches P.queries}
     {t : Transcript M (GrindChal bits (Chal P.ldt P.queries)) (P.rounds + 2)}
     {l l' : Log (MerkleAnswer M (GrindChal bits (Chal P.ldt P.queries)) F D)}
-    (hrun : Outcome (P.verifyGrindView bits view pf t) l true l') {digests : M → List D} {r : ℕ}
+    (hrun : Outcome (P.verifyGrindView bits view pf t) l true l')
+    {digests : ℕ → M → List D} {r : ℕ}
     (hno : ¬ HasBad (Hit digests r) l') :
     PowPasses t ∧
       Accepts P.ldt P.shift
@@ -394,8 +395,9 @@ protocol. -/
 theorem accepts_of_outcome_verifyGrind {bits : ℕ → ℕ} {pf : Proof F D P.batches P.queries}
     {t : Transcript (Msg F D P.batches) (GrindChal bits (Chal P.ldt P.queries)) (P.rounds + 2)}
     {l l' : Log (MerkleAnswer (Msg F D P.batches) (GrindChal bits (Chal P.ldt P.queries)) F D)}
-    (hrun : Outcome (P.verifyGrind bits pf t) l true l') {r : ℕ}
-    (hno : ¬ HasBad (Hit digestsOf r) l') :
+    (hrun : Outcome (P.verifyGrind bits pf t) l true l')
+    {digests : ℕ → Msg F D P.batches → List D} {r : ℕ}
+    (hno : ¬ HasBad (Hit digests r) l') :
     PowPasses t ∧
       Accepts P.ldt P.shift ((ungrind t).mapIdx fun j m => P.read j m (committedRow l')) :=
   P.accepts_of_outcome_verifyGrindView (view := id) hrun hno

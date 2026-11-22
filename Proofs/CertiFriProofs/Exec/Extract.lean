@@ -373,7 +373,7 @@ claimed value `values[c.valueIdx]` is not the value at the opening point
 `points[c.pointIdx]` of the polynomial extracted for the column of `c`, is at
 most the bound of `Exec.soundness_uniqueDecoding`,
 
-    N * εmax + ((batches + 1) * (rounds + 2) + 3) * N * (N - 1) / (2 * |D|),
+    N * εmax + (max (batches + rounds) 3 + 3) * N ^ 2 / (4 * |D|),
 
 with `N = Q + (rounds + 2) + verifierQueries`.
 
@@ -417,12 +417,10 @@ theorem knowledge_soundness
       (experiment m params shape wf adv attempt) [] ≤
       (Q + ((modelParams m params shape wf).rounds + 2) +
           (modelParams m params shape wf).verifierQueries) * εmax +
-        (((modelParams m params shape wf).batches + 1) *
-            ((modelParams m params shape wf).rounds + 2) + 3) *
+        ((max ((modelParams m params shape wf).batches +
+            (modelParams m params shape wf).rounds) 3 + 3 : ℕ) : ℝ) *
           (Q + ((modelParams m params shape wf).rounds + 2) +
-            (modelParams m params shape wf).verifierQueries) *
-          (Q + ((modelParams m params shape wf).rounds + 2) +
-            (modelParams m params shape wf).verifierQueries - 1) / (2 * Fintype.card D) := by
+            (modelParams m params shape wf).verifierQueries) ^ 2 / (4 * Fintype.card D) := by
   refine (prob_mono (fun res l hE => ?_) _ _).trans
     (soundness_uniqueDecoding m params shape wf hheight hδ hrate hα hβ hq hadv attempt)
   obtain ⟨⟨f, hf, hacc⟩, c, hc, hne⟩ := hE
@@ -460,12 +458,10 @@ theorem knowledge_soundness_of_rate
       (experiment m params shape wf adv attempt) [] ≤
       (Q + ((modelParams m params shape wf).rounds + 2) +
           (modelParams m params shape wf).verifierQueries) * εmax +
-        (((modelParams m params shape wf).batches + 1) *
-            ((modelParams m params shape wf).rounds + 2) + 3) *
+        ((max ((modelParams m params shape wf).batches +
+            (modelParams m params shape wf).rounds) 3 + 3 : ℕ) : ℝ) *
           (Q + ((modelParams m params shape wf).rounds + 2) +
-            (modelParams m params shape wf).verifierQueries) *
-          (Q + ((modelParams m params shape wf).rounds + 2) +
-            (modelParams m params shape wf).verifierQueries - 1) / (2 * Fintype.card D) :=
+            (modelParams m params shape wf).verifierQueries) ^ 2 / (4 * Fintype.card D) :=
   knowledge_soundness m params shape wf hheight hδ hrate
     (fun j hj hne => decodeMargin_of_rate m params shape wf hheight hj (hmargin j hj hne))
     hα hβ hq hadv attempt

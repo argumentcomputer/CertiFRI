@@ -400,10 +400,8 @@ theorem knowledge_soundness
         ((modelParams m params shape wf).ldt.degree j) (1 - δ))
     {εmax : ℝ}
     (hα : ((claimRefs params.logBlowup shape).length : ℝ) *
-        ((2 : ℝ) ^ logMaxHeight params.logBlowup shape *
-          (δ * 2 ^ logMaxHeight params.logBlowup shape + 1) + 1) / Fintype.card K ≤ εmax)
-    (hβ : 2 * ((2 : ℝ) ^ logMaxHeight params.logBlowup shape *
-          (δ * 2 ^ logMaxHeight params.logBlowup shape + 1) + 1) / Fintype.card K /
+        ((1 + δ) * (2 : ℝ) ^ logMaxHeight params.logBlowup shape) / Fintype.card K ≤ εmax)
+    (hβ : ((1 + δ) * (2 : ℝ) ^ logMaxHeight params.logBlowup shape) / Fintype.card K /
         2 ^ params.commitPowBits ≤ εmax)
     (hq : (1 - δ) ^ params.numQueries / 2 ^ params.queryPowBits ≤ εmax) {A : Type*}
     {adv : OracleComp (OracleAnswer (D := D) m params shape wf) A} {Q : ℕ}
@@ -445,10 +443,8 @@ theorem knowledge_soundness_of_rate
         3 / 2 ^ (logMaxHeight params.logBlowup shape - j) ≤ 1)
     {εmax : ℝ}
     (hα : ((claimRefs params.logBlowup shape).length : ℝ) *
-        ((2 : ℝ) ^ logMaxHeight params.logBlowup shape *
-          (δ * 2 ^ logMaxHeight params.logBlowup shape + 1) + 1) / Fintype.card K ≤ εmax)
-    (hβ : 2 * ((2 : ℝ) ^ logMaxHeight params.logBlowup shape *
-          (δ * 2 ^ logMaxHeight params.logBlowup shape + 1) + 1) / Fintype.card K /
+        ((1 + δ) * (2 : ℝ) ^ logMaxHeight params.logBlowup shape) / Fintype.card K ≤ εmax)
+    (hβ : ((1 + δ) * (2 : ℝ) ^ logMaxHeight params.logBlowup shape) / Fintype.card K /
         2 ^ params.commitPowBits ≤ εmax)
     (hq : (1 - δ) ^ params.numQueries / 2 ^ params.queryPowBits ≤ εmax) {A : Type*}
     {adv : OracleComp (OracleAnswer (D := D) m params shape wf) A} {Q : ℕ}

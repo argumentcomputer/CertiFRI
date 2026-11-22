@@ -229,9 +229,9 @@ fail at agreement `1 - δ` is at most
 
 with `N = Q + 2 * ((rounds + 2) + verifierQueries)`, provided `εmax` bounds the
 error of every round. With `n = logMaxHeight params.logBlowup shape` and
-`c = 2 ^ n * (δ * 2 ^ n + 1) + 1`, these are
+`c = (1 + δ) * 2 ^ n`, these are
 `(number of claimed values) * c / |K|` for the batching round,
-`2 * c / |K| / 2 ^ commitPowBits` for a folding round, and
+`c / |K| / 2 ^ commitPowBits` for a folding round, and
 `(1 - δ) ^ numQueries / 2 ^ queryPowBits` for the query round.
 
 The experiment and the events, both read on the final log, are those of
@@ -241,10 +241,8 @@ theorem soundness₂_uniqueDecoding
     (hheight : params.logFinalHeight ≤ logMaxHeight params.logBlowup shape) {δ : ℝ} (hδ : 0 ≤ δ)
     (hrate : 2 * δ + (1 / 2) ^ params.logBlowup ≤ 1) {εmax : ℝ}
     (hα : ((claimRefs params.logBlowup shape).length : ℝ) *
-        ((2 : ℝ) ^ logMaxHeight params.logBlowup shape *
-          (δ * 2 ^ logMaxHeight params.logBlowup shape + 1) + 1) / Fintype.card K ≤ εmax)
-    (hβ : 2 * ((2 : ℝ) ^ logMaxHeight params.logBlowup shape *
-          (δ * 2 ^ logMaxHeight params.logBlowup shape + 1) + 1) / Fintype.card K /
+        ((1 + δ) * (2 : ℝ) ^ logMaxHeight params.logBlowup shape) / Fintype.card K ≤ εmax)
+    (hβ : ((1 + δ) * (2 : ℝ) ^ logMaxHeight params.logBlowup shape) / Fintype.card K /
         2 ^ params.commitPowBits ≤ εmax)
     (hq : (1 - δ) ^ params.numQueries / 2 ^ params.queryPowBits ≤ εmax) {A : Type*}
     {adv : OracleComp (OracleAnswer (D := D) m params shape wf) A} {Q : ℕ}
@@ -279,8 +277,7 @@ theorem soundness₂_uniqueDecoding
     exact_mod_cast sum_numClaims_sub_one_le m params shape wf
   refine soundness₂ m params shape wf hθ
     (εα := fun j => (((modelParams m params shape wf).numClaims j - 1 : ℕ) : ℝ) *
-      ((2 : ℝ) ^ logMaxHeight params.logBlowup shape *
-        (δ * 2 ^ logMaxHeight params.logBlowup shape + 1) + 1) / Fintype.card K)
+      ((1 + δ) * (2 : ℝ) ^ logMaxHeight params.logBlowup shape) / Fintype.card K)
     (fun j hj => (modelParams m params shape wf).curveMCA_of_rate_of_curveCA
       (curveCA_udThreshold K) hn hfinal hδ hrate hj ((modelParams m params shape wf).numClaims j))
     (fun i hi => (modelParams m params shape wf).stepMCA_of_rate_of_curveCA

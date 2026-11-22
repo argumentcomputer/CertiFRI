@@ -16,9 +16,9 @@ distance `δ` up to the unique-decoding radius of the rate `2 ^ (-logBlowup)`.
 
 * `soundness_of_curveCA`: `Exec.soundness` at agreement `1 - δ` with no
   proximity hypothesis. With `n = logMaxHeight params.logBlowup shape` and
-  `c = 2 ^ n * (δ * 2 ^ n + 1) + 1`, the error of the batching round is
+  `c = (1 + δ) * 2 ^ n`, the error of the batching round is
   `(∑ j ≤ rounds, (numClaims j - 1)) * c / |K|`, that of a folding round
-  `2 * c / |K| / 2 ^ commitPowBits`, and that of the query round
+  `c / |K| / 2 ^ commitPowBits`, and that of the query round
   `(1 - δ) ^ numQueries / 2 ^ queryPowBits`.
 * `sum_numClaims_sub_one_le`: the sum in the batching error is at most the
   number of claimed values, `(claimRefs params.logBlowup shape).length`.
@@ -112,22 +112,20 @@ with `N = Q + (rounds + 2) + P.verifierQueries`. The doc comment of `soundness`
 says what "accepts" and "the claims fail" mean.
 
 With `n = logMaxHeight params.logBlowup shape`, the log of the size of the
-first domain, and `c = 2 ^ n * (δ * 2 ^ n + 1) + 1`, the number `εmax` bounds
+first domain, and `c = (1 + δ) * 2 ^ n`, the number `εmax` bounds
 the error of every round:
 
 * the batching round, `(∑ j ≤ rounds, (numClaims j - 1)) * c / |K|`, where
   `numClaims j` is the number of claims of level `j`;
-* each folding round, `2 * c / |K| / 2 ^ commitPowBits`;
+* each folding round, `c / |K| / 2 ^ commitPowBits`;
 * the query round, `(1 - δ) ^ numQueries / 2 ^ queryPowBits`. -/
 theorem soundness_of_curveCA (hca : CurveCA K udThreshold)
     (hheight : params.logFinalHeight ≤ logMaxHeight params.logBlowup shape) {δ : ℝ} (hδ : 0 ≤ δ)
     (hrate : 2 * δ + (1 / 2) ^ params.logBlowup ≤ 1) {εmax : ℝ}
     (hα : (∑ j ∈ Finset.range (numRounds params shape + 1),
           (((modelParams m params shape wf).numClaims j - 1 : ℕ) : ℝ)) *
-        ((2 : ℝ) ^ logMaxHeight params.logBlowup shape *
-          (δ * 2 ^ logMaxHeight params.logBlowup shape + 1) + 1) / Fintype.card K ≤ εmax)
-    (hβ : 2 * ((2 : ℝ) ^ logMaxHeight params.logBlowup shape *
-          (δ * 2 ^ logMaxHeight params.logBlowup shape + 1) + 1) / Fintype.card K /
+        ((1 + δ) * (2 : ℝ) ^ logMaxHeight params.logBlowup shape) / Fintype.card K ≤ εmax)
+    (hβ : ((1 + δ) * (2 : ℝ) ^ logMaxHeight params.logBlowup shape) / Fintype.card K /
         2 ^ params.commitPowBits ≤ εmax)
     (hq : (1 - δ) ^ params.numQueries / 2 ^ params.queryPowBits ≤ εmax) {A : Type*}
     {adv : OracleComp (OracleAnswer (D := D) m params shape wf) A} {Q : ℕ}
@@ -170,17 +168,15 @@ the batching error in terms of the number of claimed values.**
 
 `soundness_of_curveCA` with the error of the batching round bounded by
 `(claimRefs params.logBlowup shape).length * c / |K|`, where
-`c = 2 ^ n * (δ * 2 ^ n + 1) + 1` and `n = logMaxHeight params.logBlowup shape`.
+`c = (1 + δ) * 2 ^ n` and `n = logMaxHeight params.logBlowup shape`.
 The length of `claimRefs` is the number of claimed values of the shape, the
 length of `values` that `Fri.verify` requires. -/
 theorem soundness_of_curveCA_of_claimRefs (hca : CurveCA K udThreshold)
     (hheight : params.logFinalHeight ≤ logMaxHeight params.logBlowup shape) {δ : ℝ} (hδ : 0 ≤ δ)
     (hrate : 2 * δ + (1 / 2) ^ params.logBlowup ≤ 1) {εmax : ℝ}
     (hα : ((claimRefs params.logBlowup shape).length : ℝ) *
-        ((2 : ℝ) ^ logMaxHeight params.logBlowup shape *
-          (δ * 2 ^ logMaxHeight params.logBlowup shape + 1) + 1) / Fintype.card K ≤ εmax)
-    (hβ : 2 * ((2 : ℝ) ^ logMaxHeight params.logBlowup shape *
-          (δ * 2 ^ logMaxHeight params.logBlowup shape + 1) + 1) / Fintype.card K /
+        ((1 + δ) * (2 : ℝ) ^ logMaxHeight params.logBlowup shape) / Fintype.card K ≤ εmax)
+    (hβ : ((1 + δ) * (2 : ℝ) ^ logMaxHeight params.logBlowup shape) / Fintype.card K /
         2 ^ params.commitPowBits ≤ εmax)
     (hq : (1 - δ) ^ params.numQueries / 2 ^ params.queryPowBits ≤ εmax) {A : Type*}
     {adv : OracleComp (OracleAnswer (D := D) m params shape wf) A} {Q : ℕ}

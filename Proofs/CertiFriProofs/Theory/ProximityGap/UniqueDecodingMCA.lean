@@ -20,10 +20,10 @@ number of terms.
   sets that miss at most `e` points with `2 * e + d ≤ D.card`, and in relative
   terms for agreement `1 - δ` with `2 * (δ * D.card) + d ≤ D.card`. The error is
   `udThreshold D.card e m / |F|`, at most
-  `(m - 1) * (D.card * (δ * D.card + 1) + 1) / |F|`.
+  `(m - 1) * ((1 + δ) * D.card) / |F|`.
 * `stepMCA_of_curveCA`: `StepMCA` for a folding round into `D'`, for agreement
   `1 - δ` with `2 * (δ * D'.card) + d' ≤ D'.card`, with error
-  `2 * (D'.card * (δ * D'.card + 1) + 1) / |F|`.
+  `2 * ((1 + δ) * D'.card) / |F|`.
 * `curveMCA_of_curveCA_of_card_le`, `stepMCA_of_curveCA_of_card_le`: the last
   two with the size of the domain replaced by an upper bound in the error.
 
@@ -156,7 +156,7 @@ theorem curveMCA_of_curveCA_card (hca : CurveCA F udThreshold) (D : Finset F) (d
     CurveMCA D d m θ ((udThreshold D.card e m : ℝ) / Fintype.card F) := by
   intro u
   have hT : (m - 1) * e ≤ udThreshold D.card e m :=
-    Nat.mul_le_mul_left _ (by nlinarith)
+    Nat.mul_le_mul_left _ (Nat.le_add_left _ _)
   obtain ⟨bad, hbad, h⟩ := curve_mca_of_curveCA hca D d e m hdist hT u
   have hF : (Fintype.card F : ℝ) ≠ 0 := Nat.cast_ne_zero.mpr Fintype.card_ne_zero
   refine ⟨bad, ?_, fun β hβ p hp B hBD hB hagree => h β hβ p hp B hBD ?_ hagree⟩
@@ -172,7 +172,7 @@ theorem curveMCA_of_curveCA_card (hca : CurveCA F udThreshold) (D : Finset F) (d
 Assume correlated agreement with the threshold `udThreshold`. If
 `2 * (δ * D.card) + d ≤ D.card`, then `CurveMCA` holds for agreement `1 - δ`
 (relative distance `δ`) and curves of any number `m` of terms, with error
-`(m - 1) * (D.card * (δ * D.card + 1) + 1) / |F|`.
+`(m - 1) * ((1 + δ) * D.card) / |F|`.
 
 Writing `ρ = d / D.card` for the rate, the condition is `δ ≤ (1 - ρ) / 2`: the
 unique-decoding radius. Only the integer `⌊δ * D.card⌋` matters;
@@ -180,7 +180,7 @@ unique-decoding radius. Only the integer `⌊δ * D.card⌋` matters;
 theorem curveMCA_of_curveCA (hca : CurveCA F udThreshold) (D : Finset F) (d m : ℕ) (δ : ℝ)
     (hδ : 0 ≤ δ) (hdist : 2 * (δ * D.card) + d ≤ D.card) :
     CurveMCA D d m (1 - δ)
-      (((m - 1 : ℕ) : ℝ) * (D.card * (δ * D.card + 1) + 1) / Fintype.card F) := by
+      (((m - 1 : ℕ) : ℝ) * ((1 + δ) * D.card) / Fintype.card F) := by
   have hnn : 0 ≤ δ * D.card := mul_nonneg hδ (Nat.cast_nonneg _)
   have hfloor : (⌊δ * D.card⌋₊ : ℝ) ≤ δ * D.card := Nat.floor_le hnn
   have hlt : δ * D.card < ⌊δ * D.card⌋₊ + 1 := Nat.lt_floor_add_one _
@@ -194,19 +194,20 @@ theorem curveMCA_of_curveCA (hca : CurveCA F udThreshold) (D : Finset F) (d m : 
   refine div_le_div_of_nonneg_right ?_ (Nat.cast_nonneg _)
   rw [udThreshold]
   push_cast
-  gcongr
+  have hsum : (D.card : ℝ) + (⌊δ * D.card⌋₊ : ℝ) ≤ (1 + δ) * D.card := by linarith
+  exact mul_le_mul_of_nonneg_left hsum (Nat.cast_nonneg _)
 
 /-- **The folding hypothesis at the unique-decoding radius.**
 
 Assume correlated agreement with the threshold `udThreshold`. If
 `2 * (δ * |D'|) + d' ≤ |D'|`, the folding round from `D` to `D'` satisfies
 `StepMCA` for agreement `1 - δ`, whatever input joins, with error
-`2 * (|D'| * (δ * |D'| + 1) + 1) / |F|`. Here `D'` is the domain the round folds
+`2 * ((1 + δ) * |D'|) / |F|`. Here `D'` is the domain the round folds
 into and `d'` its degree bound. -/
 theorem stepMCA_of_curveCA (hca : CurveCA F udThreshold) {D D' : Finset F}
     (hstep : SquareStep D D') (d' : ℕ) {δ : ℝ} (hδ : 0 ≤ δ)
     (hdist : 2 * (δ * D'.card) + d' ≤ D'.card) :
-    StepMCA D D' d' (1 - δ) (2 * (D'.card * (δ * D'.card + 1) + 1) / Fintype.card F) := by
+    StepMCA D D' d' (1 - δ) (2 * ((1 + δ) * D'.card) / Fintype.card F) := by
   have h := curveMCA_of_curveCA hca D' d' 3 δ hδ hdist
   norm_num at h
   exact StepMCA.of_curveMCA hstep h
@@ -220,22 +221,21 @@ errors of several domains. -/
 /-- `curveMCA_of_curveCA` with the size of the domain replaced by an upper
 bound `N` in the error: if `2 * (δ * D.card) + d ≤ D.card` and `D.card ≤ N`,
 then `CurveMCA` holds for agreement `1 - δ` with error
-`(m - 1) * (N * (δ * N + 1) + 1) / |F|`. -/
+`(m - 1) * ((1 + δ) * N) / |F|`. -/
 theorem curveMCA_of_curveCA_of_card_le (hca : CurveCA F udThreshold) (D : Finset F) (d m : ℕ)
     {δ N : ℝ} (hδ : 0 ≤ δ) (hdist : 2 * (δ * D.card) + d ≤ D.card) (hN : (D.card : ℝ) ≤ N) :
-    CurveMCA D d m (1 - δ) (((m - 1 : ℕ) : ℝ) * (N * (δ * N + 1) + 1) / Fintype.card F) := by
+    CurveMCA D d m (1 - δ) (((m - 1 : ℕ) : ℝ) * ((1 + δ) * N) / Fintype.card F) := by
   refine ProximityGap.curveMCA_mono (curveMCA_of_curveCA hca D d m δ hδ hdist) le_rfl ?_
-  have hD : (0 : ℝ) ≤ N := (Nat.cast_nonneg D.card).trans hN
   gcongr
 
 /-- `stepMCA_of_curveCA` with the size of the domain replaced by an upper bound
 `N` in the error: if `2 * (δ * |D'|) + d' ≤ |D'|` and `|D'| ≤ N`, the folding
 round from `D` to `D'` satisfies `StepMCA` for agreement `1 - δ` with error
-`2 * (N * (δ * N + 1) + 1) / |F|`. -/
+`2 * ((1 + δ) * N) / |F|`. -/
 theorem stepMCA_of_curveCA_of_card_le (hca : CurveCA F udThreshold) {D D' : Finset F}
     (hstep : SquareStep D D') (d' : ℕ) {δ N : ℝ} (hδ : 0 ≤ δ)
     (hdist : 2 * (δ * D'.card) + d' ≤ D'.card) (hN : (D'.card : ℝ) ≤ N) :
-    StepMCA D D' d' (1 - δ) (2 * (N * (δ * N + 1) + 1) / Fintype.card F) := by
+    StepMCA D D' d' (1 - δ) (2 * ((1 + δ) * N) / Fintype.card F) := by
   have h := curveMCA_of_curveCA_of_card_le hca D' d' 3 hδ hdist hN
   norm_num at h
   exact StepMCA.of_curveMCA hstep h

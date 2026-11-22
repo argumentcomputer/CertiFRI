@@ -89,3 +89,7 @@ import CertiFriProofs.P3.Bn254Model
 import CertiFriProofs.P3.GoldilocksSoundness
 import CertiFriProofs.P3.Goldilocks
 import CertiFriProofs.P3.GoldilocksExt3
+import CertiFriProofs.Theory.ProximityGap.Johnson
+import CertiFriProofs.Theory.ProximityGap.JohnsonMCA
+import CertiFriProofs.Theory.ProximityGap.GuruswamiSudan
+import CertiFriProofs.Exec.SoundnessJohnson

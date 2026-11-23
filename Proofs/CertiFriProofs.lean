@@ -51,6 +51,9 @@ import CertiFriProofs.Theory.ProximityGap.Johnson
 import CertiFriProofs.Theory.ProximityGap.JohnsonMCA
 import CertiFriProofs.Theory.ProximityGap.GuruswamiSudan
 import CertiFriProofs.Theory.ProximityGap.CurveListBridge
+import CertiFriProofs.Theory.ProximityGap.Sylvester
+import CertiFriProofs.Theory.ProximityGap.HenselLift
+import CertiFriProofs.Theory.ProximityGap.CurveListCA
 import CertiFriProofs.Exec.SoundnessJohnson
 import CertiFriProofs.P3.DigestCard
 import CertiFriProofs.Theory.Oracle.SpongeCommitted

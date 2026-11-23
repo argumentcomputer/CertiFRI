@@ -50,6 +50,7 @@ import CertiFriProofs.P3.GoldilocksExt3
 import CertiFriProofs.Theory.ProximityGap.Johnson
 import CertiFriProofs.Theory.ProximityGap.JohnsonMCA
 import CertiFriProofs.Theory.ProximityGap.GuruswamiSudan
+import CertiFriProofs.Theory.ProximityGap.CurveListBridge
 import CertiFriProofs.Exec.SoundnessJohnson
 import CertiFriProofs.P3.DigestCard
 import CertiFriProofs.Theory.Oracle.SpongeCommitted

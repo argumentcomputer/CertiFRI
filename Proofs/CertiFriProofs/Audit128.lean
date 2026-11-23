@@ -2,6 +2,7 @@ import CertiFriP3.DomainSep
 import CertiFriProofs.P3.DigestCard
 import CertiFriProofs.Exec.SoundnessSponge
 import CertiFriProofs.Exec.SoundnessTensor
+import CertiFriProofs.Exec.SoundnessZk
 
 /-!
 # 128-Bit Formal Security Audit (`Audit128`)
@@ -333,5 +334,246 @@ info: 'CertiFri.Audit128.negControl_digest32_fails_bht_at_86' depends on axioms:
 -/
 #guard_msgs in
 #print axioms negControl_digest32_fails_bht_at_86
+
+/-! ## `multi-stark/v6-zk` Hiding-PCS Audit (`#guard_msgs` + `#print axioms`) -/
+
+/-- info: v6ZkMerkleLeafKey_eq : Blake3.deriveContextKey v6ZkMerkleLeafContext = v6ZkMerkleLeafKey -/
+#guard_msgs in
+#check @v6ZkMerkleLeafKey_eq
+
+/--
+info: @Blake3Domain.v6Zk_keyWords_ne_nonZk : ∀ {d₁ d₂ : Blake3Domain},
+  d₁.isZk = true → d₂.isZk = false → d₁.keyWords ≠ d₂.keyWords
+-/
+#guard_msgs in
+#check @Blake3Domain.v6Zk_keyWords_ne_nonZk
+
+/--
+info: @DomainSep.saltedRowBytes_injective : ∀ {r₁ r₂ : Array Goldilocks} {s₁ s₂ : DomainSep.Salt16},
+  DomainSep.saltedRowBytes r₁ s₁ = DomainSep.saltedRowBytes r₂ s₂ → r₁ = r₂ ∧ s₁ = s₂
+-/
+#guard_msgs in
+#check @DomainSep.saltedRowBytes_injective
+
+/--
+info: @salted_merkle_binding_of_no_collision : ∀ {Row Salt D : Type} (hashLeaf : Row × Salt → D) (compress : D → D → D),
+  Function.Injective hashLeaf →
+    (∀ (l₁ r₁ l₂ r₂ : D), compress l₁ r₁ = compress l₂ r₂ → l₁ = l₂ ∧ r₁ = r₂) →
+      ∀ {idx : ℕ} {row₁ row₂ : Row} {salt₁ salt₂ : Salt} {path₁ path₂ : List D},
+        path₁.length = path₂.length →
+          evalMerklePath compress idx (hashLeaf (row₁, salt₁)) path₁ =
+              evalMerklePath compress idx (hashLeaf (row₂, salt₂)) path₂ →
+            row₁ = row₂ ∧ salt₁ = salt₂
+-/
+#guard_msgs in
+#check @salted_merkle_binding_of_no_collision
+
+/--
+info: @zk_oddCoset_blinding_agrees_on_trace : ∀ {K : Type u_1} [inst : Field K] (N : ℕ) (T₀ b : Polynomial K) (x : K),
+  x ^ N = 1 → Polynomial.eval x (T₀ + (Polynomial.X ^ N - 1) * b) = Polynomial.eval x T₀
+-/
+#guard_msgs in
+#check @zk_oddCoset_blinding_agrees_on_trace
+
+/--
+info: @zk_quotient_telescoping_sum : ∀ {K : Type u_1} [inst : Field K] (N q : ℕ),
+  1 ≤ q →
+    ∀ (c : Fin (2 * q) → Polynomial K) (ρ : Fin (2 * q - 1) → Polynomial K),
+      ∑ k, Polynomial.X ^ (↑k * N) * zkBlindedSlice N q c ρ k = ∑ k, Polynomial.X ^ (↑k * N) * c k
+-/
+#guard_msgs in
+#check @zk_quotient_telescoping_sum
+
+/--
+info: @fp3_tensor4_spans_of_not_base : ∀ {r₀ r₁ : Fp3Model},
+  r₀.c1 ≠ 0 ∨ r₀.c2 ≠ 0 → r₁.c1 ≠ 0 ∨ r₁.c2 ≠ 0 → FpSpan3 ![1, r₀, r₁, r₀ * r₁]
+-/
+#guard_msgs in
+#check @fp3_tensor4_spans_of_not_base
+
+/--
+info: fp3_tensor4_span_failure_prob_le : ↑(Nat.card { p // ¬FpSpan3 ![1, p.1, p.2, p.1 * p.2] }) /
+    ↑(Nat.card (Fp3Model × Fp3Model)) ≤
+  2 / ↑Goldilocks.order ^ 2
+-/
+#guard_msgs in
+#check @fp3_tensor4_span_failure_prob_le
+
+/-- info: fp3_tensor4_span_failure_lt_two_neg_126 : 2 / ↑Goldilocks.order ^ 2 < 1 / 2 ^ 126 -/
+#guard_msgs in
+#check @fp3_tensor4_span_failure_lt_two_neg_126
+
+/--
+info: negControl_fp3_tensor3_span_failure_ge : 1 / ↑Goldilocks.order ≤
+    ↑(Nat.card { p // ¬FpSpan3 ![1, p.1, p.2] }) / ↑(Nat.card (Fp3Model × Fp3Model)) ∧
+  1 / 2 ^ 64 < 1 / ↑Goldilocks.order
+-/
+#guard_msgs in
+#check @negControl_fp3_tensor3_span_failure_ge
+
+/--
+info: goldilocksExt3_zk_tensor2DMCA_ud_128 : ∀ (D : Finset Fp3Model) (d W_orig W_R M : ℕ),
+  D.card ≤ 2 ^ 32 →
+    W_orig + W_R ≤ 2 ^ 16 →
+      M ≤ 2 ^ 16 → 2 * (3 / 8 * ↑D.card) + ↑d ≤ ↑D.card → Tensor2DMCA D d (W_orig + W_R) M (5 / 8) (3 / 4 / 2 ^ 128)
+-/
+#guard_msgs in
+#check @goldilocksExt3_zk_tensor2DMCA_ud_128
+
+/-- info: zkProfileUd128_ok : ZkGuardrailsOk zkProfileUd128 -/
+#guard_msgs in
+#check @zkProfileUd128_ok
+
+/-- info: zkProfileJohnsonLb2_ok : ZkGuardrailsOk zkProfileJohnsonLb2 -/
+#guard_msgs in
+#check @zkProfileJohnsonLb2_ok
+
+/-- info: zkProfileJohnsonLb3_ok : ZkGuardrailsOk zkProfileJohnsonLb3 -/
+#guard_msgs in
+#check @zkProfileJohnsonLb3_ok
+
+/-- info: zkProfileJohnsonLb4_ok : ZkGuardrailsOk zkProfileJohnsonLb4 -/
+#guard_msgs in
+#check @zkProfileJohnsonLb4_ok
+
+/-- info: 'CertiFri.P3.v6ZkMerkleLeafKey_eq' depends on axioms: [propext, Quot.sound] -/
+#guard_msgs in
+#print axioms v6ZkMerkleLeafKey_eq
+
+/-- info: 'CertiFri.P3.v6ZkMerkleCompressKey_eq' depends on axioms: [propext, Quot.sound] -/
+#guard_msgs in
+#print axioms v6ZkMerkleCompressKey_eq
+
+/-- info: 'CertiFri.P3.v6ZkTranscriptSingleKey_eq' depends on axioms: [propext, Quot.sound] -/
+#guard_msgs in
+#print axioms v6ZkTranscriptSingleKey_eq
+
+/-- info: 'CertiFri.P3.v6ZkTranscriptBatchKey_eq' depends on axioms: [propext, Quot.sound] -/
+#guard_msgs in
+#print axioms v6ZkTranscriptBatchKey_eq
+
+/-- info: 'CertiFri.P3.v6ZkVkKey_eq' depends on axioms: [propext, Quot.sound] -/
+#guard_msgs in
+#print axioms v6ZkVkKey_eq
+
+/-- info: 'CertiFri.P3.Blake3Domain.v6Zk_keyWords_ne_nonZk' depends on axioms: [propext] -/
+#guard_msgs in
+#print axioms Blake3Domain.v6Zk_keyWords_ne_nonZk
+
+/-- info: 'CertiFri.P3.DomainSep.saltedRowBytes_injective' depends on axioms: [propext, Quot.sound] -/
+#guard_msgs in
+#print axioms DomainSep.saltedRowBytes_injective
+
+/-- info: 'CertiFri.P3.DomainSep.saltedExt3RowBytes_injective' depends on axioms: [propext, Quot.sound] -/
+#guard_msgs in
+#print axioms DomainSep.saltedExt3RowBytes_injective
+
+/--
+info: 'CertiFri.P3.Exec.salted_merkle_binding_of_no_collision' depends on axioms: [propext, Classical.choice, Quot.sound]
+-/
+#guard_msgs in
+#print axioms salted_merkle_binding_of_no_collision
+
+/-- info: 'CertiFri.P3.Exec.salted_sponge_soundness_le' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms salted_sponge_soundness_le
+
+/-- info: 'CertiFri.P3.Exec.v6Zk_saltedLeaf_injective_and_disjoint' depends on axioms: [propext, Quot.sound] -/
+#guard_msgs in
+#print axioms v6Zk_saltedLeaf_injective_and_disjoint
+
+/--
+info: 'CertiFri.P3.Exec.zk_oddCoset_blinding_agrees_on_trace' depends on axioms: [propext, Classical.choice, Quot.sound]
+-/
+#guard_msgs in
+#print axioms zk_oddCoset_blinding_agrees_on_trace
+
+/--
+info: 'CertiFri.P3.Exec.zk_oddCoset_blinding_natDegree_lt' depends on axioms: [propext, Classical.choice, Quot.sound]
+-/
+#guard_msgs in
+#print axioms zk_oddCoset_blinding_natDegree_lt
+
+/-- info: 'CertiFri.P3.Exec.zk_quotient_telescoping_sum' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms zk_quotient_telescoping_sum
+
+/-- info: 'CertiFri.P3.Exec.zk_blindedSlice_natDegree_lt' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms zk_blindedSlice_natDegree_lt
+
+/-- info: 'CertiFri.P3.Exec.fp3_tensor4_spans_of_not_base' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms fp3_tensor4_spans_of_not_base
+
+/--
+info: 'CertiFri.P3.Exec.fp3_tensor4_span_failure_prob_le' depends on axioms: [propext, Classical.choice, Quot.sound]
+-/
+#guard_msgs in
+#print axioms fp3_tensor4_span_failure_prob_le
+
+/--
+info: 'CertiFri.P3.Exec.fp3_tensor4_span_failure_lt_two_neg_126' depends on axioms: [propext, Classical.choice, Quot.sound]
+-/
+#guard_msgs in
+#print axioms fp3_tensor4_span_failure_lt_two_neg_126
+
+/--
+info: 'CertiFri.P3.Exec.negControl_fp3_tensor3_span_failure_ge' depends on axioms: [propext, Classical.choice, Quot.sound]
+-/
+#guard_msgs in
+#print axioms negControl_fp3_tensor3_span_failure_ge
+
+/--
+info: 'CertiFri.P3.Exec.goldilocksExt3_zk_tensor2DMCA_ud_128' depends on axioms: [propext, Classical.choice, Quot.sound]
+-/
+#guard_msgs in
+#print axioms goldilocksExt3_zk_tensor2DMCA_ud_128
+
+/--
+info: 'CertiFri.P3.Exec.goldilocksExt3_v6Zk_soundness_xof48_ud_128' depends on axioms: [propext, Classical.choice, Quot.sound]
+-/
+#guard_msgs in
+#print axioms goldilocksExt3_v6Zk_soundness_xof48_ud_128
+
+/--
+info: 'CertiFri.P3.Exec.goldilocksExt3_v6Zk_soundness_xof48_johnson_128' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound]
+-/
+#guard_msgs in
+#print axioms goldilocksExt3_v6Zk_soundness_xof48_johnson_128
+
+/-- info: 'CertiFri.P3.Exec.zkProfileUd128_ok' depends on axioms: [propext] -/
+#guard_msgs in
+#print axioms zkProfileUd128_ok
+
+/-- info: 'CertiFri.P3.Exec.zkProfileJohnsonLb2_ok' depends on axioms: [propext] -/
+#guard_msgs in
+#print axioms zkProfileJohnsonLb2_ok
+
+/-- info: 'CertiFri.P3.Exec.zkProfileJohnsonLb3_ok' depends on axioms: [propext] -/
+#guard_msgs in
+#print axioms zkProfileJohnsonLb3_ok
+
+/-- info: 'CertiFri.P3.Exec.zkProfileJohnsonLb4_ok' depends on axioms: [propext] -/
+#guard_msgs in
+#print axioms zkProfileJohnsonLb4_ok
+
+/-- info: 'CertiFri.P3.Exec.negControl_zk_trap1_small_trace' depends on axioms: [propext] -/
+#guard_msgs in
+#print axioms negControl_zk_trap1_small_trace
+
+/-- info: 'CertiFri.P3.Exec.negControl_zk_trap2_small_randomizer_width' depends on axioms: [propext] -/
+#guard_msgs in
+#print axioms negControl_zk_trap2_small_randomizer_width
+
+/-- info: 'CertiFri.P3.Exec.negControl_zk_trap3_quotient_blowup' depends on axioms: [propext] -/
+#guard_msgs in
+#print axioms negControl_zk_trap3_quotient_blowup
+
+/-- info: 'CertiFri.P3.Exec.negControl_zk_trap4_v6_domain_rejected' depends on axioms: [propext] -/
+#guard_msgs in
+#print axioms negControl_zk_trap4_v6_domain_rejected
 
 end CertiFri.Audit128

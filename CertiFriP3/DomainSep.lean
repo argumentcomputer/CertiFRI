@@ -2,7 +2,7 @@ import CertiFriP3.Hashers
 import CertiFriP3.Challenger
 
 /-!
-# Native BLAKE3 `derive_key` domain separation (aligned with `multi-stark` `v6`)
+# Native BLAKE3 `derive_key` domain separation (aligned with `multi-stark` `v6` and `v6-zk`)
 
 Plonky3's stock BLAKE3 configuration (`CertiFriP3/Hashers.lean`,
 `CertiFriP3/Challenger.lean`) invokes plain unkeyed BLAKE3 (`iv`, `flags = 0`)
@@ -12,30 +12,39 @@ operations as disjoint oracle query domains.
 
 Prepending a 1-byte tag to a 64-byte Merkle internal node (`left || right`)
 pushes the input from 64 bytes (1 compression block) to 65 bytes (2 blocks),
-doubling Merkle hashing cost. Instead, `multi-stark` `v6` uses BLAKE3's native
-`derive_key` mode: each context string is hashed once with
+doubling Merkle hashing cost. Instead, `multi-stark` `v6` and `v6-zk` use
+BLAKE3's native `derive_key` mode: each context string is hashed once with
 `flagDeriveKeyContext` (`1 << 5`) into a precomputed 8-word context chaining
 value, which replaces `iv` while setting `flagDeriveKeyMaterial` (`1 << 6`) in
 every block and parent compression. Every 64-byte Merkle 2-to-1 compression
 stays a **single** BLAKE3 compression block (`Blake3.deriveKeyPair`) with zero
 extra message bytes.
 
-## Exact `multi-stark` `v6` context strings
+## Exact `multi-stark` `v6` and `v6-zk` context strings
 
+`v6` (non-ZK):
 * `v6MerkleLeafContext = "multi-stark/v6/merkle/leaf"`
 * `v6MerkleCompressContext = "multi-stark/v6/merkle/compress"`
 * `v6TranscriptSingleContext = "multi-stark/v6/transcript/single"`
 * `v6TranscriptBatchContext = "multi-stark/v6/transcript/batch"`
 * `v6VkContext = "multi-stark/v6/vk"`
 
+`v6-zk` (hiding-PCS ZK):
+* `v6ZkMerkleLeafContext = "multi-stark/v6-zk/merkle/leaf"`
+* `v6ZkMerkleCompressContext = "multi-stark/v6-zk/merkle/compress"`
+* `v6ZkTranscriptSingleContext = "multi-stark/v6-zk/transcript/single"`
+* `v6ZkTranscriptBatchContext = "multi-stark/v6-zk/transcript/batch"`
+* `v6ZkVkContext = "multi-stark/v6-zk/vk"`
+
 ## Theorems proved (core Lean, zero `sorry`, zero `native_decide`)
 
-* `v6MerkleLeafKey_eq`, `v6MerkleCompressKey_eq`, `v6TranscriptSingleKey_eq`,
-  `v6TranscriptBatchKey_eq`, `v6VkKey_eq`: kernel-checked equality between
-  `Blake3.deriveContextKey` and the pinned 8-word context chaining values
+* `v6*Key_eq` and `v6Zk*Key_eq`: kernel-checked equality between
+  `Blake3.deriveContextKey` and all 10 pinned 8-word context chaining values
   shared with Rust (`domain_blake3.rs`) and CUDA (`cuda/kernels.cu`).
-* `Blake3Domain.mode_injective`: all 6 domains (`plain` + 5 `v6` domains) have
-  pairwise distinct `(keyWords, domainFlags)` compression parameters.
+* `Blake3Domain.mode_injective` / `Blake3Domain.keyWords_injective`: all 11
+  domains (`plain` + 5 `v6` + 5 `v6-zk`) have pairwise distinct
+  `(keyWords, domainFlags)` compression parameters and initial CVs, giving
+  strict `v6` ↔ `v6-zk` domain separation.
 * `DomainSep.leafKey_ne_compressKey`, `DomainSep.leafKey_ne_transcriptKey`,
   `DomainSep.compressKey_ne_transcriptKey`: the three active oracle domains use
   pairwise distinct BLAKE3 chaining values, and all three have
@@ -43,7 +52,9 @@ extra message bytes.
 * `DomainSep.digest_toBytes_injective`, `DomainSep.digest48_toBytes_injective`,
   `DomainSep.pairBytes_injective`, `DomainSep.pair48Bytes_injective`,
   `DomainSep.rowBytes_injective`, `DomainSep.extRowBytes_injective`,
-  `DomainSep.ext3RowBytes_injective`: canonical byte encodings are injective.
+  `DomainSep.ext3RowBytes_injective`, `DomainSep.saltedRowBytes_injective`,
+  `DomainSep.saltedExt3RowBytes_injective`: canonical byte encodings (including
+  16-byte salted `v6-zk` Merkle leaves) are injective.
 -/
 
 namespace CertiFri.P3
@@ -91,6 +102,50 @@ def v6TranscriptBatchKey : Digest :=
 def v6VkKey : Digest :=
   ⟨0xD7089665, 0x2D51B3C7, 0x1E371C33, 0x324E12A1,
    0xB355FBFF, 0x402B8A4A, 0xD8256C89, 0xB1F439C2⟩
+
+/-! ## Exact `multi-stark` `v6-zk` context strings and precomputed context keys -/
+
+/-- `multi-stark` `v6-zk` context string for salted Merkle leaf row hashing. -/
+def v6ZkMerkleLeafContext : String := "multi-stark/v6-zk/merkle/leaf"
+
+/-- `multi-stark` `v6-zk` context string for Merkle internal 2-to-1 compression. -/
+def v6ZkMerkleCompressContext : String := "multi-stark/v6-zk/merkle/compress"
+
+/-- `multi-stark` `v6-zk` context string for single-proof Fiat–Shamir transcripts. -/
+def v6ZkTranscriptSingleContext : String := "multi-stark/v6-zk/transcript/single"
+
+/-- `multi-stark` `v6-zk` context string for batch-proof Fiat–Shamir transcripts. -/
+def v6ZkTranscriptBatchContext : String := "multi-stark/v6-zk/transcript/batch"
+
+/-- `multi-stark` `v6-zk` context string for canonical verifying-key digests. -/
+def v6ZkVkContext : String := "multi-stark/v6-zk/vk"
+
+/-- Precomputed BLAKE3 `derive_key` context CV for `v6ZkMerkleLeafContext`
+(pinned against `multi-stark` `domain_blake3.rs` and `cuda/kernels.cu`). -/
+def v6ZkMerkleLeafKey : Digest :=
+  ⟨0x8A663924, 0x051A410E, 0xB5929C7A, 0x52E6E08C,
+   0x51D3B0FA, 0x1D1687C6, 0x472E9E06, 0x5A324ECA⟩
+
+/-- Precomputed BLAKE3 `derive_key` context CV for `v6ZkMerkleCompressContext`
+(pinned against `multi-stark` `domain_blake3.rs` and `cuda/kernels.cu`). -/
+def v6ZkMerkleCompressKey : Digest :=
+  ⟨0x6E9B081E, 0xBAEEB5DA, 0x18652A0D, 0xA2D1B4E1,
+   0x9E40FB01, 0xE905254D, 0x451628D5, 0x3D606842⟩
+
+/-- Precomputed BLAKE3 `derive_key` context CV for `v6ZkTranscriptSingleContext`. -/
+def v6ZkTranscriptSingleKey : Digest :=
+  ⟨0x89D8BDA2, 0xBDAE2046, 0x9274DB73, 0x13010FD9,
+   0xC59663AB, 0x1A374FE0, 0x9FA807DF, 0xA485833F⟩
+
+/-- Precomputed BLAKE3 `derive_key` context CV for `v6ZkTranscriptBatchContext`. -/
+def v6ZkTranscriptBatchKey : Digest :=
+  ⟨0x761A4520, 0x275E7AD5, 0xAF9417AE, 0x5177E5AE,
+   0x0E64CF93, 0x68F8718A, 0x15874B68, 0x9F503445⟩
+
+/-- Precomputed BLAKE3 `derive_key` context CV for `v6ZkVkContext`. -/
+def v6ZkVkKey : Digest :=
+  ⟨0x486C73BD, 0x64F0F532, 0xF4D92A23, 0xAE0C2406,
+   0x097D11FF, 0x4783BEC5, 0x55B051EF, 0x118424A1⟩
 
 /-! ## Certified kernel proofs of `deriveContextKey` for all 5 `v6` contexts -/
 
@@ -274,10 +329,112 @@ theorem v6VkKey_eq :
      820275378, 1598614592, 2188191679, 433543962, 430879186, 1727889619, 1161964421, 4292130199⟩
     v6VkKey (by decide) (by decide) (by decide) (by decide)
 
+/-! ## Certified kernel proofs of `deriveContextKey` for all 5 `v6-zk` contexts -/
+
+private def traceZkMerkleLeaf : List (Blake3.State × Blake3.State) := [
+  (⟨490500336, 3441671645, 4268675184, 254718081, 4259883040, 3238921968, 696208271, 1989084348, 2366670154, 1243514261, 1745334242, 3944406946, 1957916511, 88363320, 788724497, 388073426⟩, ⟨3659795239, 2591722622, 2968801259, 95968001, 2281024356, 2428467718, 2764520019, 4239482715, 1666832193, 41201699, 2758053903, 3226118848, 1862027534, 1379196990, 346425465, 1277826754⟩),
+  (⟨3503210930, 2087466343, 2183149695, 105589167, 3734639708, 2877930832, 2524804589, 2904193590, 2431517432, 333074488, 2302856869, 323560638, 3417386046, 882944194, 1644232057, 1408847362⟩, ⟨3108482759, 939975598, 2038110891, 418765687, 750547334, 1901262651, 1885177677, 3408728218, 3704105619, 1781030522, 1627889636, 2440260176, 4139740218, 828574721, 2463860573, 4116393485⟩),
+  (⟨3490856457, 3259817737, 4092826466, 2572974205, 623623734, 3067718973, 2355517981, 1775952476, 2678893769, 1948621563, 3917640143, 1481155122, 2280319912, 856990791, 1641371368, 73082473⟩, ⟨1544324950, 3700038054, 4257217933, 2045411016, 2858346594, 1467024724, 2422283830, 4071507915, 3369230902, 1771777017, 3066850884, 702902363, 4279108816, 1462519443, 2501489057, 1546457195⟩),
+  (⟨1174754937, 2353296979, 2096981810, 3663195601, 585097822, 1983718357, 36787320, 2786241263, 1349044554, 1188609506, 1812277496, 1693077741, 472739247, 2228497682, 181837692, 1678553053⟩, ⟨1794925674, 833758503, 2051861834, 2199461876, 3741658881, 4057885831, 267414204, 3370486168, 2199167955, 849295042, 1003882172, 2347088380, 2140591799, 3794456033, 2296511844, 3379337249⟩),
+  (⟨2964525770, 1934132407, 3163309196, 2640707831, 2625678959, 2443662361, 2953199158, 4142157502, 652626065, 2619211713, 827455454, 591398928, 1576365863, 221185861, 1343876678, 1705823106⟩, ⟨781899086, 964014275, 1881946595, 1481253398, 3540262759, 3293878036, 1535736642, 2872510628, 1213747606, 3583993087, 2527031750, 4063292099, 2373455205, 293592595, 1135450601, 3095548402⟩),
+  (⟨324536193, 3443615317, 4118758221, 1310768397, 2541180139, 1682662600, 39917639, 1297811154, 2853398279, 1337513790, 423996841, 2075069900, 1743423627, 3763635594, 1440330699, 238381062⟩, ⟨826818723, 3817773323, 3495300382, 2049086275, 3147688355, 953908071, 3505479478, 2954845027, 4077344183, 3790176423, 1388981880, 3889184362, 4020178106, 266951839, 2676525709, 892667705⟩),
+  (⟨4129309745, 1314312504, 2407918203, 4152193493, 953670745, 1151960015, 1772927101, 2553458862, 1658074487, 215104581, 2945936906, 1921925196, 1221647431, 124595551, 1235006816, 2703155822⟩, ⟨3719541496, 1861137226, 3161422704, 3586674602, 2778533862, 3847628827, 604021296, 1975882723, 1473612764, 1811214916, 167634698, 2267983654, 4098801436, 4164988893, 1663974454, 804773161⟩)]
+
+private def traceZkMerkleCompress : List (Blake3.State × Blake3.State) := [
+  (⟨490500336, 3441671645, 4268675504, 3460213132, 4259883040, 3238921968, 2952753700, 1983364052, 2366670154, 1243514261, 672889825, 4158978977, 1957916511, 88363320, 4009936656, 753637319⟩, ⟨1702356025, 4001545160, 1143508280, 3586729164, 3280437149, 4235078772, 1237145300, 957860071, 1147505704, 3390971329, 2956677528, 2952061411, 1488051378, 3667432700, 3913512199, 2559238934⟩),
+  (⟨4022538309, 2019073761, 1828809871, 3629607870, 2575846923, 2405353702, 89692201, 479746753, 3989820179, 3160339304, 1527100452, 673459758, 2665825808, 1743918625, 2270067332, 2049335175⟩, ⟨1185463059, 2111269108, 1167328489, 4044233862, 1406395039, 3960362650, 3947357234, 3824441653, 1104586600, 2531208675, 1413019913, 961273613, 2685193611, 2190796266, 389170154, 2686434098⟩),
+  (⟨1664585262, 1724355634, 2890441304, 862904644, 3089082613, 4019241680, 1475896121, 776438159, 3874811975, 880852179, 2955991671, 3368435342, 2340066362, 1128047487, 2970007941, 1012954889⟩, ⟨1737354224, 2849254345, 1649721479, 1525658480, 1060502602, 1756768103, 10259599, 3626592661, 2473612876, 1611914820, 452624357, 954333553, 214598942, 736283737, 4167681769, 2812586263⟩),
+  (⟨3692909753, 524537827, 1279846901, 2932632291, 3101780864, 588023932, 855103343, 3831593025, 2974169683, 2331853474, 348246512, 1259302188, 2964404734, 2340432630, 1841805171, 1578819326⟩, ⟨421512405, 256167532, 2426313325, 974707924, 1493534684, 1728048665, 3065751302, 1155348392, 2484869232, 1917557749, 1072385659, 3494787042, 3868321836, 4218929287, 848209773, 1489715710⟩),
+  (⟨564881523, 3915204513, 2079542425, 443295173, 3311366655, 3722966535, 1552842101, 3909790905, 4121632, 2162395378, 1940369800, 505433122, 3347396348, 2459262922, 1302195513, 4165987843⟩, ⟨1173043895, 2116872362, 407578641, 957221261, 445215525, 102831507, 1602835744, 3618333130, 534605442, 3269217698, 3003924207, 2618102147, 2004375684, 3995680355, 707707913, 8061616⟩),
+  (⟨3408243115, 3272784745, 342339760, 3190406836, 128813553, 3667053738, 3025660073, 243821994, 3161719628, 2419983575, 3077007318, 2093740275, 2805890494, 218320081, 1252903661, 1993854638⟩, ⟨2665503722, 1126987564, 2964609354, 2445161454, 4185036230, 2769741811, 1977860333, 2495038539, 2873835690, 1247717906, 4119418573, 2796890903, 3307728187, 309124614, 119751506, 2233867144⟩),
+  (⟨1441192944, 2760637964, 3163832611, 905884355, 3420547011, 4053373744, 2723117376, 644895485, 1293945765, 782640758, 104094162, 2586880123, 2236181894, 3484425377, 196634333, 2421611025⟩, ⟨1896161050, 2733812459, 2421116029, 2689777666, 2053513816, 356736403, 3126612331, 4054080650, 530454276, 404496177, 2284480112, 42169571, 3827751257, 4232476894, 4283070910, 3435410632⟩)]
+
+private def traceZkTranscriptSingle : List (Blake3.State × Blake3.State) := [
+  (⟨490500336, 3441671645, 3104625786, 1613974750, 4259883040, 3238921968, 3349455874, 4233709003, 2366670154, 1243514261, 1432381682, 1351239700, 1957916511, 88363320, 474326810, 2135678265⟩, ⟨2702500183, 1570893015, 3218630588, 1532113828, 2227862145, 218113808, 3347517318, 1761337644, 2005064515, 2550890084, 1115125014, 190728603, 2891129100, 2666833367, 4194874993, 3013110336⟩),
+  (⟨3080281813, 3720868794, 523960038, 878138973, 1404936012, 3957350878, 2665709121, 3581595091, 856785155, 147342888, 3300573127, 1089731528, 3428363431, 2167557513, 641940209, 119155923⟩, ⟨774091959, 264694681, 2857099372, 1001593830, 3295828659, 4122902775, 1464669848, 1482028739, 2674749983, 2316689460, 3380002145, 2300790550, 1792186971, 3945495445, 2985618357, 1106046116⟩),
+  (⟨124988141, 3873093348, 3865018300, 3387765375, 4238898667, 3692736968, 2516906133, 69629281, 2080456796, 3960319546, 3072547996, 3560971301, 4242065452, 1257365336, 3506106063, 3785396593⟩, ⟨4002863762, 3169416700, 1168120614, 1483729525, 412065596, 3637718506, 1877600256, 88562113, 4172727947, 1523463735, 1521734502, 1063868705, 4224957685, 1383065019, 1956803068, 3426336876⟩),
+  (⟨1096434898, 3552854899, 4171325459, 2493754497, 3663559397, 117410832, 2978211436, 1338536215, 3849790776, 1103206286, 152637487, 3537167340, 662987192, 2694158724, 998931361, 252770621⟩, ⟨3507141918, 3254667318, 3317625046, 4269765905, 3549378153, 3804677134, 2821789974, 1046555469, 703193723, 1627488825, 3266461717, 365306018, 4203321834, 2657333755, 4023456173, 3223878152⟩),
+  (⟨314470670, 837078187, 536294937, 2680353928, 2075781340, 1698866609, 2403465385, 1654930605, 2999980986, 743250133, 318470378, 811774322, 511234863, 227302390, 940029620, 1078301704⟩, ⟨3227211354, 4003554812, 2583386303, 2291656612, 3654958446, 68711694, 3301025208, 2305327135, 2596293863, 1797834255, 2797591817, 789260211, 504249183, 875183778, 1316549968, 1977466352⟩),
+  (⟨1593785510, 4042429962, 484086690, 2137758348, 139136802, 3672524628, 1124520660, 3678681051, 3780000218, 3924223730, 1053901541, 1524885645, 2650171576, 2568313424, 4169356418, 1369790717⟩, ⟨2066673246, 2007698279, 2518933724, 3559672054, 2541394104, 2348730830, 2241051318, 3069038392, 2362353111, 3604717797, 947442859, 110655070, 4106311742, 1139912030, 1599715146, 513812870⟩),
+  (⟨1529434087, 2642321107, 2058265740, 809517603, 1936066698, 3079259954, 817584176, 285225576, 4219178472, 85425291, 3073360777, 2957598740, 2407793065, 1064548026, 4278525803, 4238169047⟩, ⟨2064113296, 2650276924, 675979668, 604833906, 3630388957, 564450683, 3878599994, 448416271, 4074726194, 542516346, 3124656871, 923535275, 502609270, 999529115, 2022095589, 3191851312⟩)]
+
+private def traceZkTranscriptBatch : List (Blake3.State × Blake3.State) := [
+  (⟨490500336, 3441671645, 3104625802, 1714109406, 4259883040, 3238921968, 2806307356, 2253998395, 2366670154, 1243514261, 627009522, 1351364649, 1957916511, 88363320, 3963987482, 2135803214⟩, ⟨3202586227, 636976999, 2765873940, 3234513592, 507805125, 12525698, 3681485515, 350945350, 284550725, 2122857525, 3205035824, 101679747, 3168620927, 921183961, 4001705546, 1956376119⟩),
+  (⟨913529241, 3440038270, 2722668444, 1063082708, 3840647819, 831575371, 4291067391, 3774826325, 3233688700, 3830210183, 3675332062, 2291188379, 3621885417, 1966967879, 3049524357, 1713570662⟩, ⟨3020429069, 866946024, 3716456343, 1305252503, 2276507733, 1049063042, 2790444976, 4068876763, 422335839, 4058187286, 2485648351, 705566297, 3337173136, 3988206185, 465311235, 1508582317⟩),
+  (⟨2887178627, 599552134, 1928172941, 3673092211, 2964415862, 706393127, 1687790877, 257187960, 3675137816, 3167905161, 4084743511, 2349524437, 2358861482, 49004527, 3859523853, 753918493⟩, ⟨641174446, 4166894516, 4259623121, 1681536480, 1324827145, 1193352697, 2672998415, 2109086750, 2695673330, 528961164, 3903642258, 1388789611, 2075350215, 2075397680, 1265859416, 3761452781⟩),
+  (⟨1375174302, 712204805, 2767901382, 3036453059, 2393572362, 1214790658, 1441076611, 80954604, 1038437375, 3739910524, 2132603610, 3131977927, 63473520, 3485855270, 2193048068, 13889433⟩, ⟨2932681700, 3440627235, 3023837946, 2932461347, 3404659270, 3666455844, 1015502583, 3204717161, 620173403, 4114855966, 1767529985, 1592041380, 3007179597, 2128349656, 2384919541, 3836436263⟩),
+  (⟨56602923, 1868124650, 2447404937, 2752052018, 2888375584, 2309584130, 3757886586, 2126459082, 2636979031, 318855143, 1601880311, 1772276860, 2865641595, 2870855304, 1813767185, 1410507634⟩, ⟨1738943171, 3163741437, 2476748752, 254017808, 1374984571, 3504753501, 187689489, 2639736251, 834023785, 574747209, 1173724910, 409538887, 4194839748, 3242256385, 2842358185, 3142355071⟩),
+  (⟨2443147404, 1323286130, 1785442071, 2101379284, 4056046300, 2263331273, 660262627, 1811764851, 959044150, 774620020, 1727814976, 2734234901, 511272251, 1267631346, 2904131224, 3822843031⟩, ⟨672175705, 3685342559, 1752784196, 2847740959, 3741216721, 264098877, 50027377, 2303317478, 1256097955, 752045626, 1270229769, 2360304156, 2176602153, 513499155, 1898200664, 100061805⟩),
+  (⟨260499440, 1740754222, 196736662, 1982864302, 3822622954, 2810005491, 3097757074, 3712230691, 3829109943, 450481687, 2043730212, 1823133242, 1129940321, 1847078813, 1439956824, 1609970989⟩, ⟨358051339, 1155172878, 574311474, 3793260774, 2296403221, 1772615883, 1250741347, 1717546435, 1666001707, 1669656795, 2377079708, 3010426184, 2256837254, 23038273, 1594590987, 4178549126⟩)]
+
+private def traceZkVk : List (Blake3.State × Blake3.State) := [
+  (⟨490500336, 3441671645, 4269499662, 3093595334, 4259883040, 3238921968, 4115675541, 970122145, 2366670154, 1243514261, 2668536444, 1581388527, 1957916511, 88363320, 1711466402, 4135197829⟩, ⟨2752982972, 3323210609, 1470644225, 2459678117, 3964135291, 3735363350, 1732828257, 123559917, 2985689553, 4290590025, 2537766067, 2815296332, 2975742365, 189677437, 3931758437, 2362405383⟩),
+  (⟨833840487, 2103220866, 117531123, 898424410, 1044981818, 191425660, 1758157455, 1037148980, 1434240720, 3925878656, 3054409616, 3637248835, 4085364331, 717413519, 1539573301, 4194530903⟩, ⟨2811937628, 210714085, 3257152624, 3999487258, 319961785, 1760798273, 2331239053, 3856278492, 2420162875, 4086305295, 2413323428, 1603669521, 1129313576, 1629195354, 149865085, 3501097352⟩),
+  (⟨3336868694, 2216047646, 4261573650, 3955836377, 2825191263, 1641732030, 4287888268, 225008138, 350978228, 3824718024, 1216556235, 2737228261, 3272034276, 2280417824, 3827991089, 1242740545⟩, ⟨3039017785, 168162182, 2122781233, 30517520, 2492330463, 3899280556, 1414426672, 2550543129, 1879230681, 3217611173, 3108111953, 920081989, 727862195, 3067788190, 348575961, 2489939673⟩),
+  (⟨4042116949, 547713575, 306656290, 192903230, 3371692192, 3771648556, 989859694, 3660029662, 3703861849, 1229989765, 1162071126, 1651045240, 2249606829, 2379942198, 826867698, 2158071669⟩, ⟨3992321933, 1868701203, 2574622932, 1633834348, 3979539342, 1060086382, 3864802819, 929722804, 406722511, 2165209171, 2877814315, 3393858542, 2695387843, 1631798209, 3456685868, 514485314⟩),
+  (⟨3879462241, 1397061263, 1615238352, 3604018060, 1465839369, 2710395383, 2695701425, 1253858449, 2741335789, 1646218718, 3068486953, 1613391049, 3780043678, 1573914041, 157400357, 3934106229⟩, ⟨2598570930, 2976348939, 3887553093, 1006598937, 594990427, 2136017311, 2007313717, 2493868927, 23165380, 422823048, 1244304966, 2446405870, 3083385193, 4203003928, 1466191708, 102223465⟩),
+  (⟨524389442, 2792009762, 2484266709, 318437991, 3734754823, 2350053016, 1872114968, 1451638761, 755804378, 2093573950, 4289516396, 2398950093, 3544655237, 518183034, 3982243054, 3560573740⟩, ⟨1772229738, 2036560700, 1016604824, 1973840261, 2517257601, 3214231544, 1771415403, 731707467, 3975129836, 499100007, 2390992709, 606448929, 369508650, 2122186028, 3586036185, 81810539⟩),
+  (⟨2435194280, 783480011, 724183097, 1245350314, 1862415758, 1751521981, 241438841, 1435971560, 274955402, 2990578334, 578885194, 1667290096, 45213684, 1315482290, 659005415, 159351084⟩, ⟨3516363574, 2452772106, 1441452003, 2193129816, 813658820, 586314174, 1980905200, 3572300322, 2583363723, 4139950136, 2704532928, 750036318, 956457787, 1701957499, 597845791, 3311984259⟩)]
+
+/-- Kernel-checked derivation of `v6ZkMerkleLeafKey`. -/
+theorem v6ZkMerkleLeafKey_eq :
+    Blake3.deriveContextKey v6ZkMerkleLeafContext = v6ZkMerkleLeafKey :=
+  deriveContextKey_of_trace v6ZkMerkleLeafContext
+    ⟨1953265005, 1953705321, 795570785, 2049783414, 1701654379, 1701604210, 1634036783, 102,
+     0, 0, 0, 0, 0, 0, 0, 0⟩
+    traceZkMerkleLeaf
+    ⟨3719541496, 1861137226, 3161422704, 3586674602, 2778533862, 3847628827, 604021296, 1975882723,
+     1473612764, 1811214916, 167634698, 2267983654, 4098801436, 4164988893, 1663974454, 804773161⟩
+    v6ZkMerkleLeafKey (by decide) (by decide) (by decide) (by decide)
+
+/-- Kernel-checked derivation of `v6ZkMerkleCompressKey`. -/
+theorem v6ZkMerkleCompressKey_eq :
+    Blake3.deriveContextKey v6ZkMerkleCompressContext = v6ZkMerkleCompressKey :=
+  deriveContextKey_of_trace v6ZkMerkleCompressContext
+    ⟨1953265005, 1953705321, 795570785, 2049783414, 1701654379, 1701604210, 1836016431, 1936028272,
+     115, 0, 0, 0, 0, 0, 0, 0⟩
+    traceZkMerkleCompress
+    ⟨1896161050, 2733812459, 2421116029, 2689777666, 2053513816, 356736403, 3126612331, 4054080650,
+     530454276, 404496177, 2284480112, 42169571, 3827751257, 4232476894, 4283070910, 3435410632⟩
+    v6ZkMerkleCompressKey (by decide) (by decide) (by decide) (by decide)
+
+/-- Kernel-checked derivation of `v6ZkTranscriptSingleKey`. -/
+theorem v6ZkTranscriptSingleKey_eq :
+    Blake3.deriveContextKey v6ZkTranscriptSingleContext = v6ZkTranscriptSingleKey :=
+  deriveContextKey_of_trace v6ZkTranscriptSingleContext
+    ⟨1953265005, 1953705321, 795570785, 2049783414, 1920216939, 1668509281, 1953524082, 1852404527,
+     6646887, 0, 0, 0, 0, 0, 0, 0⟩
+    traceZkTranscriptSingle
+    ⟨2064113296, 2650276924, 675979668, 604833906, 3630388957, 564450683, 3878599994, 448416271,
+     4074726194, 542516346, 3124656871, 923535275, 502609270, 999529115, 2022095589, 3191851312⟩
+    v6ZkTranscriptSingleKey (by decide) (by decide) (by decide) (by decide)
+
+/-- Kernel-checked derivation of `v6ZkTranscriptBatchKey`. -/
+theorem v6ZkTranscriptBatchKey_eq :
+    Blake3.deriveContextKey v6ZkTranscriptBatchContext = v6ZkTranscriptBatchKey :=
+  deriveContextKey_of_trace v6ZkTranscriptBatchContext
+    ⟨1953265005, 1953705321, 795570785, 2049783414, 1920216939, 1668509281, 1953524082, 1952539183,
+     26723, 0, 0, 0, 0, 0, 0, 0⟩
+    traceZkTranscriptBatch
+    ⟨358051339, 1155172878, 574311474, 3793260774, 2296403221, 1772615883, 1250741347, 1717546435,
+     1666001707, 1669656795, 2377079708, 3010426184, 2256837254, 23038273, 1594590987, 4178549126⟩
+    v6ZkTranscriptBatchKey (by decide) (by decide) (by decide) (by decide)
+
+/-- Kernel-checked derivation of `v6ZkVkKey`. -/
+theorem v6ZkVkKey_eq :
+    Blake3.deriveContextKey v6ZkVkContext = v6ZkVkKey :=
+  deriveContextKey_of_trace v6ZkVkContext
+    ⟨1953265005, 1953705321, 795570785, 2049783414, 1802907499, 0, 0, 0,
+     0, 0, 0, 0, 0, 0, 0, 0⟩
+    traceZkVk
+    ⟨3516363574, 2452772106, 1441452003, 2193129816, 813658820, 586314174, 1980905200, 3572300322,
+     2583363723, 4139950136, 2704532928, 750036318, 956457787, 1701957499, 597845791, 3311984259⟩
+    v6ZkVkKey (by decide) (by decide) (by decide) (by decide)
+
 /-! ## Cryptographic BLAKE3 domains (1-to-1 mirror of `multi-stark` `Blake3Domain`) -/
 
 /-- Cryptographic domain for BLAKE3 hashing, matching `multi-stark`'s
-`p3_adapter::domain_blake3::Blake3Domain`. -/
+`p3_adapter::domain_blake3::Blake3Domain` across `v5` (plain), `v6`, and `v6-zk`. -/
 inductive Blake3Domain where
   /-- Standard unkeyed BLAKE3 (`iv`, `flags = 0`), used by legacy `v5`. -/
   | plain
@@ -291,9 +448,25 @@ inductive Blake3Domain where
   | transcriptBatch
   /-- Protocol `v6` canonical verifying-key digest (`derive_key("multi-stark/v6/vk")`). -/
   | verifyingKey
+  /-- Protocol `v6-zk` salted Merkle leaf hashing (`derive_key("multi-stark/v6-zk/merkle/leaf")`). -/
+  | zkMerkleLeaf
+  /-- Protocol `v6-zk` Merkle 2-to-1 compression (`derive_key("multi-stark/v6-zk/merkle/compress")`). -/
+  | zkMerkleCompress
+  /-- Protocol `v6-zk` single-proof transcript (`derive_key("multi-stark/v6-zk/transcript/single")`). -/
+  | zkTranscriptSingle
+  /-- Protocol `v6-zk` batch-proof transcript (`derive_key("multi-stark/v6-zk/transcript/batch")`). -/
+  | zkTranscriptBatch
+  /-- Protocol `v6-zk` canonical verifying-key digest (`derive_key("multi-stark/v6-zk/vk")`). -/
+  | zkVerifyingKey
   deriving DecidableEq, Repr
 
 namespace Blake3Domain
+
+/-- Whether a domain belongs to the `multi-stark/v6-zk` hiding-PCS namespace. -/
+def isZk : Blake3Domain → Bool
+  | .zkMerkleLeaf | .zkMerkleCompress | .zkTranscriptSingle | .zkTranscriptBatch
+  | .zkVerifyingKey => true
+  | _ => false
 
 /-- Returns the BLAKE3 `derive_key` context string, or `none` for `.plain`. -/
 def context? : Blake3Domain → Option String
@@ -303,6 +476,11 @@ def context? : Blake3Domain → Option String
   | .transcriptSingle => some v6TranscriptSingleContext
   | .transcriptBatch => some v6TranscriptBatchContext
   | .verifyingKey => some v6VkContext
+  | .zkMerkleLeaf => some v6ZkMerkleLeafContext
+  | .zkMerkleCompress => some v6ZkMerkleCompressContext
+  | .zkTranscriptSingle => some v6ZkTranscriptSingleContext
+  | .zkTranscriptBatch => some v6ZkTranscriptBatchContext
+  | .zkVerifyingKey => some v6ZkVkContext
 
 /-- Precomputed 8-word initial chaining value (`Blake3.iv` for `.plain`, or the
 `derive_key` context key for domain-separated modes). -/
@@ -313,12 +491,19 @@ def keyWords : Blake3Domain → Digest
   | .transcriptSingle => v6TranscriptSingleKey
   | .transcriptBatch => v6TranscriptBatchKey
   | .verifyingKey => v6VkKey
+  | .zkMerkleLeaf => v6ZkMerkleLeafKey
+  | .zkMerkleCompress => v6ZkMerkleCompressKey
+  | .zkTranscriptSingle => v6ZkTranscriptSingleKey
+  | .zkTranscriptBatch => v6ZkTranscriptBatchKey
+  | .zkVerifyingKey => v6ZkVkKey
 
 /-- Extra domain flags OR'd into every BLAKE3 compression (`0` for `.plain`,
 `Blake3.flagDeriveKeyMaterial` for all `derive_key` modes). -/
 def domainFlags : Blake3Domain → UInt32
   | .plain => 0
-  | .merkleLeaf | .merkleCompress | .transcriptSingle | .transcriptBatch | .verifyingKey =>
+  | .merkleLeaf | .merkleCompress | .transcriptSingle | .transcriptBatch | .verifyingKey
+  | .zkMerkleLeaf | .zkMerkleCompress | .zkTranscriptSingle | .zkTranscriptBatch
+  | .zkVerifyingKey =>
       Blake3.flagDeriveKeyMaterial
 
 /-- `keyWords` equals `Blake3.deriveContextKey` for every `derive_key` domain. -/
@@ -331,17 +516,33 @@ theorem keyWords_eq_deriveContextKey :
   | .transcriptSingle, _, rfl => v6TranscriptSingleKey_eq.symm
   | .transcriptBatch, _, rfl => v6TranscriptBatchKey_eq.symm
   | .verifyingKey, _, rfl => v6VkKey_eq.symm
+  | .zkMerkleLeaf, _, rfl => v6ZkMerkleLeafKey_eq.symm
+  | .zkMerkleCompress, _, rfl => v6ZkMerkleCompressKey_eq.symm
+  | .zkTranscriptSingle, _, rfl => v6ZkTranscriptSingleKey_eq.symm
+  | .zkTranscriptBatch, _, rfl => v6ZkTranscriptBatchKey_eq.symm
+  | .zkVerifyingKey, _, rfl => v6ZkVkKey_eq.symm
 
-/-- All six `Blake3Domain` modes have pairwise distinct `(keyWords, domainFlags)`
-BLAKE3 compression parameters. -/
+/-- All eleven `Blake3Domain` modes (`plain` + 5 `v6` + 5 `v6-zk`) have pairwise
+distinct `(keyWords, domainFlags)` BLAKE3 compression parameters. -/
 theorem mode_injective {d₁ d₂ : Blake3Domain}
     (h : (d₁.keyWords, d₁.domainFlags) = (d₂.keyWords, d₂.domainFlags)) : d₁ = d₂ := by
   cases d₁ <;> cases d₂ <;> first | rfl | (exfalso; revert h; decide)
 
-/-- All six `Blake3Domain` modes even have pairwise distinct initial chaining values
-`keyWords` (including versus `Blake3.iv`). -/
+/-- All eleven `Blake3Domain` modes even have pairwise distinct initial chaining
+values `keyWords` (including versus `Blake3.iv`), establishing unconditional
+`v6` ↔ `v6-zk` cryptographic domain separation. -/
 theorem keyWords_injective {d₁ d₂ : Blake3Domain} (h : d₁.keyWords = d₂.keyWords) : d₁ = d₂ := by
   cases d₁ <;> cases d₂ <;> first | rfl | (exfalso; revert h; decide)
+
+/-- No `v6-zk` domain shares an initial chaining value `keyWords` with any non-ZK
+(`plain` or `v6`) domain. -/
+theorem v6Zk_keyWords_ne_nonZk {d₁ d₂ : Blake3Domain}
+    (h1 : d₁.isZk = true) (h2 : d₂.isZk = false) : d₁.keyWords ≠ d₂.keyWords := by
+  intro heq
+  have hd := keyWords_injective heq
+  subst hd
+  rw [h1] at h2
+  cases h2
 
 /-- Hash a byte array under this domain (32-byte digest). -/
 def hash (d : Blake3Domain) (bytes : ByteArray) : Digest :=
@@ -457,6 +658,44 @@ def v6Batch : DomainSep where
 
 /-- Default domain separation: `multi-stark` `v6` single-proof `derive_key` mode. -/
 def standard : DomainSep := v6Single
+
+/-- Protocol `v6-zk` single-proof BLAKE3 `derive_key` domain separation, matching
+`multi-stark` `v6-zk` byte-for-byte. -/
+def v6ZkSingle : DomainSep where
+  leafContext := v6ZkMerkleLeafContext
+  compressContext := v6ZkMerkleCompressContext
+  transcriptContext := v6ZkTranscriptSingleContext
+  leafKey := v6ZkMerkleLeafKey
+  compressKey := v6ZkMerkleCompressKey
+  transcriptKey := v6ZkTranscriptSingleKey
+  leafKey_eq := v6ZkMerkleLeafKey_eq.symm
+  compressKey_eq := v6ZkMerkleCompressKey_eq.symm
+  transcriptKey_eq := v6ZkTranscriptSingleKey_eq.symm
+  leaf_ne_compress := by decide
+  leaf_ne_transcript := by decide
+  compress_ne_transcript := by decide
+  leafKey_ne_compressKey := by decide
+  leafKey_ne_transcriptKey := by decide
+  compressKey_ne_transcriptKey := by decide
+
+/-- Protocol `v6-zk` batch-proof BLAKE3 `derive_key` domain separation, matching
+`multi-stark` `v6-zk` byte-for-byte. -/
+def v6ZkBatch : DomainSep where
+  leafContext := v6ZkMerkleLeafContext
+  compressContext := v6ZkMerkleCompressContext
+  transcriptContext := v6ZkTranscriptBatchContext
+  leafKey := v6ZkMerkleLeafKey
+  compressKey := v6ZkMerkleCompressKey
+  transcriptKey := v6ZkTranscriptBatchKey
+  leafKey_eq := v6ZkMerkleLeafKey_eq.symm
+  compressKey_eq := v6ZkMerkleCompressKey_eq.symm
+  transcriptKey_eq := v6ZkTranscriptBatchKey_eq.symm
+  leaf_ne_compress := by decide
+  leaf_ne_transcript := by decide
+  compress_ne_transcript := by decide
+  leafKey_ne_compressKey := by decide
+  leafKey_ne_transcriptKey := by decide
+  compressKey_ne_transcriptKey := by decide
 
 /-- A tagged BLAKE3 compression invocation `(contextKey, domainFlags, payload)`. -/
 structure KeyedInput where
@@ -831,6 +1070,163 @@ theorem ext3RowBytes_injective {r₁ r₂ : Array GoldilocksExt3}
   rw [goldilocksBytes_injective h01.1, goldilocksBytes_injective h01.2,
     goldilocksBytes_injective h12.2]
 
+/-! ## `v6-zk` 16-byte salted Merkle leaf encodings and injectivity -/
+
+/-- A 16-byte (128-bit) Merkle leaf salt (`ZK_LEAF_SALT_BYTES = 16` in
+`multi-stark/v6-zk`), stored canonically as four little-endian 32-bit words. -/
+structure Salt16 where
+  w0 : UInt32
+  w1 : UInt32
+  w2 : UInt32
+  w3 : UInt32
+  deriving DecidableEq, Repr, Inhabited
+
+/-- Canonical 16-byte little-endian encoding of a `Salt16`. -/
+def Salt16.toBytes (s : Salt16) : ByteArray :=
+  [s.w0, s.w1, s.w2, s.w3].foldl LittleEndian.pushWord32 (ByteArray.emptyWithCapacity 16)
+
+private theorem salt16_toBytes_toList (s : Salt16) :
+    s.toBytes.data.toList = [s.w0, s.w1, s.w2, s.w3].flatMap word32Bytes := by
+  unfold Salt16.toBytes
+  rw [foldl_pushWord32_toList]
+  rfl
+
+/-- Every `Salt16` encodes to exactly 16 bytes. -/
+theorem salt16_toBytes_length (s : Salt16) : s.toBytes.data.toList.length = 16 := by
+  rw [salt16_toBytes_toList]
+  simp [word32Bytes]
+
+/-- `Salt16.toBytes` is injective. -/
+theorem salt16_toBytes_injective {s₁ s₂ : Salt16} (h : s₁.toBytes = s₂.toBytes) : s₁ = s₂ := by
+  have hlist : s₁.toBytes.data.toList = s₂.toBytes.data.toList :=
+    congrArg (fun b => b.data.toList) h
+  rw [salt16_toBytes_toList, salt16_toBytes_toList] at hlist
+  have hws := flatMap_fixed_pos_injective (k := 4) (by decide)
+    (fun _ => rfl) (fun _ _ => word32Bytes_injective) hlist
+  cases s₁; cases s₂
+  simp only [List.cons.injEq, and_true] at hws
+  obtain ⟨rfl, rfl, rfl, rfl⟩ := hws
+  rfl
+
+/-- `v6-zk` salted base-field Merkle leaf byte encoding:
+`rowBytes row ++ salt.toBytes` (matching `multi-stark/v6-zk` `zk.rs`). -/
+def saltedRowBytes (row : Array Goldilocks) (salt : Salt16) : ByteArray :=
+  Hashers.rowBytes row ++ salt.toBytes
+
+/-- `v6-zk` salted cubic-extension Merkle leaf byte encoding:
+`ext3RowBytes row ++ salt.toBytes`. -/
+def saltedExt3RowBytes (row : Array GoldilocksExt3) (salt : Salt16) : ByteArray :=
+  Hashers.ext3RowBytes row ++ salt.toBytes
+
+private theorem list_append_eq_of_suffix_length {α : Type} {a₁ a₂ b₁ b₂ : List α}
+    (h : a₁ ++ b₁ = a₂ ++ b₂) (hb : b₁.length = b₂.length) : a₁ = a₂ ∧ b₁ = b₂ := by
+  have hlen : a₁.length = a₂.length := by
+    have := congrArg List.length h
+    simp only [List.length_append] at this
+    omega
+  exact List.append_inj h hlen
+
+/-- **`v6-zk` salted base-field leaf encoding is jointly injective in `(row, salt)`:**
+appending a fixed-length 16-byte salt never creates ambiguity between distinct
+rows or distinct salts. -/
+theorem saltedRowBytes_injective {r₁ r₂ : Array Goldilocks} {s₁ s₂ : Salt16}
+    (h : saltedRowBytes r₁ s₁ = saltedRowBytes r₂ s₂) : r₁ = r₂ ∧ s₁ = s₂ := by
+  have hlist : (saltedRowBytes r₁ s₁).data.toList = (saltedRowBytes r₂ s₂).data.toList :=
+    congrArg (fun b => b.data.toList) h
+  simp only [saltedRowBytes, ByteArray.data_append, Array.toList_append] at hlist
+  have hpair := list_append_eq_of_suffix_length hlist
+    (by rw [salt16_toBytes_length, salt16_toBytes_length])
+  refine ⟨rowBytes_injective ?_, salt16_toBytes_injective ?_⟩
+  · cases h1 : Hashers.rowBytes r₁; cases h2 : Hashers.rowBytes r₂
+    rw [h1, h2] at hpair
+    exact congrArg ByteArray.mk (Array.toList_inj.mp hpair.1)
+  · cases h1 : s₁.toBytes; cases h2 : s₂.toBytes
+    rw [h1, h2] at hpair
+    exact congrArg ByteArray.mk (Array.toList_inj.mp hpair.2)
+
+/-- **`v6-zk` salted cubic-extension leaf encoding is jointly injective in `(row, salt)`.** -/
+theorem saltedExt3RowBytes_injective {r₁ r₂ : Array GoldilocksExt3} {s₁ s₂ : Salt16}
+    (h : saltedExt3RowBytes r₁ s₁ = saltedExt3RowBytes r₂ s₂) : r₁ = r₂ ∧ s₁ = s₂ := by
+  have hlist : (saltedExt3RowBytes r₁ s₁).data.toList = (saltedExt3RowBytes r₂ s₂).data.toList :=
+    congrArg (fun b => b.data.toList) h
+  simp only [saltedExt3RowBytes, ByteArray.data_append, Array.toList_append] at hlist
+  have hpair := list_append_eq_of_suffix_length hlist
+    (by rw [salt16_toBytes_length, salt16_toBytes_length])
+  refine ⟨ext3RowBytes_injective ?_, salt16_toBytes_injective ?_⟩
+  · cases h1 : Hashers.ext3RowBytes r₁; cases h2 : Hashers.ext3RowBytes r₂
+    rw [h1, h2] at hpair
+    exact congrArg ByteArray.mk (Array.toList_inj.mp hpair.1)
+  · cases h1 : s₁.toBytes; cases h2 : s₂.toBytes
+    rw [h1, h2] at hpair
+    exact congrArg ByteArray.mk (Array.toList_inj.mp hpair.2)
+
+/-- Domain-separated `v6-zk` salted base-field Merkle leaf invocation input. -/
+def saltedLeafInput (sep : DomainSep) (row : Array Goldilocks) (salt : Salt16) : KeyedInput :=
+  sep.leafInput (saltedRowBytes row salt)
+
+/-- Domain-separated `v6-zk` salted cubic-extension Merkle leaf invocation input. -/
+def saltedExt3LeafInput (sep : DomainSep) (row : Array GoldilocksExt3) (salt : Salt16) :
+    KeyedInput :=
+  sep.leafInput (saltedExt3RowBytes row salt)
+
+/-- `saltedLeafInput` is jointly injective in `(row, salt)` under any `DomainSep`. -/
+theorem saltedLeafInput_injective (sep : DomainSep) {r₁ r₂ : Array Goldilocks} {s₁ s₂ : Salt16}
+    (h : sep.saltedLeafInput r₁ s₁ = sep.saltedLeafInput r₂ s₂) : r₁ = r₂ ∧ s₁ = s₂ := by
+  have hp : saltedRowBytes r₁ s₁ = saltedRowBytes r₂ s₂ := by
+    simpa [saltedLeafInput, leafInput] using congrArg KeyedInput.payload h
+  exact saltedRowBytes_injective hp
+
+/-- `saltedExt3LeafInput` is jointly injective in `(row, salt)` under any `DomainSep`. -/
+theorem saltedExt3LeafInput_injective (sep : DomainSep) {r₁ r₂ : Array GoldilocksExt3}
+    {s₁ s₂ : Salt16}
+    (h : sep.saltedExt3LeafInput r₁ s₁ = sep.saltedExt3LeafInput r₂ s₂) : r₁ = r₂ ∧ s₁ = s₂ := by
+  have hp : saltedExt3RowBytes r₁ s₁ = saltedExt3RowBytes r₂ s₂ := by
+    simpa [saltedExt3LeafInput, leafInput] using congrArg KeyedInput.payload h
+  exact saltedExt3RowBytes_injective hp
+
+/-- A salted leaf invocation never collides with an internal Merkle node invocation. -/
+theorem saltedLeafInput_ne_nodeInput (sep : DomainSep) (row : Array Goldilocks) (salt : Salt16)
+    (left right : Digest) :
+    sep.saltedLeafInput row salt ≠ sep.nodeInput left right :=
+  sep.leafInput_ne_nodeInput (saltedRowBytes row salt) left right
+
+/-- A salted leaf invocation never collides with a 48B internal Merkle node invocation. -/
+theorem saltedLeafInput_ne_node48Input (sep : DomainSep) (row : Array Goldilocks) (salt : Salt16)
+    (left right : Digest48) :
+    sep.saltedLeafInput row salt ≠ sep.node48Input left right :=
+  sep.leafInput_ne_node48Input (saltedRowBytes row salt) left right
+
+/-- A salted leaf invocation never collides with a Fiat–Shamir transcript invocation. -/
+theorem saltedLeafInput_ne_transcriptInput (sep : DomainSep) (row : Array Goldilocks)
+    (salt : Salt16) (input : ByteArray) :
+    sep.saltedLeafInput row salt ≠ sep.transcriptInput input :=
+  sep.leafInput_ne_transcriptInput (saltedRowBytes row salt) input
+
+/-- A `v6-zk` salted leaf invocation never collides with a non-ZK `v6` leaf invocation. -/
+theorem v6Zk_leafInput_ne_v6_leafInput (p₁ p₂ : ByteArray) :
+    v6ZkSingle.leafInput p₁ ≠ v6Single.leafInput p₂ :=
+  fun h => (by decide : v6ZkMerkleLeafKey ≠ v6MerkleLeafKey) (congrArg KeyedInput.contextKey h)
+
+/-- A `v6-zk` internal node invocation never collides with a non-ZK `v6` internal node invocation. -/
+theorem v6Zk_nodeInput_ne_v6_nodeInput (l₁ r₁ l₂ r₂ : Digest) :
+    v6ZkSingle.nodeInput l₁ r₁ ≠ v6Single.nodeInput l₂ r₂ :=
+  fun h =>
+    (by decide : v6ZkMerkleCompressKey ≠ v6MerkleCompressKey) (congrArg KeyedInput.contextKey h)
+
+/-- A `v6-zk` single-proof transcript invocation never collides with a non-ZK `v6` transcript. -/
+theorem v6Zk_transcriptSingle_ne_v6_transcriptSingle (p₁ p₂ : ByteArray) :
+    v6ZkSingle.transcriptInput p₁ ≠ v6Single.transcriptInput p₂ :=
+  fun h =>
+    (by decide : v6ZkTranscriptSingleKey ≠ v6TranscriptSingleKey)
+      (congrArg KeyedInput.contextKey h)
+
+/-- A `v6-zk` batch-proof transcript invocation never collides with a non-ZK `v6` transcript. -/
+theorem v6Zk_transcriptBatch_ne_v6_transcriptBatch (p₁ p₂ : ByteArray) :
+    v6ZkBatch.transcriptInput p₁ ≠ v6Batch.transcriptInput p₂ :=
+  fun h =>
+    (by decide : v6ZkTranscriptBatchKey ≠ v6TranscriptBatchKey)
+      (congrArg KeyedInput.contextKey h)
+
 end DomainSep
 
 /-! ## Native BLAKE3 `derive_key` Merkle hashers and Fiat–Shamir challengers -/
@@ -901,5 +1297,25 @@ def challenger3Xof48 (sep : DomainSep := .standard) :
     | .digest d => s.observeBytes d.toBytes
   sampleExt := ChallengerState.sampleExt3 (blake3TranscriptXof48 sep)
   sampleBits := ChallengerState.sampleBits (blake3TranscriptXof48 sep)
+
+/-- `v6-zk` salted Merkle leaf hash (32-byte digest) under `ZkMerkleLeaf`. -/
+def hashSaltedRow (row : Array Goldilocks) (salt : DomainSep.Salt16) : Digest :=
+  Blake3Domain.zkMerkleLeaf.hash (DomainSep.saltedRowBytes row salt)
+
+/-- `v6-zk` salted Merkle leaf hash (48-byte XOF digest) under `ZkMerkleLeaf`. -/
+def hashSaltedRowXof48 (row : Array Goldilocks) (salt : DomainSep.Salt16) : Digest48 :=
+  Blake3Domain.zkMerkleLeaf.hashXof48 (DomainSep.saltedRowBytes row salt)
+
+/-- `multi-stark` `v6-zk` single-proof challenger over `Goldilocks` / `GoldilocksExt3`. -/
+def challenger3V6ZkSingle : Challenger ChallengerState Goldilocks GoldilocksExt3 Digest :=
+  challenger3Sep .v6ZkSingle
+
+/-- `multi-stark` `v6-zk` batch-proof challenger over `Goldilocks` / `GoldilocksExt3`. -/
+def challenger3V6ZkBatch : Challenger ChallengerState Goldilocks GoldilocksExt3 Digest :=
+  challenger3Sep .v6ZkBatch
+
+/-- 48-byte XOF `multi-stark` `v6-zk` single-proof challenger over `Goldilocks` / `GoldilocksExt3`. -/
+def challenger3V6ZkXof48 : Challenger ChallengerState Goldilocks GoldilocksExt3 Digest48 :=
+  challenger3Xof48 .v6ZkSingle
 
 end CertiFri.P3

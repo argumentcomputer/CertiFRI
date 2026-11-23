@@ -29,12 +29,18 @@ open CertiFri CertiFri.P3
 def v6Pattern (len : Nat) : ByteArray :=
   ByteArray.mk (Array.ofFn (n := len) fun i => ((i.val * 37 + 13) % 256).toUInt8)
 
--- Exact context keys shared with `cuda/kernels.cu` (`BLAKE3_V6_LEAF_CV`, `BLAKE3_V6_COMPRESS_CV`).
+-- Exact context keys shared with `cuda/kernels.cu` (`BLAKE3_V6_LEAF_CV`, `BLAKE3_V6_COMPRESS_CV`,
+-- `BLAKE3_V6ZK_LEAF_CV`, `BLAKE3_V6ZK_COMPRESS_CV`).
 #guard Blake3.deriveContextKey v6MerkleLeafContext == v6MerkleLeafKey
 #guard Blake3.deriveContextKey v6MerkleCompressContext == v6MerkleCompressKey
 #guard Blake3.deriveContextKey v6TranscriptSingleContext == v6TranscriptSingleKey
 #guard Blake3.deriveContextKey v6TranscriptBatchContext == v6TranscriptBatchKey
 #guard Blake3.deriveContextKey v6VkContext == v6VkKey
+#guard Blake3.deriveContextKey v6ZkMerkleLeafContext == v6ZkMerkleLeafKey
+#guard Blake3.deriveContextKey v6ZkMerkleCompressContext == v6ZkMerkleCompressKey
+#guard Blake3.deriveContextKey v6ZkTranscriptSingleContext == v6ZkTranscriptSingleKey
+#guard Blake3.deriveContextKey v6ZkTranscriptBatchContext == v6ZkTranscriptBatchKey
+#guard Blake3.deriveContextKey v6ZkVkContext == v6ZkVkKey
 
 -- Exact `domain_blake3.rs` `cuda_v6_blake3_and_ext3_vectors_match_rust` MerkleLeaf vectors
 -- across single-block (64B), multi-block (512B), 1-chunk (1024B), and multi-chunk (1025B, 4264B).
@@ -62,18 +68,28 @@ def rampRight : Digest := (Digest.ofBytes? (ramp64.extract 32 64)).getD default
 #guard baseHasherSep.compress rampLeft rampRight
   == Blake3Domain.merkleCompress.hash ramp64
 
-/-! ## Pairwise separation across all 6 `Blake3Domain` modes -/
+/-! ## Pairwise separation across all 11 `Blake3Domain` modes (`plain` + 5 `v6` + 5 `v6-zk`) -/
 
 def allDomains : List Blake3Domain :=
-  [.plain, .merkleLeaf, .merkleCompress, .transcriptSingle, .transcriptBatch, .verifyingKey]
+  [.plain, .merkleLeaf, .merkleCompress, .transcriptSingle, .transcriptBatch, .verifyingKey,
+   .zkMerkleLeaf, .zkMerkleCompress, .zkTranscriptSingle, .zkTranscriptBatch, .zkVerifyingKey]
 
 #guard
   let digests := allDomains.map fun d => d.hash ramp64
-  digests.eraseDups.length == 6
+  digests.eraseDups.length == 11
 
 #guard
   let digests := allDomains.map fun d => d.hash (v6Pattern 1025)
-  digests.eraseDups.length == 6
+  digests.eraseDups.length == 11
+
+-- `v6-zk` salted leaf hashing distinguishes distinct salts on the same row and stays distinct from `v6`.
+#guard
+  let row := #[Goldilocks.ofUInt64 10, Goldilocks.ofUInt64 20]
+  let saltA : DomainSep.Salt16 := ⟨1, 2, 3, 4⟩
+  let saltB : DomainSep.Salt16 := ⟨1, 2, 3, 5⟩
+  hashSaltedRow row saltA != hashSaltedRow row saltB
+    && hashSaltedRow row saltA != baseHasherSep.hashRows row
+    && (hashSaltedRowXof48 row saltA).prefix32 == hashSaltedRow row saltA
 
 /-! ## Role separation & Merkle/challenger integration -/
 

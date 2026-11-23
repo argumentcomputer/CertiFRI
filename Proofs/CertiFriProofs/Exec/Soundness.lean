@@ -53,11 +53,12 @@ answering the queries that were not made.
 
 ## What is not covered
 
-* The Plonky3 instantiation (`CertiFriP3`): that its field arithmetic is a
-  `FieldModel`, and anything about BLAKE3 or its challenger.
+* The Plonky3 instantiation (`CertiFriP3`): anything about BLAKE3 or its
+  challenger. That its fields are a `FieldModel` and satisfy `WellFormed` is
+  proved in `P3/GoldilocksModel.lean` and `P3/GoldilocksSoundness.lean`.
 * An adversary that chooses the shape of the claims. The shape is fixed before
   the adversary runs, and is not absorbed into the transcript.
-* Completeness: that honest proofs are accepted is tested, not proved.
+* Completeness, which is `Exec/Completeness.lean`.
 -/
 
 namespace CertiFri.Exec

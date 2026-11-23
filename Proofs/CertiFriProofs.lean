@@ -76,3 +76,14 @@ import CertiFriProofs.Exec.Stark.SoundnessBatch
 import CertiFriProofs.Exec.Stark.Unconditional
 import CertiFriProofs.Exec.Stark.Lookups
 import CertiFriProofs.Theory.Stark.BalanceInt
+import CertiFriProofs.P3.Primes
+import CertiFriProofs.P3.PrimeRep
+import CertiFriProofs.P3.Binomial
+import CertiFriProofs.P3.Model
+import CertiFriProofs.P3.GoldilocksWord
+import CertiFriProofs.P3.FpLaws
+import CertiFriProofs.P3.QuarticLaws
+import CertiFriProofs.P3.GoldilocksModel
+import CertiFriProofs.P3.BabyBearModel
+import CertiFriProofs.P3.Bn254Model
+import CertiFriProofs.P3.GoldilocksSoundness

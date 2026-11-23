@@ -27,8 +27,10 @@ security proof needs of them.
 
 ## Assumptions
 
-These are laws of the field implementation, to be proved of a concrete one
-(for Goldilocks and its quadratic extension they are not proved here).
+These are laws of the field implementation, to be proved of a concrete one.
+They are proved for Goldilocks and its quadratic extension
+(`P3/GoldilocksModel.lean`) and for BabyBear and its quartic extension
+(`P3/BabyBearModel.lean`).
 Linear independence of the basis is not among them: the proofs use only that
 an element is the combination of the basis with its coordinates.
 -/

@@ -12,8 +12,11 @@ the verifier is written against: `FieldOps` and
 An element is `c0 + c1 * X`. The basis is `(1, X)`: `c0` is the coordinate
 Plonky3's `as_basis_coefficients_slice` lists first.
 
-Nothing is proved here. The operations are tested against values computed by
-Plonky3 (`CertiFriTest/P3/GoldilocksExt.lean`).
+Nothing is proved in this package. That `X^2 - 7` is irreducible and that the
+operations are those of the field `Goldilocks[X] / (X^2 - 7)` is proved in the
+proofs package (`Proofs/CertiFriProofs/P3/GoldilocksModel.lean`). The
+operations are also tested against values computed by Plonky3
+(`CertiFriTest/P3/GoldilocksExt.lean`).
 
 Not covered: the other extensions of Goldilocks that Plonky3 defines, and the
 two-adic structure of the extension, which the verifier does not use.

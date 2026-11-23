@@ -12,8 +12,9 @@ autoImplicit = false
 [[lean_lib]]
 name = "CertiFri"
 
-# The Plonky3 instantiation of the verifier's primitives: Goldilocks, BLAKE3,
-# the challenger, proof decoding. Tested against Plonky3, not proved.
+# The Plonky3 instantiation of the verifier's primitives: the fields, BLAKE3,
+# the challenger, proof decoding. Tested against Plonky3; the laws of the
+# fields are proved in `Proofs/`.
 [[lean_lib]]
 name = "CertiFriP3"
 

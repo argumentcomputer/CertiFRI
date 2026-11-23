@@ -1,0 +1,15 @@
+[package]
+name = "certifri-field-vectors"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Generator of the Plonky3 reference values for BabyBear, its quartic extension and the scalar field of BN254 that the Lean tests hold."
+
+# This package is its own workspace: it is not a member of any enclosing one.
+[workspace]
+
+# Plonky3 is the checkout of the `plonky3/` submodule (revision `0d803737`).
+[dependencies]
+p3-field = { path = "../../../plonky3/field" }
+p3-baby-bear = { path = "../../../plonky3/baby-bear" }
+p3-bn254 = { path = "../../../plonky3/bn254" }

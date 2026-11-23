@@ -576,4 +576,280 @@ info: 'CertiFri.P3.Exec.goldilocksExt3_v6Zk_soundness_xof48_johnson_128' depends
 #guard_msgs in
 #print axioms negControl_zk_trap4_v6_domain_rejected
 
+/-! ## Unconditional `CurveListCA` Discharge & 128-Bit Johnson Audit (`lb = 2, 3, 4` & `v6-zk`) -/
+
+/-- info: curveListCA_fp3 : CurveListCA Fp3Model CurveListCAProof.curveListThreshold -/
+#guard_msgs in
+#check @curveListCA_fp3
+
+/--
+info: @johnson_71_128_ge_128_pow20_le_three_quarters_128 : ∀ {q : ℕ}, 128 ≤ q → (71 / 128) ^ q / 2 ^ 20 ≤ 3 / 4 / 2 ^ 128
+-/
+#guard_msgs in
+#check @johnson_71_128_ge_128_pow20_le_three_quarters_128
+
+/--
+info: @johnson_135_256_ge_118_pow20_le_three_quarters_128 : ∀ {q : ℕ}, 118 ≤ q → (135 / 256) ^ q / 2 ^ 20 ≤ 3 / 4 / 2 ^ 128
+-/
+#guard_msgs in
+#check @johnson_135_256_ge_118_pow20_le_three_quarters_128
+
+/--
+info: @johnson_19_50_ge_78_pow20_le_three_quarters_128 : ∀ {q : ℕ}, 78 ≤ q → (19 / 50) ^ q / 2 ^ 20 ≤ 3 / 4 / 2 ^ 128
+-/
+#guard_msgs in
+#check @johnson_19_50_ge_78_pow20_le_three_quarters_128
+
+/--
+info: @johnson_35_128_ge_58_pow20_le_three_quarters_128 : ∀ {q : ℕ}, 58 ≤ q → (35 / 128) ^ q / 2 ^ 20 ≤ 3 / 4 / 2 ^ 128
+-/
+#guard_msgs in
+#check @johnson_35_128_ge_58_pow20_le_three_quarters_128
+
+/-- Signature lock: **100% UNCONDITIONAL** (zero `CurveListCA` assumption!)
+literal `≤ N / 2 ^ 128` Johnson `(lb = 2, q ≥ 128, queryPow = 20)` executable
+soundness under 48B BLAKE3 XOF and incremental sponge chaining. -/
+example (params : FriParams) (shape : ClaimShape)
+    (hbl : params.logBlowup = 2) (hqn : 128 ≤ params.numQueries) (hqpow : params.queryPowBits = 20)
+    (hmax : Fri.logMaxHeight params.logBlowup shape ≤ 32)
+    (hheight : params.logFinalHeight ≤ Fri.logMaxHeight params.logBlowup shape)
+    (hclaims : (Fri.claimRefs params.logBlowup shape).length *
+        2 ^ Fri.logMaxHeight params.logBlowup shape ≤ 2 ^ 36)
+    (s₀ : Digest48) {A : Type*}
+    {adv : OracleComp (SpongeOracleAnswer (D := Digest48) goldilocksExt3_fieldModel params shape
+      (goldilocksExt3_wellFormed params shape hmax)) A}
+    {Q : ℕ} (hadv : adv.QueryBound Q)
+    (hN : Q + ((modelParams goldilocksExt3_fieldModel params shape
+        (goldilocksExt3_wellFormed params shape hmax)).batches +
+      ((modelParams goldilocksExt3_fieldModel params shape
+        (goldilocksExt3_wellFormed params shape hmax)).rounds + 2)) +
+      (modelParams goldilocksExt3_fieldModel params shape
+        (goldilocksExt3_wellFormed params shape hmax)).verifierQueries ≤ 2 ^ 128)
+    (attempt : A → Attempt Goldilocks GoldilocksExt3 Digest48) :
+    let wf := goldilocksExt3_wellFormed params shape hmax
+    let P := modelParams goldilocksExt3_fieldModel params shape wf
+    let N : ℕ := Q + (P.batches + (P.rounds + 2)) + P.verifierQueries
+    prob (fun res l =>
+        (∃ f : ∀ x, SpongeOracleAnswer (D := Digest48) goldilocksExt3_fieldModel params shape wf x,
+          (∀ x y, l.dlookup x = some y → f x = y) ∧
+            spongeAccepts goldilocksExt3_fieldModel params shape wf s₀ f (attempt res.1) = true) ∧
+        PcsRbr.ClaimsFail P.ldt P.shift (71 / 128)
+          (P.claims (view goldilocksExt3_fieldModel params shape
+            (Fri.firstMessage (attempt res.1).commitments
+              (attempt res.1).points (attempt res.1).values)) (spongeCommittedRow l)))
+      (spongeExperiment goldilocksExt3_fieldModel params shape wf s₀ adv attempt) [] ≤
+      (N : ℝ) / (2 : ℝ) ^ 128 :=
+  goldilocksExt3_soundness_sponge_xof48_johnson_128_unconditional params shape hbl hqn hqpow
+    hmax hheight hclaims s₀ hadv hN attempt
+
+/-- Signature lock: **100% UNCONDITIONAL** (zero `CurveListCA` assumption!)
+literal `≤ N / 2 ^ 128` Johnson `(lb = 2, q ≥ 118, queryPow = 20)` executable
+soundness under 48B BLAKE3 XOF. -/
+example (params : FriParams) (shape : ClaimShape)
+    (hbl : params.logBlowup = 2) (hqn : 118 ≤ params.numQueries) (hqpow : params.queryPowBits = 20)
+    (hmax : Fri.logMaxHeight params.logBlowup shape ≤ 30)
+    (hheight : params.logFinalHeight ≤ Fri.logMaxHeight params.logBlowup shape)
+    (hclaims : (Fri.claimRefs params.logBlowup shape).length *
+        2 ^ Fri.logMaxHeight params.logBlowup shape ≤ 2 ^ 31)
+    (s₀ : Digest48) {A : Type*}
+    {adv : OracleComp (SpongeOracleAnswer (D := Digest48) goldilocksExt3_fieldModel params shape
+      (goldilocksExt3_wellFormed params shape (hmax.trans (by decide)))) A}
+    {Q : ℕ} (hadv : adv.QueryBound Q)
+    (hN : Q + ((modelParams goldilocksExt3_fieldModel params shape
+        (goldilocksExt3_wellFormed params shape (hmax.trans (by decide)))).batches +
+      ((modelParams goldilocksExt3_fieldModel params shape
+        (goldilocksExt3_wellFormed params shape (hmax.trans (by decide)))).rounds + 2)) +
+      (modelParams goldilocksExt3_fieldModel params shape
+        (goldilocksExt3_wellFormed params shape (hmax.trans (by decide)))).verifierQueries ≤ 2 ^ 128)
+    (attempt : A → Attempt Goldilocks GoldilocksExt3 Digest48) :
+    let wf := goldilocksExt3_wellFormed params shape (hmax.trans (by decide))
+    let P := modelParams goldilocksExt3_fieldModel params shape wf
+    let N : ℕ := Q + (P.batches + (P.rounds + 2)) + P.verifierQueries
+    prob (fun res l =>
+        (∃ f : ∀ x, SpongeOracleAnswer (D := Digest48) goldilocksExt3_fieldModel params shape wf x,
+          (∀ x y, l.dlookup x = some y → f x = y) ∧
+            spongeAccepts goldilocksExt3_fieldModel params shape wf s₀ f (attempt res.1) = true) ∧
+        PcsRbr.ClaimsFail P.ldt P.shift (135 / 256)
+          (P.claims (view goldilocksExt3_fieldModel params shape
+            (Fri.firstMessage (attempt res.1).commitments
+              (attempt res.1).points (attempt res.1).values)) (spongeCommittedRow l)))
+      (spongeExperiment goldilocksExt3_fieldModel params shape wf s₀ adv attempt) [] ≤
+      (N : ℝ) / (2 : ℝ) ^ 128 :=
+  goldilocksExt3_soundness_sponge_xof48_johnson_118_128_unconditional params shape hbl hqn hqpow
+    hmax hheight hclaims s₀ hadv hN attempt
+
+/-- Signature lock: **100% UNCONDITIONAL** Native STARK Shrinker Johnson
+`(lb = 3, q ≥ 78, queryPow = 20)` executable soundness (`≤ N / 2 ^ 128`). -/
+example (params : FriParams) (shape : ClaimShape)
+    (hbl : params.logBlowup = 3) (hqn : 78 ≤ params.numQueries) (hqpow : params.queryPowBits = 20)
+    (hmax : Fri.logMaxHeight params.logBlowup shape ≤ 31)
+    (hheight : params.logFinalHeight ≤ Fri.logMaxHeight params.logBlowup shape)
+    (hclaims : (Fri.claimRefs params.logBlowup shape).length *
+        2 ^ Fri.logMaxHeight params.logBlowup shape ≤ 2 ^ 32)
+    (s₀ : Digest48) {A : Type*}
+    {adv : OracleComp (SpongeOracleAnswer (D := Digest48) goldilocksExt3_fieldModel params shape
+      (goldilocksExt3_wellFormed params shape (hmax.trans (by decide)))) A}
+    {Q : ℕ} (hadv : adv.QueryBound Q)
+    (hN : Q + ((modelParams goldilocksExt3_fieldModel params shape
+        (goldilocksExt3_wellFormed params shape (hmax.trans (by decide)))).batches +
+      ((modelParams goldilocksExt3_fieldModel params shape
+        (goldilocksExt3_wellFormed params shape (hmax.trans (by decide)))).rounds + 2)) +
+      (modelParams goldilocksExt3_fieldModel params shape
+        (goldilocksExt3_wellFormed params shape (hmax.trans (by decide)))).verifierQueries ≤ 2 ^ 128)
+    (attempt : A → Attempt Goldilocks GoldilocksExt3 Digest48) :
+    let wf := goldilocksExt3_wellFormed params shape (hmax.trans (by decide))
+    let P := modelParams goldilocksExt3_fieldModel params shape wf
+    let N : ℕ := Q + (P.batches + (P.rounds + 2)) + P.verifierQueries
+    prob (fun res l =>
+        (∃ f : ∀ x, SpongeOracleAnswer (D := Digest48) goldilocksExt3_fieldModel params shape wf x,
+          (∀ x y, l.dlookup x = some y → f x = y) ∧
+            spongeAccepts goldilocksExt3_fieldModel params shape wf s₀ f (attempt res.1) = true) ∧
+        PcsRbr.ClaimsFail P.ldt P.shift (19 / 50)
+          (P.claims (view goldilocksExt3_fieldModel params shape
+            (Fri.firstMessage (attempt res.1).commitments
+              (attempt res.1).points (attempt res.1).values)) (spongeCommittedRow l)))
+      (spongeExperiment goldilocksExt3_fieldModel params shape wf s₀ adv attempt) [] ≤
+      (N : ℝ) / (2 : ℝ) ^ 128 :=
+  goldilocksExt3_soundness_sponge_xof48_johnson_lb3_78_128_unconditional params shape hbl hqn hqpow
+    hmax hheight hclaims s₀ hadv hN attempt
+
+/-- Signature lock: **100% UNCONDITIONAL** Native STARK Shrinker Johnson
+`(lb = 4, q ≥ 58, queryPow = 20)` executable soundness (`≤ N / 2 ^ 128`). -/
+example (params : FriParams) (shape : ClaimShape)
+    (hbl : params.logBlowup = 4) (hqn : 58 ≤ params.numQueries) (hqpow : params.queryPowBits = 20)
+    (hmax : Fri.logMaxHeight params.logBlowup shape ≤ 32)
+    (hheight : params.logFinalHeight ≤ Fri.logMaxHeight params.logBlowup shape)
+    (hclaims : (Fri.claimRefs params.logBlowup shape).length *
+        2 ^ Fri.logMaxHeight params.logBlowup shape ≤ 2 ^ 33)
+    (s₀ : Digest48) {A : Type*}
+    {adv : OracleComp (SpongeOracleAnswer (D := Digest48) goldilocksExt3_fieldModel params shape
+      (goldilocksExt3_wellFormed params shape hmax)) A}
+    {Q : ℕ} (hadv : adv.QueryBound Q)
+    (hN : Q + ((modelParams goldilocksExt3_fieldModel params shape
+        (goldilocksExt3_wellFormed params shape hmax)).batches +
+      ((modelParams goldilocksExt3_fieldModel params shape
+        (goldilocksExt3_wellFormed params shape hmax)).rounds + 2)) +
+      (modelParams goldilocksExt3_fieldModel params shape
+        (goldilocksExt3_wellFormed params shape hmax)).verifierQueries ≤ 2 ^ 128)
+    (attempt : A → Attempt Goldilocks GoldilocksExt3 Digest48) :
+    let wf := goldilocksExt3_wellFormed params shape hmax
+    let P := modelParams goldilocksExt3_fieldModel params shape wf
+    let N : ℕ := Q + (P.batches + (P.rounds + 2)) + P.verifierQueries
+    prob (fun res l =>
+        (∃ f : ∀ x, SpongeOracleAnswer (D := Digest48) goldilocksExt3_fieldModel params shape wf x,
+          (∀ x y, l.dlookup x = some y → f x = y) ∧
+            spongeAccepts goldilocksExt3_fieldModel params shape wf s₀ f (attempt res.1) = true) ∧
+        PcsRbr.ClaimsFail P.ldt P.shift (35 / 128)
+          (P.claims (view goldilocksExt3_fieldModel params shape
+            (Fri.firstMessage (attempt res.1).commitments
+              (attempt res.1).points (attempt res.1).values)) (spongeCommittedRow l)))
+      (spongeExperiment goldilocksExt3_fieldModel params shape wf s₀ adv attempt) [] ≤
+      (N : ℝ) / (2 : ℝ) ^ 128 :=
+  goldilocksExt3_soundness_sponge_xof48_johnson_lb4_58_128_unconditional params shape hbl hqn hqpow
+    hmax hheight hclaims s₀ hadv hN attempt
+
+/-- Signature lock: **100% UNCONDITIONAL** `multi-stark/v6-zk` Johnson
+`(lb = 2, q ≥ 128, queryPow = 20)` executable soundness (`≤ N / 2 ^ 128`). -/
+example (cfg : ZkConfig) (hcfg : ZkGuardrailsOk cfg)
+    (params : FriParams) (shape : ClaimShape)
+    (hbl : params.logBlowup = cfg.logBlowup) (hbl2 : cfg.logBlowup = 2)
+    (hqn : params.numQueries = cfg.numQueries) (hqn128 : 128 ≤ cfg.numQueries)
+    (hqpow : params.queryPowBits = 20)
+    (hmax : Fri.logMaxHeight params.logBlowup shape ≤ cfg.logTraceHeight + 1 + cfg.logBlowup)
+    (hheight : params.logFinalHeight ≤ Fri.logMaxHeight params.logBlowup shape)
+    (hclaims : (Fri.claimRefs params.logBlowup shape).length *
+        2 ^ Fri.logMaxHeight params.logBlowup shape ≤ 2 ^ 36)
+    (s₀ : Digest48) {A : Type*}
+    {adv : OracleComp (SpongeOracleAnswer (D := Digest48) goldilocksExt3_fieldModel params shape
+      (goldilocksExt3_wellFormed params shape (hmax.trans hcfg.2.1))) A}
+    {Q : ℕ} (hadv : adv.QueryBound Q)
+    (hN : Q + ((modelParams goldilocksExt3_fieldModel params shape
+        (goldilocksExt3_wellFormed params shape (hmax.trans hcfg.2.1))).batches +
+      ((modelParams goldilocksExt3_fieldModel params shape
+        (goldilocksExt3_wellFormed params shape (hmax.trans hcfg.2.1))).rounds + 2)) +
+      (modelParams goldilocksExt3_fieldModel params shape
+        (goldilocksExt3_wellFormed params shape (hmax.trans hcfg.2.1))).verifierQueries ≤ 2 ^ 128)
+    (attempt : A → Attempt Goldilocks GoldilocksExt3 Digest48) :
+    let wf := goldilocksExt3_wellFormed params shape (hmax.trans hcfg.2.1)
+    let P := modelParams goldilocksExt3_fieldModel params shape wf
+    let N : ℕ := Q + (P.batches + (P.rounds + 2)) + P.verifierQueries
+    prob (fun res l =>
+        (∃ f : ∀ x, SpongeOracleAnswer (D := Digest48) goldilocksExt3_fieldModel params shape wf x,
+          (∀ x y, l.dlookup x = some y → f x = y) ∧
+            spongeAccepts goldilocksExt3_fieldModel params shape wf s₀ f (attempt res.1) = true) ∧
+        PcsRbr.ClaimsFail P.ldt P.shift (71 / 128)
+          (P.claims (view goldilocksExt3_fieldModel params shape
+            (Fri.firstMessage (attempt res.1).commitments
+              (attempt res.1).points (attempt res.1).values)) (spongeCommittedRow l)))
+      (spongeExperiment goldilocksExt3_fieldModel params shape wf s₀ adv attempt) [] ≤
+      (N : ℝ) / (2 : ℝ) ^ 128 :=
+  goldilocksExt3_v6Zk_soundness_xof48_johnson_128_unconditional cfg hcfg params shape
+    hbl hbl2 hqn hqn128 hqpow hmax hheight hclaims s₀ hadv hN attempt
+
+/--
+info: 'CertiFri.CurveListCAProof.curveListCA_of_fintype_char' depends on axioms: [propext, Classical.choice, Quot.sound]
+-/
+#guard_msgs in
+#print axioms CurveListCAProof.curveListCA_of_fintype_char
+
+/-- info: 'CertiFri.P3.Exec.curveListCA_fp3' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms curveListCA_fp3
+
+/--
+info: 'CertiFri.P3.Exec.goldilocksExt3_soundness_sponge_xof48_johnson_128_unconditional' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound]
+-/
+#guard_msgs in
+#print axioms goldilocksExt3_soundness_sponge_xof48_johnson_128_unconditional
+
+/--
+info: 'CertiFri.P3.Exec.goldilocksExt3_soundness_sponge_xof48_johnson_118_128_unconditional' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound]
+-/
+#guard_msgs in
+#print axioms goldilocksExt3_soundness_sponge_xof48_johnson_118_128_unconditional
+
+/--
+info: 'CertiFri.P3.Exec.goldilocksExt3_soundness_sponge_xof48_johnson_lb3_78_128_unconditional' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound]
+-/
+#guard_msgs in
+#print axioms goldilocksExt3_soundness_sponge_xof48_johnson_lb3_78_128_unconditional
+
+/--
+info: 'CertiFri.P3.Exec.goldilocksExt3_soundness_sponge_xof48_johnson_lb4_58_128_unconditional' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound]
+-/
+#guard_msgs in
+#print axioms goldilocksExt3_soundness_sponge_xof48_johnson_lb4_58_128_unconditional
+
+/--
+info: 'CertiFri.P3.Exec.goldilocksExt3_v6Zk_soundness_xof48_johnson_128_unconditional' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound]
+-/
+#guard_msgs in
+#print axioms goldilocksExt3_v6Zk_soundness_xof48_johnson_128_unconditional
+
+/--
+info: 'CertiFri.P3.Exec.goldilocksExt3_v6Zk_soundness_xof48_johnson_lb3_78_128_unconditional' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound]
+-/
+#guard_msgs in
+#print axioms goldilocksExt3_v6Zk_soundness_xof48_johnson_lb3_78_128_unconditional
+
+/--
+info: 'CertiFri.P3.Exec.goldilocksExt3_v6Zk_soundness_xof48_johnson_lb4_58_128_unconditional' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound]
+-/
+#guard_msgs in
+#print axioms goldilocksExt3_v6Zk_soundness_xof48_johnson_lb4_58_128_unconditional
+
 end CertiFri.Audit128

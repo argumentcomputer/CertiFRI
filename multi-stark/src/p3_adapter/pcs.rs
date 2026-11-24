@@ -70,12 +70,10 @@ impl<F, EF, Challenger, Dft: Default, ValMmcs, ChallengeMmcs, Inner>
         self.fri_parameters
     }
 
-    #[cfg(not(feature = "cuda"))]
     pub(crate) fn inner_mut(&mut self) -> &mut Inner {
         &mut self.inner
     }
 
-    #[cfg(not(feature = "cuda"))]
     pub(crate) fn quotient_dft(&self) -> &Dft {
         &self.quotient_dft
     }

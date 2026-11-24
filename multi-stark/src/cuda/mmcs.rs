@@ -1,19 +1,26 @@
+use std::path::{Path, PathBuf};
+
 use p3_commit::{BatchOpening, BatchOpeningRef, Mmcs};
 use p3_field::PrimeField64;
 use p3_goldilocks::Goldilocks;
 use p3_matrix::{Dimensions, Matrix, dense::RowMajorMatrix};
 use p3_maybe_rayon::prelude::*;
-use p3_merkle_tree::{MerkleTreeError, MerkleTreeMmcs};
+use p3_merkle_tree::{MerkleTreeError, MerkleTreeMmcs, PrunedMerklePaths};
 use p3_symmetric::{CryptographicHasher, MerkleCap};
 
 use super::{
     CudaLde, CudaMixedMerkleTree, mixed_lde_open_row, mixed_lde_open_row_at_height,
     mixed_lde_open_rows, mixed_lde_open_rows_at_height,
 };
+use crate::p3_adapter::blake3_simd;
 use crate::p3_adapter::cap::{
     CapValidatingMmcs, verify_merkle_cap_len, verify_merkle_cap_len_for_log_height,
 };
 use crate::p3_adapter::domain_blake3::{Blake3Domain, DomainBlake3};
+use crate::p3_adapter::spill::{
+    MerkleDigests, STREAM_BLOCK_BYTES, SpillPackWriter, SpilledMatrix,
+    build_merkle_digests_from_height_hashes,
+};
 use p3_symmetric::{CompressionFunctionFromHasher, SerializingHasher};
 
 type DomainCompressionFunction = CompressionFunctionFromHasher<DomainBlake3, 2, 32>;
@@ -33,6 +40,43 @@ type DeferredWorker<M> = Option<std::sync::Mutex<Option<std::thread::JoinHandle<
 pub enum CudaMatrixSource<'a> {
     Resident(&'a CudaLde),
     Host(&'a RowMajorMatrix<Goldilocks>),
+    Spilled(&'a SpilledMatrix),
+}
+
+#[doc(hidden)]
+pub enum HybridMerkleTree {
+    Device(CudaMixedMerkleTree),
+    Host(MerkleDigests),
+}
+
+impl HybridMerkleTree {
+    pub(crate) fn cap(&self, cap_height: usize) -> MerkleCap<Goldilocks, [u8; 32]> {
+        match self {
+            Self::Device(tree) => {
+                assert_eq!(cap_height, 0, "device Merkle tree requires cap_height = 0");
+                MerkleCap::new(vec![tree.root()])
+            }
+            Self::Host(digests) => digests.cap(cap_height),
+        }
+    }
+
+    pub(crate) fn open_siblings(&self, index: usize, cap_height: usize) -> Vec<[u8; 32]> {
+        match self {
+            Self::Device(tree) => tree.open_siblings(index),
+            Self::Host(digests) => digests.open_single_proof(index, cap_height),
+        }
+    }
+
+    pub(crate) fn open_pruned_siblings(
+        &self,
+        indices: &[usize],
+        cap_height: usize,
+    ) -> PrunedMerklePaths<u8, 32> {
+        match self {
+            Self::Device(tree) => tree.open_pruned_siblings(indices),
+            Self::Host(digests) => digests.open_multi_proof(indices, cap_height),
+        }
+    }
 }
 
 pub enum CudaMmcsData<M> {
@@ -42,11 +86,14 @@ pub enum CudaMmcsData<M> {
         resident: Vec<Option<CudaLde>>,
         resident_active: Vec<std::sync::atomic::AtomicBool>,
         materialize: Box<dyn Fn(&CudaLde) -> M + Send + Sync>,
+        materialize_spilled: Box<dyn Fn(&SpilledMatrix) -> M + Send + Sync>,
         committed_matrices: Vec<std::sync::OnceLock<M>>,
+        spilled_matrices: Vec<std::sync::OnceLock<SpilledMatrix>>,
         deferred_matrices: Vec<DeferredWorker<M>>,
         dimensions: Vec<Dimensions>,
         retained_traces: Vec<Option<M>>,
-        tree: CudaMixedMerkleTree,
+        spilled_traces: std::sync::Mutex<Vec<Option<SpilledMatrix>>>,
+        tree: HybridMerkleTree,
     },
     Cuda {
         resident: std::sync::Arc<Vec<CudaLde>>,
@@ -93,6 +140,7 @@ fn hybrid_resident_candidates<M>(
         resident,
         resident_active,
         committed_matrices,
+        spilled_matrices,
         ..
     } = data
     else {
@@ -111,7 +159,8 @@ fn hybrid_resident_candidates<M>(
                 .then_some((
                     index,
                     lde.height().saturating_mul(lde.width()),
-                    committed_matrices[index].get().is_some(),
+                    committed_matrices[index].get().is_some()
+                        || spilled_matrices[index].get().is_some(),
                 ))
         })
         .collect()
@@ -149,12 +198,13 @@ fn release_generator_caches<M>(
     free_bytes
 }
 
-fn evict_hybrid_resident<M>(data: &CudaMmcsData<M>, index: usize) {
+fn evict_hybrid_resident<M>(data: &CudaMmcsData<M>, index: usize, spill_dir: Option<&Path>) {
     let CudaMmcsData::Hybrid {
         resident,
         resident_active,
         materialize,
         committed_matrices,
+        spilled_matrices,
         ..
     } = data
     else {
@@ -163,7 +213,22 @@ fn evict_hybrid_resident<M>(data: &CudaMmcsData<M>, index: usize) {
     let lde = resident[index]
         .as_ref()
         .expect("hybrid resident matrix is missing its LDE");
-    committed_matrices[index].get_or_init(|| materialize(lde));
+    if committed_matrices[index].get().is_none() && spilled_matrices[index].get().is_none() {
+        let matrix_bytes = lde
+            .height()
+            .saturating_mul(lde.width())
+            .saturating_mul(size_of::<Goldilocks>());
+        if let Some(dir) = spill_dir
+            && !super::host_spill_headroom(lde.device_id, matrix_bytes)
+        {
+            let mut pack = SpillPackWriter::create(dir);
+            let spilled = lde.spill_to_pack(&mut pack);
+            pack.flush();
+            let _ = spilled_matrices[index].set(spilled);
+        } else {
+            committed_matrices[index].get_or_init(|| materialize(lde));
+        }
+    }
     // SAFETY: admission transitions run between proving stages, when no CUDA
     // operation can access this LDE or its trace.
     unsafe { lde.release_values() };
@@ -194,6 +259,23 @@ impl<M> CudaMmcsData<M> {
                 }
             }
             Self::Cpu(_) => None,
+        }
+    }
+
+    pub(crate) fn spilled_original_trace(&self, index: usize) -> Option<SpilledMatrix> {
+        match self {
+            Self::Hybrid { spilled_traces, .. } => {
+                let guard = spilled_traces.lock().expect("spilled_traces lock poisoned");
+                guard.get(index).and_then(Clone::clone)
+            }
+            Self::Cuda { .. } | Self::Cpu(_) => None,
+        }
+    }
+
+    pub(crate) fn release_original_traces(&self) {
+        if let Self::Hybrid { spilled_traces, .. } = self {
+            let mut guard = spilled_traces.lock().expect("spilled_traces lock poisoned");
+            guard.clear();
         }
     }
 }
@@ -231,12 +313,58 @@ impl CudaMmcsData<RowMajorMatrix<Goldilocks>> {
                 else {
                     return false;
                 };
-                active.load(std::sync::atomic::Ordering::Acquire)
+                (active.load(std::sync::atomic::Ordering::Acquire) && lde.has_device_trace())
                     || lde.has_generator()
                     || retained.is_some()
             }
             Self::Cpu(_) => false,
         }
+    }
+
+    /// Device bytes the graph lookup over matrix `index` may allocate to
+    /// regenerate its trace; see [`CudaLde::regeneration_bytes`]. A spilled
+    /// hybrid LDE keeps its generator and counts too.
+    pub(crate) fn regeneration_bytes(&self, index: usize) -> usize {
+        let lde = match self {
+            Self::Cuda { resident, .. } => resident.get(index),
+            Self::Hybrid { resident, .. } => resident.get(index).and_then(Option::as_ref),
+            Self::Cpu(_) => None,
+        };
+        lde.map_or(0, CudaLde::regeneration_bytes)
+    }
+
+    /// The resident LDE together with a retained host copy of its trace, if
+    /// any, for readers that take the original trace without attaching it to
+    /// the LDE. Unlike [`Self::resident_with_trace`] this never mutates the
+    /// LDE, so it is safe on data shared across concurrent proofs, such as a
+    /// preprocessed commitment. Returns `None` unless the trace is available
+    /// on the device or as that host copy.
+    pub(crate) fn resident_with_host_trace(
+        &self,
+        index: usize,
+    ) -> Option<(&CudaLde, Option<&RowMajorMatrix<Goldilocks>>)> {
+        let (lde, host) = match self {
+            Self::Cuda {
+                resident,
+                retained_traces,
+                ..
+            } => (
+                resident.get(index)?,
+                retained_traces
+                    .get()
+                    .and_then(|retained| retained.get(index)),
+            ),
+            Self::Hybrid {
+                resident,
+                retained_traces,
+                ..
+            } => (
+                resident.get(index)?.as_ref()?,
+                retained_traces.get(index)?.as_ref(),
+            ),
+            Self::Cpu(_) => return None,
+        };
+        (lde.has_device_trace() || host.is_some()).then_some((lde, host))
     }
 
     pub(crate) fn resident_with_trace(&self, index: usize) -> Option<&CudaLde> {
@@ -262,9 +390,11 @@ impl CudaMmcsData<RowMajorMatrix<Goldilocks>> {
                 ..
             } => {
                 let lde = resident.get(index)?.as_ref()?;
-                if !resident_active
+                let has_active_device_trace = resident_active
                     .get(index)?
                     .load(std::sync::atomic::Ordering::Acquire)
+                    && lde.has_device_trace();
+                if !has_active_device_trace
                     && !lde.has_generator()
                     && retained_traces.get(index)?.is_none()
                 {
@@ -404,6 +534,7 @@ fn hybrid_open_row<M: Matrix<Goldilocks>>(
     resident: &[Option<CudaLde>],
     resident_active: &[std::sync::atomic::AtomicBool],
     matrices: &[std::sync::OnceLock<M>],
+    spilled: &[std::sync::OnceLock<SpilledMatrix>],
     deferred: &[DeferredWorker<M>],
     dimensions: &[Dimensions],
     index: usize,
@@ -432,6 +563,9 @@ fn hybrid_open_row<M: Matrix<Goldilocks>>(
         .map(|(matrix_index, (resident, active))| {
             if resident.is_some() && active.load(std::sync::atomic::Ordering::Acquire) {
                 gpu_rows.next().unwrap()
+            } else if let Some(sp) = spilled[matrix_index].get() {
+                let row = index >> (max_height.trailing_zeros() - sp.height().trailing_zeros());
+                sp.read_row(row)
             } else {
                 let matrix = hybrid_matrix(matrices, deferred, matrix_index);
                 let row = index >> (max_height.trailing_zeros() - matrix.height().trailing_zeros());
@@ -445,6 +579,7 @@ fn hybrid_open_rows<M: Matrix<Goldilocks>>(
     resident: &[Option<CudaLde>],
     resident_active: &[std::sync::atomic::AtomicBool],
     matrices: &[std::sync::OnceLock<M>],
+    spilled: &[std::sync::OnceLock<SpilledMatrix>],
     deferred: &[DeferredWorker<M>],
     dimensions: &[Dimensions],
     indices: &[usize],
@@ -483,6 +618,10 @@ fn hybrid_open_rows<M: Matrix<Goldilocks>>(
                 .map(|(matrix_index, (resident, active))| {
                     if resident.is_some() && active.load(std::sync::atomic::Ordering::Acquire) {
                         gpu_rows.next().unwrap()
+                    } else if let Some(sp) = spilled[matrix_index].get() {
+                        let row =
+                            index >> (max_height.trailing_zeros() - sp.height().trailing_zeros());
+                        sp.read_row(row)
                     } else {
                         let matrix = hybrid_matrix(matrices, deferred, matrix_index);
                         let row = index
@@ -501,6 +640,30 @@ pub struct CudaMmcs {
     cap_height: usize,
     leaf_domain: Blake3Domain,
     device_id: i32,
+    spill_dir: Option<PathBuf>,
+}
+
+/// The trace a committed LDE extends: the bit-reversed LDE over `gK` starts
+/// with the bit-reversed evaluations on `gH`, which interpolate the trace
+/// polynomial back onto `H`. Computed on the host, so a device under memory
+/// pressure is not asked for transform workspace.
+fn trace_from_lde(
+    lde: &RowMajorMatrix<Goldilocks>,
+    log_blowup: usize,
+) -> RowMajorMatrix<Goldilocks> {
+    use p3_dft::TwoAdicSubgroupDft;
+    use p3_field::Field;
+    use p3_matrix::bitrev::BitReversibleMatrix;
+    let degree = lde.height() >> log_blowup;
+    let evaluations = lde
+        .split_rows(degree)
+        .0
+        .as_cow()
+        .bit_reverse_rows()
+        .to_row_major_matrix();
+    let dft = p3_dft::Radix2DitParallel::<Goldilocks>::default();
+    let coefficients = dft.coset_idft_batch(evaluations, Goldilocks::GENERATOR);
+    dft.dft_batch(coefficients).to_row_major_matrix()
 }
 
 impl CudaMmcs {
@@ -524,6 +687,71 @@ impl CudaMmcs {
         Self::with_device_and_domain(cpu, cap_height, Blake3Domain::MerkleLeaf, device_id)
     }
 
+    /// The stage-one trace of committed matrix `index`, for evaluating the
+    /// lookups a shape-only witness omitted: the retained host trace when
+    /// the commitment kept one, otherwise rebuilt from the committed LDE,
+    /// read back from the device if necessary. Only that matrix is read and
+    /// nothing is cached in `data`.
+    pub(crate) fn committed_trace(
+        &self,
+        data: &CudaMmcsData<RowMajorMatrix<Goldilocks>>,
+        index: usize,
+        log_blowup: usize,
+    ) -> RowMajorMatrix<Goldilocks> {
+        match data {
+            CudaMmcsData::Cpu(data) => {
+                trace_from_lde(self.cpu.get_matrices(data)[index], log_blowup)
+            }
+            CudaMmcsData::Hybrid {
+                resident,
+                resident_active,
+                committed_matrices,
+                spilled_matrices,
+                deferred_matrices,
+                retained_traces,
+                ..
+            } => {
+                if let Some(spilled_trace) = data.spilled_original_trace(index) {
+                    return spilled_trace.read_all();
+                }
+                if let Some(trace) = &retained_traces[index] {
+                    return trace.clone();
+                }
+                if let Some(lde) = committed_matrices[index].get() {
+                    return trace_from_lde(lde, log_blowup);
+                }
+                if let Some(lde) = resident[index].as_ref()
+                    && resident_active[index].load(std::sync::atomic::Ordering::Acquire)
+                {
+                    return trace_from_lde(&lde.to_row_major_matrix(), log_blowup);
+                }
+                if let Some(spilled_lde) = spilled_matrices[index].get() {
+                    let degree = spilled_lde.height() >> log_blowup;
+                    let prefix = spilled_lde.read_rows(0, degree);
+                    return trace_from_lde(&prefix, 0);
+                }
+                trace_from_lde(
+                    hybrid_matrix(committed_matrices, deferred_matrices, index),
+                    log_blowup,
+                )
+            }
+            CudaMmcsData::Cuda {
+                resident,
+                committed_matrices,
+                retained_traces,
+                ..
+            } => {
+                if let Some(trace) = retained_traces.get().and_then(|traces| traces.get(index)) {
+                    return trace.clone();
+                }
+                if let Some(ldes) = committed_matrices.get() {
+                    return trace_from_lde(&ldes[index], log_blowup);
+                }
+                trace_from_lde(&resident[index].to_row_major_matrix(), log_blowup)
+            }
+        }
+    }
+
     /// A commitment scheme resident on the given CUDA device. Every kernel
     /// it launches, allocation it makes and buffer it stages through belongs
     /// to that device, so several of these in one process can each own a
@@ -544,6 +772,23 @@ impl CudaMmcs {
             cap_height,
             leaf_domain,
             device_id,
+            spill_dir: None,
+        }
+    }
+
+    pub(crate) fn set_spill_dir(&mut self, spill_dir: Option<PathBuf>) {
+        self.spill_dir = spill_dir;
+    }
+
+    pub(crate) fn spill_dir(&self) -> Option<&Path> {
+        self.spill_dir.as_deref()
+    }
+
+    #[inline]
+    pub(crate) const fn compress_domain(&self) -> Blake3Domain {
+        match self.leaf_domain {
+            Blake3Domain::MerkleLeaf => Blake3Domain::MerkleCompress,
+            _ => Blake3Domain::Plain,
         }
     }
 
@@ -570,6 +815,8 @@ impl CudaMmcs {
 
 pub trait CudaCommitMmcs<T: Send + Sync + Clone>: Mmcs<T> {
     fn cuda_device_id(&self) -> i32;
+
+    fn spill_dir(&self) -> Option<&Path>;
 
     fn leaf_domain(&self) -> Blake3Domain;
 
@@ -625,6 +872,21 @@ pub trait CudaCommitMmcs<T: Send + Sync + Clone>: Mmcs<T> {
         &self,
         data: &'a Self::ProverData<RowMajorMatrix<T>>,
     ) -> Vec<Option<&'a RowMajorMatrix<T>>>;
+
+    fn spilled_matrices<'a>(
+        &self,
+        data: &'a Self::ProverData<RowMajorMatrix<T>>,
+    ) -> Vec<Option<&'a SpilledMatrix>>;
+
+    fn commit_cuda_mixed_spilled(
+        &self,
+        resident: Vec<Option<CudaLde>>,
+        host_matrices: Vec<Option<RowMajorMatrix<T>>>,
+        spilled_matrices: Vec<Option<SpilledMatrix>>,
+        prehashed: Vec<Option<Vec<[u8; 32]>>>,
+        retained_traces: Vec<Option<RowMajorMatrix<T>>>,
+        spilled_traces: Vec<Option<SpilledMatrix>>,
+    ) -> (Self::Commitment, Self::ProverData<RowMajorMatrix<T>>);
 
     fn with_resident_matrix<R>(
         &self,
@@ -683,6 +945,10 @@ pub trait CudaCommitMmcs<T: Send + Sync + Clone>: Mmcs<T> {
 impl CudaCommitMmcs<Goldilocks> for CudaMmcs {
     fn cuda_device_id(&self) -> i32 {
         self.device_id
+    }
+
+    fn spill_dir(&self) -> Option<&Path> {
+        self.spill_dir.as_deref()
     }
 
     fn leaf_domain(&self) -> Blake3Domain {
@@ -750,6 +1016,7 @@ impl CudaCommitMmcs<Goldilocks> for CudaMmcs {
             CudaMmcsData::Hybrid {
                 resident_active,
                 committed_matrices,
+                spilled_matrices,
                 deferred_matrices,
                 ..
             } => {
@@ -759,6 +1026,7 @@ impl CudaCommitMmcs<Goldilocks> for CudaMmcs {
                     .load(std::sync::atomic::Ordering::Acquire);
                 active
                     || committed_matrices[index].get().is_some()
+                    || spilled_matrices[index].get().is_some()
                     || deferred_matrices[index].as_ref().is_some_and(|worker| {
                         worker
                             .lock()
@@ -816,7 +1084,7 @@ impl CudaCommitMmcs<Goldilocks> for CudaMmcs {
                 .map(|(position, _)| position)
                 .unwrap();
             let (index, cells, _) = candidates.swap_remove(candidate);
-            evict_hybrid_resident(data, index);
+            evict_hybrid_resident(data, index, self.spill_dir.as_deref());
             // Eviction is a synchronous device release. Re-read the allocator
             // instead of inferring availability from logical matrix sizes:
             // CUDA allocation granularity and per-thread memory pools make a
@@ -902,7 +1170,7 @@ impl CudaCommitMmcs<Goldilocks> for CudaMmcs {
                 .map(|(position, _)| position)
                 .unwrap();
             let (data_index, matrix_index, cells, host_ready) = candidates.swap_remove(candidate);
-            evict_hybrid_resident(data[data_index], matrix_index);
+            evict_hybrid_resident(data[data_index], matrix_index, self.spill_dir.as_deref());
             // `release_values` synchronously frees this exact payload. CUDA's
             // free-memory counters advance at allocator granularity, however,
             // so requiring `cudaMemGetInfo` to reflect every small release can
@@ -957,6 +1225,7 @@ impl CudaCommitMmcs<Goldilocks> for CudaMmcs {
                 resident,
                 resident_active,
                 committed_matrices,
+                spilled_matrices,
                 deferred_matrices,
                 ..
             } => resident
@@ -964,11 +1233,44 @@ impl CudaCommitMmcs<Goldilocks> for CudaMmcs {
                 .zip(resident_active)
                 .enumerate()
                 .map(|(index, (resident, active))| {
-                    (resident.is_none() || !active.load(std::sync::atomic::Ordering::Acquire))
-                        .then(|| hybrid_matrix(committed_matrices, deferred_matrices, index))
+                    let is_res =
+                        resident.is_some() && active.load(std::sync::atomic::Ordering::Acquire);
+                    if is_res || spilled_matrices[index].get().is_some() {
+                        None
+                    } else {
+                        Some(hybrid_matrix(committed_matrices, deferred_matrices, index))
+                    }
                 })
                 .collect(),
             CudaMmcsData::Cuda { resident, .. } => (0..resident.len()).map(|_| None).collect(),
+        }
+    }
+
+    fn spilled_matrices<'a>(
+        &self,
+        data: &'a Self::ProverData<RowMajorMatrix<Goldilocks>>,
+    ) -> Vec<Option<&'a SpilledMatrix>> {
+        match data {
+            CudaMmcsData::Cpu(data) => vec![None; self.cpu.get_matrix_heights(data).len()],
+            CudaMmcsData::Cuda { resident, .. } => vec![None; resident.len()],
+            CudaMmcsData::Hybrid {
+                resident,
+                resident_active,
+                spilled_matrices,
+                ..
+            } => resident
+                .iter()
+                .zip(resident_active)
+                .enumerate()
+                .map(|(index, (res, active))| {
+                    let is_res = res.is_some() && active.load(std::sync::atomic::Ordering::Acquire);
+                    if is_res {
+                        None
+                    } else {
+                        spilled_matrices[index].get()
+                    }
+                })
+                .collect(),
         }
     }
 
@@ -1046,6 +1348,7 @@ impl CudaCommitMmcs<Goldilocks> for CudaMmcs {
                 resident,
                 resident_active,
                 committed_matrices,
+                spilled_matrices,
                 deferred_matrices,
                 ..
             } => {
@@ -1059,6 +1362,8 @@ impl CudaCommitMmcs<Goldilocks> for CudaMmcs {
                             .as_ref()
                             .expect("active hybrid matrix has no LDE"),
                     ))
+                } else if let Some(spilled) = spilled_matrices[index].get() {
+                    f(CudaMatrixSource::Spilled(spilled))
                 } else {
                     f(CudaMatrixSource::Host(hybrid_matrix(
                         committed_matrices,
@@ -1324,16 +1629,209 @@ impl CudaCommitMmcs<Goldilocks> for CudaMmcs {
             .iter()
             .map(|lde| std::sync::atomic::AtomicBool::new(lde.is_some()))
             .collect();
+        let count = dimensions.len();
         (
             commitment,
             CudaMmcsData::Hybrid {
                 resident,
                 resident_active,
                 materialize: Box::new(CudaLde::to_row_major_matrix),
+                materialize_spilled: Box::new(SpilledMatrix::read_all),
                 committed_matrices,
+                spilled_matrices: (0..count).map(|_| std::sync::OnceLock::new()).collect(),
                 deferred_matrices,
                 dimensions,
                 retained_traces,
+                spilled_traces: std::sync::Mutex::new(Vec::new()),
+                tree: HybridMerkleTree::Device(tree),
+            },
+        )
+    }
+
+    fn commit_cuda_mixed_spilled(
+        &self,
+        resident: Vec<Option<CudaLde>>,
+        host_matrices: Vec<Option<RowMajorMatrix<Goldilocks>>>,
+        spilled_matrices: Vec<Option<SpilledMatrix>>,
+        mut prehashed: Vec<Option<Vec<[u8; 32]>>>,
+        retained_traces: Vec<Option<RowMajorMatrix<Goldilocks>>>,
+        spilled_traces: Vec<Option<SpilledMatrix>>,
+    ) -> (
+        Self::Commitment,
+        Self::ProverData<RowMajorMatrix<Goldilocks>>,
+    ) {
+        let count = resident.len();
+        assert_eq!(host_matrices.len(), count);
+        assert_eq!(spilled_matrices.len(), count);
+        assert_eq!(retained_traces.len(), count);
+        if prehashed.is_empty() {
+            prehashed = vec![None; count];
+        }
+        assert_eq!(prehashed.len(), count);
+
+        let dimensions: Vec<Dimensions> = (0..count)
+            .map(|i| {
+                let backends = usize::from(resident[i].is_some())
+                    + usize::from(host_matrices[i].is_some())
+                    + usize::from(spilled_matrices[i].is_some());
+                assert_eq!(
+                    backends, 1,
+                    "matrix {i} must have exactly one storage backend (resident, host, or spilled)"
+                );
+                if let Some(lde) = &resident[i] {
+                    Dimensions {
+                        width: lde.width(),
+                        height: lde.height(),
+                    }
+                } else if let Some(mat) = &host_matrices[i] {
+                    mat.dimensions()
+                } else {
+                    spilled_matrices[i].as_ref().unwrap().dimensions()
+                }
+            })
+            .collect();
+        let any_spilled = spilled_matrices.iter().any(Option::is_some);
+        let max_height = hybrid_max_height(&dimensions);
+        let wide_heights = host_hashed_heights(dimensions.iter().copied());
+        let (free_bytes, _) = super::device_memory_info(self.device_id);
+        let tree_vram_bytes = max_height.saturating_mul(96);
+        let can_use_device_tree = !any_spilled
+            && wide_heights.is_empty()
+            && self.cap_height == 0
+            && tree_vram_bytes.saturating_add(super::minimum_free_bytes()) <= free_bytes;
+
+        let tree = if can_use_device_tree {
+            let resident_refs: Vec<Option<&CudaLde>> =
+                resident.iter().map(Option::as_ref).collect();
+            let host_refs: Vec<Option<&RowMajorMatrix<Goldilocks>>> =
+                host_matrices.iter().map(Option::as_ref).collect();
+            let deferred_dims = vec![None; count];
+            let host_digest_groups = hash_host_only_height_groups(
+                &host_matrices,
+                &resident_refs,
+                &deferred_dims,
+                &std::collections::BTreeSet::new(),
+                self.leaf_domain,
+            );
+            HybridMerkleTree::Device(CudaMixedMerkleTree::from_hybrid_with_domain(
+                self.device_id,
+                &resident_refs,
+                &host_refs,
+                &deferred_dims,
+                &host_digest_groups,
+                self.is_domain_v6(),
+            ))
+        } else {
+            let heights: Vec<usize> = dimensions.iter().map(|d| d.height).collect();
+            let leaf_domain = self.leaf_domain;
+            let device_id = self.device_id;
+            let domain_v6 = self.is_domain_v6();
+            let digests = build_merkle_digests_from_height_hashes(
+                &heights,
+                |h, group| {
+                    if let &[single_idx] = group
+                        && let Some(cached) = prehashed[single_idx].take()
+                    {
+                        debug_assert_eq!(cached.len(), h);
+                        return cached;
+                    }
+                    let total_row_bytes: usize = group
+                        .iter()
+                        .map(|&idx| dimensions[idx].width * size_of::<Goldilocks>())
+                        .sum();
+                    let all_resident = group.iter().all(|&idx| resident[idx].is_some());
+                    if all_resident
+                        && total_row_bytes <= MAX_DEVICE_LEAF_ROW_BYTES
+                        && h.saturating_mul(32)
+                            .saturating_add(super::minimum_free_bytes())
+                            <= super::device_memory_info(device_id).0
+                    {
+                        let res_refs: Vec<Option<&CudaLde>> =
+                            group.iter().map(|&idx| resident[idx].as_ref()).collect();
+                        let host_refs: Vec<Option<&RowMajorMatrix<Goldilocks>>> =
+                            vec![None; group.len()];
+                        return CudaMixedMerkleTree::hash_hybrid_height_group_with_domain(
+                            device_id, &res_refs, &host_refs, domain_v6,
+                        );
+                    }
+                    let block_rows = (STREAM_BLOCK_BYTES / total_row_bytes.max(size_of::<u64>()))
+                        .clamp(1, 1 << 14)
+                        .min(h.max(1));
+                    // SAFETY: `hash_raw_multi_rows_uninit` initializes every element of `dst`.
+                    unsafe {
+                        blake3_simd::alloc_and_fill_digests(h, h, |dst| {
+                            for start in (0..h).step_by(block_rows) {
+                                let n_rows = (h - start).min(block_rows);
+                                let blocks: Vec<(Vec<u8>, usize)> = group
+                                    .iter()
+                                    .map(|&idx| {
+                                        let row_bytes =
+                                            dimensions[idx].width * size_of::<Goldilocks>();
+                                        let raw = if let Some(sp) = &spilled_matrices[idx] {
+                                            sp.read_raw_rows(start, n_rows)
+                                        } else if let Some(mat) = &host_matrices[idx] {
+                                            pack_host_matrix_rows(mat, start, n_rows)
+                                        } else {
+                                            let lde = resident[idx].as_ref().unwrap();
+                                            let mut words = vec![0u64; n_rows * lde.width()];
+                                            lde.copy_rows_to_host(start, n_rows, &mut words);
+                                            pack_u64_words_canonical_le(&words)
+                                        };
+                                        (raw, row_bytes)
+                                    })
+                                    .collect();
+                                blake3_simd::hash_raw_multi_rows_uninit(
+                                    &blocks,
+                                    &mut dst[start..start + n_rows],
+                                    leaf_domain,
+                                );
+                            }
+                        })
+                    }
+                },
+                self.compress_domain(),
+            );
+            HybridMerkleTree::Host(digests)
+        };
+
+        let commitment = tree.cap(self.cap_height);
+        let committed_matrices = host_matrices
+            .into_iter()
+            .map(|matrix| {
+                let cell = std::sync::OnceLock::new();
+                if let Some(matrix) = matrix {
+                    cell.set(matrix).expect("fresh hybrid matrix cell");
+                }
+                cell
+            })
+            .collect();
+        let spilled_cells = spilled_matrices
+            .into_iter()
+            .map(|sp| {
+                let cell = std::sync::OnceLock::new();
+                if let Some(sp) = sp {
+                    cell.set(sp).ok().expect("fresh spilled matrix cell");
+                }
+                cell
+            })
+            .collect();
+        let resident_active = resident
+            .iter()
+            .map(|lde| std::sync::atomic::AtomicBool::new(lde.is_some()))
+            .collect();
+        (
+            commitment,
+            CudaMmcsData::Hybrid {
+                resident,
+                resident_active,
+                materialize: Box::new(CudaLde::to_row_major_matrix),
+                materialize_spilled: Box::new(SpilledMatrix::read_all),
+                committed_matrices,
+                spilled_matrices: spilled_cells,
+                deferred_matrices: (0..count).map(|_| None).collect(),
+                dimensions,
+                retained_traces,
+                spilled_traces: std::sync::Mutex::new(spilled_traces),
                 tree,
             },
         )
@@ -1346,10 +1844,63 @@ impl CudaCommitMmcs<Goldilocks> for CudaMmcs {
         Self::Commitment,
         Self::ProverData<RowMajorMatrix<Goldilocks>>,
     ) {
+        let total_bytes: usize = ldes
+            .iter()
+            .map(|m| {
+                m.height()
+                    .saturating_mul(m.width())
+                    .saturating_mul(size_of::<Goldilocks>())
+            })
+            .sum();
+        let max_height = ldes.iter().map(Matrix::height).max().unwrap_or(0);
+        let tree_workspace_bytes = max_height.saturating_mul(96);
+        let (free_bytes, total_device_bytes) = super::device_memory_info(self.device_id);
+        let min_free = super::minimum_free_bytes();
+        let wide_heights = host_hashed_heights(ldes.iter().map(Matrix::dimensions));
+        if total_bytes
+            .saturating_add(tree_workspace_bytes)
+            .saturating_add(min_free)
+            > free_bytes
+            || !wide_heights.is_empty()
+        {
+            if let Some(dir) = &self.spill_dir {
+                let mut height_counts = std::collections::HashMap::<usize, usize>::new();
+                for lde in &ldes {
+                    *height_counts.entry(lde.height()).or_insert(0) += 1;
+                }
+                let mut pack = SpillPackWriter::create(dir);
+                let mut spilled = Vec::with_capacity(ldes.len());
+                let mut prehashed = Vec::with_capacity(ldes.len());
+                for lde in ldes {
+                    if height_counts[&lde.height()] == 1 {
+                        let (sp, digests) = pack.append_matrix_and_hash(&lde, self.leaf_domain);
+                        spilled.push(Some(sp));
+                        prehashed.push(Some(digests));
+                    } else {
+                        spilled.push(Some(pack.append_matrix(&lde)));
+                        prehashed.push(None);
+                    }
+                }
+                pack.flush();
+                let count = spilled.len();
+                return self.commit_cuda_mixed_spilled(
+                    (0..count).map(|_| None).collect(),
+                    (0..count).map(|_| None).collect(),
+                    spilled,
+                    prehashed,
+                    (0..count).map(|_| None).collect(),
+                    Vec::new(),
+                );
+            }
+            return self.commit_cpu_storage(ldes);
+        }
         let resident = ldes
             .iter()
             .map(|matrix| CudaLde::from_row_major_matrix(self.device_id, matrix))
             .collect();
+        if self.spill_dir.is_some() && total_bytes >= total_device_bytes / 8 {
+            return self.commit_cuda_spillable(resident);
+        }
         let (commitment, mut data) = self.commit_cuda_resident(resident);
         if let CudaMmcsData::Cuda {
             committed_matrices, ..
@@ -1359,6 +1910,44 @@ impl CudaCommitMmcs<Goldilocks> for CudaMmcs {
         }
         (commitment, data)
     }
+}
+
+pub(crate) fn pack_host_matrix_rows(
+    mat: &RowMajorMatrix<Goldilocks>,
+    start_row: usize,
+    num_rows: usize,
+) -> Vec<u8> {
+    let width = mat.width();
+    let elems = &mat.values[start_row * width..(start_row + num_rows) * width];
+    let mut out = vec![0u8; elems.len() * size_of::<u64>()];
+    if elems.len() >= 4096 {
+        out.par_chunks_exact_mut(8)
+            .zip(elems.par_iter())
+            .for_each(|(dst, elem)| {
+                dst.copy_from_slice(&elem.as_canonical_u64().to_le_bytes());
+            });
+    } else {
+        for (dst, elem) in out.chunks_exact_mut(8).zip(elems) {
+            dst.copy_from_slice(&elem.as_canonical_u64().to_le_bytes());
+        }
+    }
+    out
+}
+
+pub(crate) fn pack_u64_words_canonical_le(words: &[u64]) -> Vec<u8> {
+    let mut out = vec![0u8; words.len() * size_of::<u64>()];
+    if words.len() >= 4096 {
+        out.par_chunks_exact_mut(8)
+            .zip(words.par_iter())
+            .for_each(|(dst, &w)| {
+                dst.copy_from_slice(&Goldilocks::new(w).as_canonical_u64().to_le_bytes());
+            });
+    } else {
+        for (dst, &w) in out.chunks_exact_mut(8).zip(words) {
+            dst.copy_from_slice(&Goldilocks::new(w).as_canonical_u64().to_le_bytes());
+        }
+    }
+    out
 }
 
 impl Mmcs<Goldilocks> for CudaMmcs {
@@ -1380,12 +1969,20 @@ impl Mmcs<Goldilocks> for CudaMmcs {
             height: matrix.height(),
         }))
         .is_empty();
+        let total_cells: usize = inputs
+            .iter()
+            .map(|matrix| matrix.height().saturating_mul(matrix.width()))
+            .sum();
+        let total_bytes = total_cells.saturating_mul(size_of::<Goldilocks>());
+        let max_height = inputs.iter().map(Matrix::height).max().unwrap_or(0);
+        let tree_workspace_bytes = max_height.saturating_mul(96);
+        let (free_bytes, _) = super::device_memory_info(self.device_id);
         if device_hashable
-            && inputs
-                .iter()
-                .map(|matrix| matrix.height().saturating_mul(matrix.width()))
-                .sum::<usize>()
-                > 1 << 18
+            && total_cells > 1 << 18
+            && total_bytes
+                .saturating_add(tree_workspace_bytes)
+                .saturating_add(super::minimum_free_bytes())
+                <= free_bytes
         {
             let resident: Vec<_> = inputs
                 .iter()
@@ -1440,6 +2037,7 @@ impl Mmcs<Goldilocks> for CudaMmcs {
                 resident,
                 resident_active,
                 committed_matrices,
+                spilled_matrices,
                 deferred_matrices,
                 dimensions,
                 tree,
@@ -1449,11 +2047,12 @@ impl Mmcs<Goldilocks> for CudaMmcs {
                     resident,
                     resident_active,
                     committed_matrices,
+                    spilled_matrices,
                     deferred_matrices,
                     dimensions,
                     index,
                 ),
-                tree.open_siblings(index),
+                tree.open_siblings(index, self.cap_height),
             ),
             CudaMmcsData::Cuda { resident, tree, .. } => {
                 let opened_values = mixed_lde_open_row(resident, index);
@@ -1470,17 +2069,24 @@ impl Mmcs<Goldilocks> for CudaMmcs {
             CudaMmcsData::Cpu(data) => self.cpu.get_matrices(data),
             CudaMmcsData::Hybrid {
                 resident,
+                resident_active,
                 materialize,
+                materialize_spilled,
                 committed_matrices,
+                spilled_matrices,
                 deferred_matrices,
                 ..
             } => resident
                 .iter()
                 .enumerate()
                 .map(|(index, resident)| {
-                    if resident.is_some() {
+                    if resident.is_some()
+                        && resident_active[index].load(std::sync::atomic::Ordering::Acquire)
+                    {
                         committed_matrices[index]
                             .get_or_init(|| materialize(resident.as_ref().unwrap()))
+                    } else if let Some(sp) = spilled_matrices[index].get() {
+                        committed_matrices[index].get_or_init(|| materialize_spilled(sp))
                     } else {
                         hybrid_matrix(committed_matrices, deferred_matrices, index)
                     }
@@ -1552,6 +2158,7 @@ impl Mmcs<Goldilocks> for CudaMmcs {
                 resident,
                 resident_active,
                 committed_matrices,
+                spilled_matrices,
                 deferred_matrices,
                 dimensions,
                 tree,
@@ -1561,11 +2168,12 @@ impl Mmcs<Goldilocks> for CudaMmcs {
                     resident,
                     resident_active,
                     committed_matrices,
+                    spilled_matrices,
                     deferred_matrices,
                     dimensions,
                     indices,
                 );
-                let opening_proof = tree.open_pruned_siblings(indices);
+                let opening_proof = tree.open_pruned_siblings(indices, self.cap_height);
                 (opened_values, opening_proof)
             }
             CudaMmcsData::Cuda { resident, tree, .. } => {
@@ -1601,6 +2209,11 @@ impl CapValidatingMmcs<Goldilocks> for CudaMmcs {
         log_max_height: usize,
     ) -> Result<(), Self::Error> {
         verify_merkle_cap_len_for_log_height(self.cap_height(), commit, log_max_height)
+    }
+    fn empty_multi_proof() -> Self::MultiProof {
+        PrunedMerklePaths {
+            sibling_hashes: Vec::new(),
+        }
     }
 }
 

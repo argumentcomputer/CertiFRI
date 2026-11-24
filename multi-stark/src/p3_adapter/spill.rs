@@ -79,7 +79,7 @@ type SpillCommitResult = (
 
 /// Target memory budget per streamed row block during Merkle hashing and FRI
 /// opening passes (64 MiB).
-const STREAM_BLOCK_BYTES: usize = 64 << 20;
+pub(crate) const STREAM_BLOCK_BYTES: usize = 64 << 20;
 
 /// Write buffer size for sequential spill-file packing (8 MiB = 1M field elements).
 const SPILL_WRITE_CHUNK_ELEMS: usize = 1 << 20;
@@ -186,11 +186,71 @@ impl Drop for SpillFile {
 /// Packs multiple spilled matrices sequentially into a single [`SpillFile`] so
 /// even hundreds of circuits consume only one file descriptor per commitment
 /// round.
-pub(crate) struct SpillPackWriter {
+#[doc(hidden)]
+pub struct SpillPackWriter {
     spill: Arc<SpillFile>,
     writer: BufWriter<File>,
     next_offset: u64,
     scratch: Vec<u8>,
+}
+
+/// Streaming sink for appending canonical little-endian Goldilocks `u64` words
+/// directly into a [`SpillPackWriter`] panel without materializing the full
+/// matrix in host RAM.
+#[cfg(any(feature = "cuda", test))]
+pub(crate) struct SpillStreamSink<'a> {
+    writer: &'a mut BufWriter<File>,
+    #[cfg(not(target_endian = "little"))]
+    scratch: &'a mut Vec<u8>,
+    written_elems: usize,
+}
+
+#[cfg(any(feature = "cuda", test))]
+impl SpillStreamSink<'_> {
+    /// Writes a slice of canonical Goldilocks `u64` words (`< Goldilocks::ORDER_U64`)
+    /// sequentially to the underlying spill file.
+    pub(crate) fn write_canonical_u64s(&mut self, values: &[u64]) {
+        if values.is_empty() {
+            return;
+        }
+        #[cfg(target_endian = "little")]
+        {
+            // SAFETY: `[u64]` has no padding bytes and on little-endian targets
+            // its in-memory representation matches canonical little-endian bytes.
+            let bytes = unsafe {
+                core::slice::from_raw_parts(values.as_ptr().cast::<u8>(), size_of_val(values))
+            };
+            self.writer
+                .write_all(bytes)
+                .expect("failed to write streamed chunk to spill file");
+        }
+        #[cfg(not(target_endian = "little"))]
+        {
+            let byte_len = core::mem::size_of_val(values);
+            if self.scratch.len() < byte_len {
+                self.scratch.resize(byte_len, 0);
+            }
+            let (out_chunks, _) = self.scratch[..byte_len].as_chunks_mut::<8>();
+            for (out, &v) in out_chunks.iter_mut().zip(values) {
+                *out = v.to_le_bytes();
+            }
+            self.writer
+                .write_all(&self.scratch[..byte_len])
+                .expect("failed to write streamed chunk to spill file");
+        }
+        self.written_elems = self
+            .written_elems
+            .checked_add(values.len())
+            .expect("streamed spill element count overflow");
+    }
+}
+
+/// Contiguous column-panel slice stored in a [`SpillFile`].
+#[derive(Clone)]
+pub(crate) struct SpillPanel {
+    file: Arc<SpillFile>,
+    offset: u64,
+    width: usize,
 }
 
 impl SpillPackWriter {
@@ -230,6 +290,47 @@ impl SpillPackWriter {
         byte_len
     }
 
+    /// Streams a `height × width` column panel directly into the pack file via
+    /// `write_fn` without holding the full panel in host RAM.
+    #[cfg(any(feature = "cuda", test))]
+    pub(crate) fn append_streamed_panel(
+        &mut self,
+        height: usize,
+        width: usize,
+        write_fn: impl FnOnce(&mut SpillStreamSink<'_>),
+    ) -> SpillPanel {
+        let offset = self.next_offset;
+        let expected_elems = height
+            .checked_mul(width)
+            .expect("streamed panel element count overflow");
+        let mut sink = SpillStreamSink {
+            writer: &mut self.writer,
+            #[cfg(not(target_endian = "little"))]
+            scratch: &mut self.scratch,
+            written_elems: 0,
+        };
+        write_fn(&mut sink);
+        assert_eq!(
+            sink.written_elems, expected_elems,
+            "streamed spill panel wrote {} elements, expected {expected_elems}",
+            sink.written_elems
+        );
+        let bytes = u64::try_from(expected_elems)
+            .expect("panel element count exceeds u64")
+            .checked_mul(u64::try_from(size_of::<u64>()).unwrap())
+            .expect("panel byte length overflow");
+        self.next_offset = self
+            .next_offset
+            .checked_add(bytes)
+            .expect("spill pack offset overflow");
+        TOTAL_SPILLED_BYTES.fetch_add(bytes, Ordering::Relaxed);
+        SpillPanel {
+            file: Arc::clone(&self.spill),
+            offset,
+            width,
+        }
+    }
+
     /// Appends `mat` in canonical little-endian `u64` row-major order and
     /// returns a lightweight handle to its byte range in the pack file.
     pub(crate) fn append_matrix(&mut self, mat: &RowMajorMatrix<Val>) -> SpilledMatrix {
@@ -252,12 +353,7 @@ impl SpillPackWriter {
             .checked_add(bytes)
             .expect("spill pack offset overflow");
         TOTAL_SPILLED_BYTES.fetch_add(bytes, Ordering::Relaxed);
-        SpilledMatrix {
-            file: Arc::clone(&self.spill),
-            offset,
-            height,
-            width,
-        }
+        SpilledMatrix::single(Arc::clone(&self.spill), offset, height, width)
     }
 
     /// Appends `mat` to the spill file AND computes each row's BLAKE3 leaf
@@ -274,12 +370,7 @@ impl SpillPackWriter {
         if width == 0 {
             let empty_digest = DomainBlake3::new(leaf_domain).hash_slice(&[]);
             return (
-                SpilledMatrix {
-                    file: Arc::clone(&self.spill),
-                    offset,
-                    height,
-                    width,
-                },
+                SpilledMatrix::single(Arc::clone(&self.spill), offset, height, width),
                 vec![empty_digest; height],
             );
         }
@@ -318,12 +409,64 @@ impl SpillPackWriter {
             .expect("spill pack offset overflow");
         TOTAL_SPILLED_BYTES.fetch_add(bytes, Ordering::Relaxed);
         (
-            SpilledMatrix {
-                file: Arc::clone(&self.spill),
-                offset,
-                height,
-                width,
-            },
+            SpilledMatrix::single(Arc::clone(&self.spill), offset, height, width),
+            digests,
+        )
+    }
+
+    /// Appends `mat` to the spill file AND computes each row's salted BLAKE3
+    /// leaf digest on the fly from `salt_seed`, avoiding a second disk read
+    /// pass for single-matrix height groups in `v6-zk`.
+    pub(crate) fn append_matrix_and_hash_salted(
+        &mut self,
+        mat: &RowMajorMatrix<Val>,
+        leaf_domain: Blake3Domain,
+        salt_seed: &[u8; 32],
+    ) -> (SpilledMatrix, Vec<[u8; 32]>) {
+        let height = mat.height();
+        let width = mat.width();
+        let offset = self.next_offset;
+        let row_bytes = width * size_of::<u64>();
+        let chunk_rows = ((SPILL_WRITE_CHUNK_ELEMS * size_of::<u64>()) / row_bytes.max(64))
+            .clamp(1, height.max(1));
+        // SAFETY: the loop partitions `0..height` into disjoint contiguous chunks
+        // and initializes each via `hash_raw_rows_salted_uninit`.
+        let digests = unsafe {
+            blake3_simd::alloc_and_fill_digests(height, height, |dst| {
+                for row_start in (0..height).step_by(chunk_rows) {
+                    let n_rows = (height - row_start).min(chunk_rows);
+                    let elem_start = row_start * width;
+                    let elem_end = (row_start + n_rows) * width;
+                    let byte_len = self.pack_chunk_bytes(&mat.values[elem_start..elem_end]);
+                    blake3_simd::hash_raw_rows_salted_uninit(
+                        &self.scratch[..byte_len],
+                        row_bytes,
+                        height,
+                        row_start,
+                        salt_seed,
+                        &mut dst[row_start..row_start + n_rows],
+                        leaf_domain,
+                    );
+                    if byte_len > 0 {
+                        self.writer
+                            .write_all(&self.scratch[..byte_len])
+                            .expect("failed to write matrix chunk to spill file");
+                    }
+                }
+            })
+        };
+        let total_elems = mat.values.len();
+        let bytes = u64::try_from(total_elems)
+            .expect("matrix element count exceeds u64")
+            .checked_mul(u64::try_from(size_of::<u64>()).unwrap())
+            .expect("matrix byte length overflow");
+        self.next_offset = self
+            .next_offset
+            .checked_add(bytes)
+            .expect("spill pack offset overflow");
+        TOTAL_SPILLED_BYTES.fetch_add(bytes, Ordering::Relaxed);
+        (
+            SpilledMatrix::single(Arc::clone(&self.spill), offset, height, width),
             digests,
         )
     }
@@ -334,17 +477,52 @@ impl SpillPackWriter {
     }
 }
 
-/// Handle to a row-major [`Goldilocks`] matrix stored in canonical little-endian
-/// `u64` bytes inside a [`SpillFile`].
+/// Handle to a [`Goldilocks`] matrix stored in canonical little-endian `u64`
+/// bytes inside one or more contiguous column panels of a [`SpillFile`].
+///
+/// Single-panel matrices (`panels.len() == 1`) incur zero interleave overhead.
+/// Multi-panel matrices allow GPU column-panel streaming for single matrices
+/// whose LDE exceeds GPU VRAM capacity without a second disk-transpose pass.
+#[doc(hidden)]
 #[derive(Clone)]
-pub(crate) struct SpilledMatrix {
-    file: Arc<SpillFile>,
-    offset: u64,
+pub struct SpilledMatrix {
+    panels: Arc<[SpillPanel]>,
     height: usize,
     width: usize,
 }
 
 impl SpilledMatrix {
+    fn single(file: Arc<SpillFile>, offset: u64, height: usize, width: usize) -> Self {
+        Self {
+            panels: Arc::from([SpillPanel {
+                file,
+                offset,
+                width,
+            }]),
+            height,
+            width,
+        }
+    }
+
+    /// Assembles a spilled matrix from contiguous column panels covering all
+    /// `height` rows.
+    #[cfg(any(feature = "cuda", test))]
+    pub(crate) fn from_panels(height: usize, panels: Vec<SpillPanel>) -> Self {
+        assert!(
+            !panels.is_empty(),
+            "SpilledMatrix requires at least one panel"
+        );
+        let width: usize = panels
+            .iter()
+            .try_fold(0usize, |acc, panel| acc.checked_add(panel.width))
+            .expect("SpilledMatrix panel width overflow");
+        Self {
+            panels: Arc::from(panels),
+            height,
+            width,
+        }
+    }
+
     #[inline]
     pub(crate) const fn height(&self) -> usize {
         self.height
@@ -364,13 +542,13 @@ impl SpilledMatrix {
     }
 
     #[inline]
-    const fn row_bytes(&self) -> usize {
+    pub(crate) const fn row_bytes(&self) -> usize {
         self.width * size_of::<u64>()
     }
 
-    /// Reads `num_rows` contiguous rows starting at `start_row` as raw
-    /// canonical little-endian bytes (identical to `Goldilocks::into_byte_stream`).
-    pub(crate) fn read_raw_rows(&self, start_row: usize, num_rows: usize) -> Vec<u8> {
+    /// Reads `num_rows` contiguous rows starting at `start_row` into `dst` as
+    /// raw canonical little-endian bytes (`dst.len() == num_rows * row_bytes`).
+    pub(crate) fn read_raw_rows_into(&self, start_row: usize, num_rows: usize, dst: &mut [u8]) {
         assert!(
             start_row.saturating_add(num_rows) <= self.height,
             "spilled read out of bounds: {start_row}..{} > {}",
@@ -381,17 +559,128 @@ impl SpilledMatrix {
         let byte_len = num_rows
             .checked_mul(row_bytes)
             .expect("spilled read byte length overflow");
-        let byte_offset = self
-            .offset
-            .checked_add(
-                u64::try_from(start_row)
-                    .expect("start_row exceeds u64")
-                    .checked_mul(u64::try_from(row_bytes).expect("row_bytes exceeds u64"))
-                    .expect("spilled byte offset overflow"),
-            )
-            .expect("spilled offset overflow");
+        assert_eq!(
+            dst.len(),
+            byte_len,
+            "spilled destination buffer length mismatch"
+        );
+        if byte_len == 0 {
+            return;
+        }
+        let read_at = |file: &SpillFile, offset: u64, buf: &mut [u8]| {
+            const PARALLEL_READ_CHUNK: usize = 2 << 20;
+            if buf.len() >= 2 * PARALLEL_READ_CHUNK {
+                buf.par_chunks_mut(PARALLEL_READ_CHUNK)
+                    .enumerate()
+                    .for_each(|(idx, chunk)| {
+                        let off = offset + (idx * PARALLEL_READ_CHUNK) as u64;
+                        file.read_exact_at(off, chunk);
+                    });
+            } else {
+                file.read_exact_at(offset, buf);
+            }
+        };
+        if self.panels.len() == 1 {
+            let panel = &self.panels[0];
+            let byte_offset = panel
+                .offset
+                .checked_add(
+                    u64::try_from(start_row)
+                        .expect("start_row exceeds u64")
+                        .checked_mul(u64::try_from(row_bytes).expect("row_bytes exceeds u64"))
+                        .expect("spilled byte offset overflow"),
+                )
+                .expect("spilled offset overflow");
+            read_at(&panel.file, byte_offset, dst);
+            return;
+        }
+        // Multi-panel: read each panel's contiguous strip in parallel and
+        // scatter its columns into the row-major output buffer.
+        let mut col_byte_offset = 0usize;
+        let mut panel_buf = Vec::<u8>::new();
+        for panel in self.panels.iter() {
+            let panel_row_bytes = panel.width * size_of::<u64>();
+            if panel_row_bytes == 0 {
+                continue;
+            }
+            let panel_bytes = num_rows
+                .checked_mul(panel_row_bytes)
+                .expect("spilled panel read overflow");
+            let byte_offset = panel
+                .offset
+                .checked_add(
+                    u64::try_from(start_row)
+                        .expect("start_row exceeds u64")
+                        .checked_mul(
+                            u64::try_from(panel_row_bytes).expect("panel_row_bytes exceeds u64"),
+                        )
+                        .expect("spilled panel byte offset overflow"),
+                )
+                .expect("spilled panel offset overflow");
+            panel_buf.resize(panel_bytes, 0);
+            read_at(&panel.file, byte_offset, &mut panel_buf);
+            if num_rows >= 256 {
+                dst.par_chunks_exact_mut(row_bytes)
+                    .zip(panel_buf.par_chunks_exact(panel_row_bytes))
+                    .for_each(|(out_row, in_row)| {
+                        out_row[col_byte_offset..col_byte_offset + panel_row_bytes]
+                            .copy_from_slice(in_row);
+                    });
+            } else {
+                for (out_row, in_row) in dst
+                    .chunks_exact_mut(row_bytes)
+                    .zip(panel_buf.chunks_exact(panel_row_bytes))
+                {
+                    out_row[col_byte_offset..col_byte_offset + panel_row_bytes]
+                        .copy_from_slice(in_row);
+                }
+            }
+            col_byte_offset += panel_row_bytes;
+        }
+        debug_assert_eq!(col_byte_offset, row_bytes);
+    }
+
+    /// Reads `num_rows` contiguous rows starting at `start_row` into `dst` as
+    /// canonical `u64` field words (`dst.len() == num_rows * width`).
+    #[cfg(any(feature = "cuda", test))]
+    pub(crate) fn read_u64_rows_into(&self, start_row: usize, num_rows: usize, dst: &mut [u64]) {
+        assert_eq!(
+            dst.len(),
+            num_rows
+                .checked_mul(self.width)
+                .expect("spilled u64 read length overflow"),
+            "spilled u64 destination length mismatch"
+        );
+        if dst.is_empty() {
+            return;
+        }
+        #[cfg(target_endian = "little")]
+        {
+            // SAFETY: `dst` is a valid mutable `[u64]` slice with no padding
+            // bytes, and we initialize every byte via `read_raw_rows_into`.
+            let byte_dst = unsafe {
+                core::slice::from_raw_parts_mut(dst.as_mut_ptr().cast::<u8>(), size_of_val(dst))
+            };
+            self.read_raw_rows_into(start_row, num_rows, byte_dst);
+        }
+        #[cfg(not(target_endian = "little"))]
+        {
+            let raw = self.read_raw_rows(start_row, num_rows);
+            let (chunks, _) = raw.as_chunks::<8>();
+            for (slot, &bytes) in dst.iter_mut().zip(chunks) {
+                *slot = u64::from_le_bytes(bytes);
+            }
+        }
+    }
+
+    /// Reads `num_rows` contiguous rows starting at `start_row` as raw
+    /// canonical little-endian bytes (identical to `Goldilocks::into_byte_stream`).
+    pub(crate) fn read_raw_rows(&self, start_row: usize, num_rows: usize) -> Vec<u8> {
+        let byte_len = num_rows
+            .checked_mul(self.row_bytes())
+            .expect("spilled read byte length overflow");
         let mut buf = vec![0u8; byte_len];
-        self.file.read_exact_at(byte_offset, &mut buf);
+        self.read_raw_rows_into(start_row, num_rows, &mut buf);
         buf
     }
 
@@ -460,7 +749,7 @@ fn bytes_to_goldilocks(raw: &[u8]) -> Vec<Val> {
 
 /// Binary Merkle-tree padded layer length (matching `p3_merkle_tree::padded_len(raw_len, 2)`).
 #[inline]
-const fn padded_len_binary(raw_len: usize) -> usize {
+pub(super) const fn padded_len_binary(raw_len: usize) -> usize {
     if raw_len <= 1 {
         raw_len
     } else {
@@ -470,7 +759,9 @@ const fn padded_len_binary(raw_len: usize) -> usize {
 
 /// Validates that every matrix height sits on the `ceil(max_height / 2^k)`
 /// ladder anchored at the tallest matrix (matching `p3_merkle_tree`).
-fn validate_reachable_heights_iter(heights: impl Iterator<Item = usize> + Clone) -> usize {
+pub(super) fn validate_reachable_heights_iter(
+    heights: impl Iterator<Item = usize> + Clone,
+) -> usize {
     let max_height = heights
         .clone()
         .max()
@@ -494,13 +785,14 @@ fn validate_reachable_heights_iter(heights: impl Iterator<Item = usize> + Clone)
 
 /// Shared Merkle digest layers and opening-proof traversal for both in-memory
 /// and disk-spilled binary BLAKE3 Merkle trees.
-struct MerkleDigests {
-    digest_layers: Vec<Vec<[u8; 32]>>,
-    arity_schedule: Vec<usize>,
+#[doc(hidden)]
+pub struct MerkleDigests {
+    pub(crate) digest_layers: Vec<Vec<[u8; 32]>>,
+    pub(crate) arity_schedule: Vec<usize>,
 }
 
 impl MerkleDigests {
-    fn cap(&self, cap_height: usize) -> MerkleCap<Val, [u8; 32]> {
+    pub(crate) fn cap(&self, cap_height: usize) -> MerkleCap<Val, [u8; 32]> {
         let num_layers = self.digest_layers.len();
         let effective_cap_height = cap_height.min(num_layers.saturating_sub(1));
         let layer_idx = num_layers - 1 - effective_cap_height;
@@ -510,7 +802,7 @@ impl MerkleDigests {
         MerkleCap::new(layer[..cap_len].to_vec())
     }
 
-    fn open_single_proof(&self, index: usize, cap_height: usize) -> Vec<[u8; 32]> {
+    pub(crate) fn open_single_proof(&self, index: usize, cap_height: usize) -> Vec<[u8; 32]> {
         let num_layers = self.digest_layers.len();
         let effective_cap_height = cap_height.min(num_layers.saturating_sub(1));
         let proof_levels = num_layers
@@ -533,7 +825,11 @@ impl MerkleDigests {
         proof
     }
 
-    fn open_multi_proof(&self, indices: &[usize], cap_height: usize) -> PrunedMerklePaths<u8, 32> {
+    pub(crate) fn open_multi_proof(
+        &self,
+        indices: &[usize],
+        cap_height: usize,
+    ) -> PrunedMerklePaths<u8, 32> {
         let num_layers = self.digest_layers.len();
         let effective_cap_height = cap_height.min(num_layers.saturating_sub(1));
         let proof_levels = num_layers
@@ -574,6 +870,69 @@ impl MerkleDigests {
         }
 
         PrunedMerklePaths { sibling_hashes }
+    }
+}
+
+/// Builds a binary BLAKE3 [`MerkleDigests`] tree over matrices with the given
+/// `heights`, invoking `hash_height_group(height, &indices)` once for each
+/// distinct height group (in descending height order, preserving matrix index
+/// order within each group).
+#[cfg(feature = "cuda")]
+pub(crate) fn build_merkle_digests_from_height_hashes(
+    heights: &[usize],
+    mut hash_height_group: impl FnMut(usize, &[usize]) -> Vec<[u8; 32]>,
+    compress_domain: Blake3Domain,
+) -> MerkleDigests {
+    assert!(!heights.is_empty(), "No matrices given?");
+    let max_height = validate_reachable_heights_iter(heights.iter().copied());
+
+    let mut order: Vec<usize> = (0..heights.len()).collect();
+    order.sort_by_key(|&idx| Reverse(heights[idx]));
+
+    let tallest_end = order
+        .iter()
+        .take_while(|&&idx| heights[idx] == max_height)
+        .count();
+    let tallest = &order[..tallest_end];
+    let mut cursor = tallest_end;
+
+    let mut first_layer = hash_height_group(max_height, tallest);
+    assert_eq!(first_layer.len(), max_height);
+    first_layer.resize(padded_len_binary(max_height), [0u8; 32]);
+
+    let mut digest_layers = vec![first_layer];
+    let mut arity_schedule = Vec::new();
+
+    loop {
+        let prev_layer = digest_layers.last().unwrap().as_slice();
+        if prev_layer.len() <= 1 {
+            break;
+        }
+        let step = 2usize;
+        let raw_next = prev_layer.len() / step;
+        let next_layer_len = raw_next.next_power_of_two();
+
+        let inject_start = cursor;
+        while cursor < order.len() && heights[order[cursor]].next_power_of_two() == next_layer_len {
+            cursor += 1;
+        }
+        let inject_group = &order[inject_start..cursor];
+
+        let next_digests = if inject_group.is_empty() {
+            compress_layer_binary(prev_layer, compress_domain)
+        } else {
+            let inject_height = heights[inject_group[0]];
+            let rows_digests = hash_height_group(inject_height, inject_group);
+            assert_eq!(rows_digests.len(), inject_height);
+            compress_and_inject_prehashed(prev_layer, &rows_digests, compress_domain)
+        };
+        arity_schedule.push(step);
+        digest_layers.push(next_digests);
+    }
+
+    MerkleDigests {
+        digest_layers,
+        arity_schedule,
     }
 }
 
@@ -734,6 +1093,7 @@ pub(crate) struct SpilledMerkleTree {
     original_traces: Mutex<Vec<Option<SpilledMatrix>>>,
 }
 
+#[cfg_attr(feature = "cuda", allow(dead_code))]
 impl SpilledMerkleTree {
     pub(crate) fn build_with_prehashed(
         matrices: Vec<SpilledMatrix>,
@@ -914,7 +1274,11 @@ impl SpilledMerkleTree {
     }
 }
 
-fn block_rows_for_group(matrices: &[SpilledMatrix], group: &[usize], height: usize) -> usize {
+pub(super) fn block_rows_for_group(
+    matrices: &[SpilledMatrix],
+    group: &[usize],
+    height: usize,
+) -> usize {
     let total_row_bytes: usize = group
         .iter()
         .map(|&idx| matrices[idx].row_bytes())
@@ -956,7 +1320,10 @@ fn hash_leaf_group_streaming(
     }
 }
 
-fn compress_layer_binary(prev_layer: &[[u8; 32]], compress_domain: Blake3Domain) -> Vec<[u8; 32]> {
+pub(super) fn compress_layer_binary(
+    prev_layer: &[[u8; 32]],
+    compress_domain: Blake3Domain,
+) -> Vec<[u8; 32]> {
     let raw_next = prev_layer.len() / 2;
     let next_len_padded = padded_len_binary(raw_next);
     // SAFETY: `compress_pairs_uninit` initializes every element of `dst` (`0..raw_next`).
@@ -967,7 +1334,7 @@ fn compress_layer_binary(prev_layer: &[[u8; 32]], compress_domain: Blake3Domain)
     }
 }
 
-fn compress_and_inject_prehashed(
+pub(super) fn compress_and_inject_prehashed(
     prev_layer: &[[u8; 32]],
     rows_digests: &[[u8; 32]],
     compress_domain: Blake3Domain,
@@ -1095,6 +1462,7 @@ fn compress_and_inject_streaming(
 /// BLAKE3 Merkle tree or a disk-spilled [`SpilledMerkleTree`].
 pub struct SpillableMmcsData<M>(SpillableMmcsDataInner<M>);
 
+#[cfg_attr(feature = "cuda", allow(dead_code))]
 enum SpillableMmcsDataInner<M> {
     InMemory {
         tree: FastInMemoryMerkleTree<M>,
@@ -1111,6 +1479,7 @@ enum SpillableMmcsDataInner<M> {
     },
 }
 
+#[cfg_attr(feature = "cuda", allow(dead_code))]
 impl<M> SpillableMmcsData<M> {
     /// Returns `true` if the LDE leaf matrices are backed by temporary disk
     /// spill files rather than resident in memory.
@@ -1151,6 +1520,20 @@ impl<M> SpillableMmcsData<M> {
         }
     }
 
+    pub(crate) fn clone_in_memory_original_trace(&self, idx: usize) -> Option<RowMajorMatrix<Val>> {
+        match &self.0 {
+            SpillableMmcsDataInner::InMemory {
+                retained_traces, ..
+            } => {
+                let guard = retained_traces
+                    .lock()
+                    .expect("retained_traces lock poisoned");
+                guard.get(idx).and_then(Option::as_ref).cloned()
+            }
+            SpillableMmcsDataInner::Spilled { .. } => None,
+        }
+    }
+
     pub(crate) fn release_original_traces(&self) {
         match &self.0 {
             SpillableMmcsDataInner::InMemory {
@@ -1177,6 +1560,7 @@ pub struct SpillableMmcs {
     compress_domain: Blake3Domain,
 }
 
+#[cfg_attr(feature = "cuda", allow(dead_code))]
 impl SpillableMmcs {
     /// Creates an MMCS using the given leaf and internal-node BLAKE3 domains.
     pub fn new_with_domains(
@@ -1403,6 +1787,12 @@ impl CapValidatingMmcs<Val> for SpillableMmcs {
     ) -> Result<(), Self::Error> {
         verify_merkle_cap_len_for_log_height(self.cap_height(), commit, log_max_height)
     }
+
+    fn empty_multi_proof() -> Self::MultiProof {
+        PrunedMerklePaths {
+            sibling_hashes: Vec::new(),
+        }
+    }
 }
 
 /// CPU two-adic FRI PCS supporting optional disk-backed LDE spilling with
@@ -1421,6 +1811,7 @@ pub struct SpillableTwoAdicFriPcs<Dft, FriMmcs> {
     batching: FriBatching,
 }
 
+#[cfg_attr(feature = "cuda", allow(dead_code))]
 impl<Dft, FriMmcs> SpillableTwoAdicFriPcs<Dft, FriMmcs> {
     pub const fn new(dft: Dft, mmcs: SpillableMmcs, fri: FriParameters<FriMmcs>) -> Self {
         Self {
@@ -2081,7 +2472,7 @@ impl<Dft: TwoAdicSubgroupDft<Val>, FriMmcs> SpillableTwoAdicFriPcs<Dft, FriMmcs>
 
 /// Builds the bit-reversed evaluation coset `GENERATOR * <g>` of size
 /// `1 << log_size` in parallel chunks.
-fn build_bitrev_coset(log_size: usize) -> Vec<Val> {
+pub(crate) fn build_bitrev_coset(log_size: usize) -> Vec<Val> {
     let size = 1usize << log_size;
     let g = Val::two_adic_generator(log_size);
     let mut coset = Val::zero_vec(size);
@@ -2376,7 +2767,7 @@ fn compute_inverse_denominators_for_point<EF: ExtensionField<Val> + ExtensionOf<
     }
 }
 
-fn compute_inverse_denominators_from_dims<EF: ExtensionField<Val> + ExtensionOf<Val>>(
+pub(crate) fn compute_inverse_denominators_from_dims<EF: ExtensionField<Val> + ExtensionOf<Val>>(
     dims_and_points: &[(Vec<Dimensions>, &Vec<Vec<EF>>)],
     coset: &[Val],
 ) -> LinearMap<EF, Vec<EF>> {
@@ -2408,7 +2799,7 @@ fn compute_inverse_denominators_from_dims<EF: ExtensionField<Val> + ExtensionOf<
 /// Streams rows `0..h` of `spilled` once in bounded chunks and computes the
 /// exact barycentric interpolation at every point in `points`, matching
 /// `Interpolate::interpolate_coset_with_precomputation`.
-fn interpolate_spilled_coset<EF: ExtensionField<Val>>(
+pub(crate) fn interpolate_spilled_coset<EF: ExtensionField<Val>>(
     spilled: &SpilledMatrix,
     h: usize,
     points: &[EF],
@@ -2905,5 +3296,91 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn multi_panel_spilled_matrix_round_trips_rows_and_chunks() {
+        let dir = temp_spill_dir("multi-panel");
+        let height = 384usize;
+        let panel_widths = [3usize, 5, 4];
+        let total_width: usize = panel_widths.iter().sum();
+        let expected: Vec<u64> = (0..height * total_width)
+            .map(|i| {
+                ((i as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ 0x1234_5678) % Val::ORDER_U64
+            })
+            .collect();
+
+        let mut pack = SpillPackWriter::create(&dir);
+        let mut panels = Vec::new();
+        let mut col_start = 0usize;
+        for &pw in &panel_widths {
+            let panel = pack.append_streamed_panel(height, pw, |sink| {
+                let mut row_buf = Vec::with_capacity(pw * 64);
+                for r in 0..height {
+                    let row = &expected[r * total_width..(r + 1) * total_width];
+                    row_buf.extend_from_slice(&row[col_start..col_start + pw]);
+                    if row_buf.len() >= pw * 64 {
+                        sink.write_canonical_u64s(&row_buf);
+                        row_buf.clear();
+                    }
+                }
+                if !row_buf.is_empty() {
+                    sink.write_canonical_u64s(&row_buf);
+                }
+            });
+            panels.push(panel);
+            col_start += pw;
+        }
+        pack.flush();
+
+        let mat = SpilledMatrix::from_panels(height, panels);
+        assert_eq!(mat.height(), height);
+        assert_eq!(mat.width(), total_width);
+
+        // Full read via `read_u64_rows_into` (exercises parallel interleave >= 256 rows).
+        let mut all_words = vec![0u64; height * total_width];
+        mat.read_u64_rows_into(0, height, &mut all_words);
+        assert_eq!(all_words, expected);
+
+        // Small slice read (< 256 rows, serial interleave) and single-row reads.
+        let mut slice_words = vec![0u64; 17 * total_width];
+        mat.read_u64_rows_into(13, 17, &mut slice_words);
+        assert_eq!(
+            slice_words,
+            expected[13 * total_width..(13 + 17) * total_width]
+        );
+        for r in [0, 1, 127, 255, height - 1] {
+            let row = mat.read_row(r);
+            let exp: Vec<Val> = expected[r * total_width..(r + 1) * total_width]
+                .iter()
+                .map(|&w| Val::from_u64(w))
+                .collect();
+            assert_eq!(row, exp);
+        }
+
+        // Wrap-around window at the end of the matrix.
+        let wrap = mat.read_window_with_wrap(height - 4, 4);
+        assert_eq!(wrap.height(), 5);
+        for local in 0..4 {
+            let r = height - 4 + local;
+            let got: Vec<u64> = wrap
+                .row_slice(local)
+                .unwrap()
+                .iter()
+                .map(|v| v.as_canonical_u64())
+                .collect();
+            assert_eq!(got, &expected[r * total_width..(r + 1) * total_width]);
+        }
+        let wrap_row: Vec<u64> = wrap
+            .row_slice(4)
+            .unwrap()
+            .iter()
+            .map(|v| v.as_canonical_u64())
+            .collect();
+        assert_eq!(wrap_row, &expected[0..total_width]);
+
+        drop(mat);
+        drop(pack);
+        let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -127,6 +127,25 @@ pub fn logup_constraint_count(num_lookups: usize, group_size: usize, d: usize) -
     lookup_groups(num_lookups, group_size) * d
 }
 
+/// Shifts row `0` of a stage-2 accumulator trace by `+delta` so that the
+/// cyclic LogUp boundary injection moves cleanly from `is_last_row`
+/// (`X = g_N^{-1}`) to `is_first_row` (`X = 1`), where every active circuit
+/// subgroup shares the common point `X = 1` for multi-circuit `v6-zk`
+/// accumulator boundary blinding.
+#[inline]
+pub(crate) fn apply_first_row_delta_shift<EF: Field>(
+    stage_2_trace: &mut RowMajorMatrix<EF>,
+    delta: EF,
+) {
+    let width = stage_2_trace.width();
+    if width == 0 || stage_2_trace.height() == 0 {
+        return;
+    }
+    for elem in &mut stage_2_trace.values[..width] {
+        *elem += delta;
+    }
+}
+
 /// Coordinate product reduced modulo `modulus`, schoolbook. Generic-degree
 /// fallback; the hot D=2 binomial and D=3 cubic trinomial paths use [`mul2`]
 /// and [`mul3_trinomial`].
@@ -847,10 +866,12 @@ impl<F: Field> LookupValues<F> {
         }
     }
 
-    /// Returns an allocation-free builder; see [`LookupValuesBuilder`].
     /// A witness of the right shape with no payload, for a prover that
     /// derives every lookup message from the committed trace (the CUDA
-    /// graph path). Reading its multiplicities or arguments panics.
+    /// graph path). Prover paths that read lookup values on the host
+    /// instead, such as the fallbacks taken under device memory pressure,
+    /// first rebuild them from the committed stage-one trace; the proof is
+    /// identical either way.
     pub fn shape_only(height: usize, slot_arg_widths: &[usize]) -> Self {
         let num_lookups = slot_arg_widths.len();
         let mut arg_offsets = Vec::with_capacity(num_lookups + 1);
@@ -889,6 +910,13 @@ impl<F: Field> LookupValues<F> {
         self.num_lookups
     }
 
+    /// The shape-only witness with this witness's dimensions.
+    #[cfg(test)]
+    pub(crate) fn shape(&self) -> Self {
+        let widths: Vec<usize> = self.arg_offsets.windows(2).map(|w| w[1] - w[0]).collect();
+        Self::shape_only(self.height, &widths)
+    }
+
     /// Panics unless the witness payload is present.
     fn require_payload(&self) {
         assert!(
@@ -897,6 +925,7 @@ impl<F: Field> LookupValues<F> {
         );
     }
 
+    /// Returns an allocation-free builder; see [`LookupValuesBuilder`].
     pub fn builder(height: usize, slot_arg_widths: &[usize]) -> LookupValuesBuilder<F> {
         LookupValuesBuilder::new(height, slot_arg_widths)
     }
@@ -1197,19 +1226,16 @@ impl<F: Field> TraceRowChunk<F> for InMemoryChunk<'_, F> {
 
 /// Owned row-window chunk holding `n_rows + 1` rows (the chunk plus one
 /// wrap-around halo row), used when streaming chunks from disk.
-#[cfg(not(feature = "cuda"))]
 pub(crate) struct OwnedWindowChunk<F> {
     rows: RowMajorMatrix<F>,
 }
 
-#[cfg(not(feature = "cuda"))]
 impl<F: Field> OwnedWindowChunk<F> {
     pub(crate) fn new(rows: RowMajorMatrix<F>) -> Self {
         Self { rows }
     }
 }
 
-#[cfg(not(feature = "cuda"))]
 impl<F: Field> TraceRowChunk<F> for OwnedWindowChunk<F> {
     #[inline]
     fn row_pair(&self, local_row: usize) -> (&[F], &[F]) {
@@ -1579,6 +1605,22 @@ pub struct LookupRowMut<'a, F> {
 }
 
 impl<F: Field> LookupRowMut<'_, F> {
+    /// Returns mutable views of a slot's multiplicity and full argument buffer.
+    ///
+    /// This allows a witness generator to populate arguments directly, without
+    /// first collecting them into a temporary slice. Fresh builder storage is
+    /// zeroed; revisiting a slot preserves its existing contents. A negative
+    /// multiplicity has "pull" semantics, as in [`Self::pull`].
+    ///
+    /// # Panics
+    /// Panics if `slot` is outside this row's lookup slots.
+    #[inline]
+    pub fn slot_mut(&mut self, slot: usize) -> (&mut F, &mut [F]) {
+        let start = self.arg_offsets[slot];
+        let end = self.arg_offsets[slot + 1];
+        (&mut self.multiplicities[slot], &mut self.args[start..end])
+    }
+
     /// Writes lookup slot `slot` with "push" semantics (adds a claim).
     /// Fewer arguments than the slot's width leave zero padding.
     ///
@@ -2041,6 +2083,43 @@ mod tests {
     }
 
     #[test]
+    fn direct_slots_match_from_rows() {
+        let f = Val::from_u32;
+        let expected = LookupValues::from_rows(vec![
+            vec![
+                Lookup::push(f(2), vec![]),
+                Lookup::pull(f(3), vec![f(4), f(5)]),
+            ],
+            vec![Lookup::empty(), Lookup::push(f(6), vec![f(7)])],
+        ]);
+        let mut builder = LookupValues::builder(2, &[0, 2]);
+        {
+            let mut rows = builder.rows_mut();
+            let (count, args) = rows[0].slot_mut(0);
+            assert_eq!(*count, Val::ZERO);
+            assert!(args.is_empty());
+            *count = f(2);
+            let (count, args) = rows[0].slot_mut(1);
+            *count = -f(3);
+            args.copy_from_slice(&[f(4), f(5)]);
+            // A second view exposes the existing buffer, without resetting it.
+            let (count, args) = rows[0].slot_mut(1);
+            assert_eq!(*count, -f(3));
+            assert_eq!(args, &[f(4), f(5)]);
+            let (count, args) = rows[1].slot_mut(1);
+            *count = f(6);
+            args[0] = f(7);
+            assert_eq!(args[1], Val::ZERO);
+        }
+        let actual = builder.finish();
+        assert_eq!(expected.height, actual.height);
+        assert_eq!(expected.num_lookups, actual.num_lookups);
+        assert_eq!(expected.arg_offsets, actual.arg_offsets);
+        assert_eq!(expected.multiplicities, actual.multiplicities);
+        assert_eq!(expected.args, actual.args);
+    }
+
+    #[test]
     fn lookup_test() {
         let (system, key) = system();
         let witness = witness(&system);
@@ -2048,6 +2127,26 @@ mod tests {
         let claim = &[f(0), f(4), f(1)];
         let proof = system.prove(&key, claim, witness);
         system.verify(claim, &proof).unwrap();
+    }
+
+    /// A shape-only witness proves the same bytes as the materialized one:
+    /// the host lookup path rebuilds the omitted values from the committed
+    /// stage-one traces.
+    #[test]
+    fn shape_only_witness_proves_identically() {
+        let (system, key) = system();
+        let witness = witness(&system);
+        let shape = SystemWitness {
+            traces: witness.traces.clone(),
+            lookups: witness.lookups.iter().map(LookupValues::shape).collect(),
+        };
+        assert!(shape.lookups.iter().all(|l| !l.is_materialized()));
+        let f = Val::from_u32;
+        let claim = &[f(0), f(4), f(1)];
+        let expected = system.prove(&key, claim, witness);
+        let actual = system.prove(&key, claim, shape);
+        assert_eq!(expected.to_bytes().unwrap(), actual.to_bytes().unwrap());
+        system.verify(claim, &actual).unwrap();
     }
 
     /// A three-circuit system where the third circuit (`Dead`, its own

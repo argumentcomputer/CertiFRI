@@ -323,7 +323,7 @@ fn streaming_and_spilled_proofs_are_byte_identical_across_configs() {
     ) in cases.iter().enumerate()
     {
         #[cfg(feature = "cuda")]
-        if cap_height != 0 || max_log_arity > 1 {
+        if cap_height != 0 {
             continue;
         }
         let inputs = multi_circuit_inputs(k, work_rows);
@@ -382,10 +382,7 @@ fn streaming_and_spilled_proofs_are_byte_identical_across_configs() {
         let spill_dir = fresh_spill_dir(&format!("case-{case_idx}"));
         let cfg_spilled = make_config(log_blowup, cap_height, max_log_arity, pow_bits)
             .with_disk_spill(&spill_dir);
-        #[cfg(not(feature = "cuda"))]
         assert_eq!(cfg_spilled.spill_dir(), Some(spill_dir.as_path()));
-        #[cfg(feature = "cuda")]
-        assert!(cfg_spilled.spill_dir().is_none());
         let (sys_spilled, key_spilled) =
             System::new_without_preprocessed(cfg_spilled, inputs.clone());
         #[cfg(not(feature = "cuda"))]

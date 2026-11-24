@@ -1927,15 +1927,15 @@ pub(crate) fn pack_host_matrix_rows(
                 dst.copy_from_slice(&elem.as_canonical_u64().to_le_bytes());
             });
     } else {
-        for (dst, elem) in out.chunks_exact_mut(8).zip(elems) {
-            dst.copy_from_slice(&elem.as_canonical_u64().to_le_bytes());
+        for (dst, elem) in out.as_chunks_mut::<8>().0.iter_mut().zip(elems) {
+            *dst = elem.as_canonical_u64().to_le_bytes();
         }
     }
     out
 }
 
 pub(crate) fn pack_u64_words_canonical_le(words: &[u64]) -> Vec<u8> {
-    let mut out = vec![0u8; words.len() * size_of::<u64>()];
+    let mut out = vec![0u8; size_of_val(words)];
     if words.len() >= 4096 {
         out.par_chunks_exact_mut(8)
             .zip(words.par_iter())
@@ -1943,8 +1943,8 @@ pub(crate) fn pack_u64_words_canonical_le(words: &[u64]) -> Vec<u8> {
                 dst.copy_from_slice(&Goldilocks::new(w).as_canonical_u64().to_le_bytes());
             });
     } else {
-        for (dst, &w) in out.chunks_exact_mut(8).zip(words) {
-            dst.copy_from_slice(&Goldilocks::new(w).as_canonical_u64().to_le_bytes());
+        for (dst, &w) in out.as_chunks_mut::<8>().0.iter_mut().zip(words) {
+            *dst = Goldilocks::new(w).as_canonical_u64().to_le_bytes();
         }
     }
     out

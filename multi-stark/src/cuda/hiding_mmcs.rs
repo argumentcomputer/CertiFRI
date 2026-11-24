@@ -930,20 +930,19 @@ impl HidingCudaMmcs {
                                         let slice = &mat.values
                                             [row_start * width..(row_start + n_rows) * width];
                                         for (chunk, elem) in
-                                            raw.chunks_exact_mut(8).zip(slice.iter())
+                                            raw.as_chunks_mut::<8>().0.iter_mut().zip(slice.iter())
                                         {
-                                            chunk.copy_from_slice(
-                                                &elem.as_canonical_u64().to_le_bytes(),
-                                            );
+                                            *chunk = elem.as_canonical_u64().to_le_bytes();
                                         }
                                         (raw, row_bytes)
                                     } else if let Some(lde) = resident[i].as_ref() {
                                         let mut words = vec![0u64; n_rows * lde.width()];
                                         lde.copy_rows_to_host(row_start, n_rows, &mut words);
                                         let mut raw = vec![0u8; n_rows * row_bytes];
-                                        for (chunk, &w) in raw.chunks_exact_mut(8).zip(words.iter())
+                                        for (chunk, &w) in
+                                            raw.as_chunks_mut::<8>().0.iter_mut().zip(words.iter())
                                         {
-                                            chunk.copy_from_slice(&w.to_le_bytes());
+                                            *chunk = w.to_le_bytes();
                                         }
                                         (raw, row_bytes)
                                     } else {
@@ -978,7 +977,7 @@ impl HidingCudaMmcs {
             .map(|mat| {
                 let cell = OnceLock::new();
                 if let Some(mat) = mat {
-                    cell.set(mat).ok().expect("fresh hiding host cell");
+                    cell.set(mat).expect("fresh hiding host cell");
                 }
                 cell
             })

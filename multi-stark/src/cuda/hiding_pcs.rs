@@ -292,6 +292,11 @@ where
     }
 }
 
+type HidingCudaCommitOutput = (
+    MerkleCap<Goldilocks, [u8; 32]>,
+    HidingCudaMmcsData<RowMajorMatrix<Goldilocks>>,
+);
+
 impl<FriMmcs> HidingCudaTwoAdicFriPcs<Goldilocks, CudaDft, HidingCudaMmcs, FriMmcs> {
     /// Streams public preprocessed matrices onto the `2N · B` LDE coset WITHOUT
     /// random rows and using the deterministic public [`preprocessed_salt_seed`].
@@ -304,10 +309,7 @@ impl<FriMmcs> HidingCudaTwoAdicFriPcs<Goldilocks, CudaDft, HidingCudaMmcs, FriMm
                 bool,
             ),
         >,
-    ) -> Option<(
-        MerkleCap<Goldilocks, [u8; 32]>,
-        HidingCudaMmcsData<RowMajorMatrix<Goldilocks>>,
-    )> {
+    ) -> Option<HidingCudaCommitOutput> {
         self.commit_streaming_inner(evaluations, false, preprocessed_salt_seed())
     }
 
@@ -323,10 +325,7 @@ impl<FriMmcs> HidingCudaTwoAdicFriPcs<Goldilocks, CudaDft, HidingCudaMmcs, FriMm
                 bool,
             ),
         >,
-    ) -> Option<(
-        MerkleCap<Goldilocks, [u8; 32]>,
-        HidingCudaMmcsData<RowMajorMatrix<Goldilocks>>,
-    )> {
+    ) -> Option<HidingCudaCommitOutput> {
         self.commit_streaming_inner(evaluations, true, random_seed())
     }
 
@@ -341,10 +340,7 @@ impl<FriMmcs> HidingCudaTwoAdicFriPcs<Goldilocks, CudaDft, HidingCudaMmcs, FriMm
         >,
         blind_rows: bool,
         salt_seed: [u8; 32],
-    ) -> Option<(
-        MerkleCap<Goldilocks, [u8; 32]>,
-        HidingCudaMmcsData<RowMajorMatrix<Goldilocks>>,
-    )> {
+    ) -> Option<HidingCudaCommitOutput> {
         let Some(dir) = self.spill_dir.as_deref() else {
             let mut items = Vec::new();
             let mut retained = Vec::new();
@@ -365,7 +361,7 @@ impl<FriMmcs> HidingCudaTwoAdicFriPcs<Goldilocks, CudaDft, HidingCudaMmcs, FriMm
             if any_retained {
                 // Attach retained 1× original traces for zero-FFT lookup/trace access.
                 // (No-op for Cpu variant which has its own LDEs.)
-                let _ = data.set_retained_traces(retained);
+                data.set_retained_traces(retained);
             }
             return Some((commit, data));
         };

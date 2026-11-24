@@ -327,8 +327,8 @@ fn cuda_quotient_eval_blocks_and_panel_slice_match_cpu_ext2_and_ext3() {
                     + Expr::preprocessed(2),
             ],
             ext_constraints: vec![
-                ExtExpr::stage2(0, ext_degree as u32, RowOffset::Next)
-                    - ExtExpr::stage2(0, ext_degree as u32, RowOffset::Current),
+                ExtExpr::stage2(0, u32::try_from(ext_degree).unwrap(), RowOffset::Next)
+                    - ExtExpr::stage2(0, u32::try_from(ext_degree).unwrap(), RowOffset::Current),
             ],
             lookups: (0..lookup_count)
                 .map(|i| {
@@ -692,13 +692,14 @@ fn cuda_spilled_pcs_open_matches_cpu_spilled_v6_and_verifies_v6zk() {
         proof_gpu_bytes, proof_cpu_bytes,
         "v6 CUDA spilled FRI proof must be byte-for-byte identical to CPU spilled FRI proof"
     );
-    let (proof_for_cpu, _): (
-        <SpillableTwoAdicFriPcs<
-            Radix2DitParallel<Goldilocks>,
-            ExtensionMmcs<Goldilocks, ExtVal3, SpillableMmcs>,
-        > as Pcs<ExtVal3, crate::types::DomainChallenger<ExtVal3>>>::Proof,
-        usize,
-    ) = bincode::serde::decode_from_slice(&proof_gpu_bytes, wire_cfg).unwrap();
+    type CpuV6SpillPcs = SpillableTwoAdicFriPcs<
+        Radix2DitParallel<Goldilocks>,
+        ExtensionMmcs<Goldilocks, ExtVal3, SpillableMmcs>,
+    >;
+    type CpuV6SpillProof =
+        <CpuV6SpillPcs as Pcs<ExtVal3, crate::types::DomainChallenger<ExtVal3>>>::Proof;
+    let (proof_for_cpu, _): (CpuV6SpillProof, usize) =
+        bincode::serde::decode_from_slice(&proof_gpu_bytes, wire_cfg).unwrap();
     let mut ch_ver = cfg_v6.initialise_challenger();
     <SpillableTwoAdicFriPcs<_, _> as Pcs<ExtVal3, _>>::verify(
         &cpu_pcs,
@@ -811,13 +812,14 @@ fn cuda_spilled_pcs_open_matches_cpu_spilled_v6_and_verifies_v6zk() {
     let zk_cpu_pcs = HidingSpillableTwoAdicFriPcs::new(cpu_dft, zk_cpu_mmcs, zk_cpu_fri)
         .with_batching(FriBatching::Tensor);
     let zk_proof_bytes = bincode::serde::encode_to_vec(&zk_proof, wire_cfg).unwrap();
-    let (zk_proof_for_cpu, _): (
-        <HidingSpillableTwoAdicFriPcs<
-            Radix2DitParallel<Goldilocks>,
-            ExtensionMmcs<Goldilocks, ExtVal3, HidingSpillableMmcs>,
-        > as Pcs<ExtVal3, crate::types::DomainChallenger<ExtVal3>>>::Proof,
-        usize,
-    ) = bincode::serde::decode_from_slice(&zk_proof_bytes, wire_cfg).unwrap();
+    type CpuV6ZkSpillPcs = HidingSpillableTwoAdicFriPcs<
+        Radix2DitParallel<Goldilocks>,
+        ExtensionMmcs<Goldilocks, ExtVal3, HidingSpillableMmcs>,
+    >;
+    type CpuV6ZkSpillProof =
+        <CpuV6ZkSpillPcs as Pcs<ExtVal3, crate::types::DomainChallenger<ExtVal3>>>::Proof;
+    let (zk_proof_for_cpu, _): (CpuV6ZkSpillProof, usize) =
+        bincode::serde::decode_from_slice(&zk_proof_bytes, wire_cfg).unwrap();
     let mut ch_zk_ver = cfg_zk.initialise_challenger();
     <HidingSpillableTwoAdicFriPcs<_, _> as Pcs<ExtVal3, _>>::verify(
         &zk_cpu_pcs,

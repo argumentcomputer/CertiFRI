@@ -698,6 +698,11 @@ impl<Dft, FriMmcs> CudaTwoAdicFriPcs<Goldilocks, Dft, CudaMmcs, FriMmcs> {
     }
 }
 
+type CudaCommitOutput = (
+    MerkleCap<Goldilocks, [u8; 32]>,
+    CudaMmcsData<RowMajorMatrix<Goldilocks>>,
+);
+
 impl<FriMmcs> CudaTwoAdicFriPcs<Goldilocks, CudaDft, CudaMmcs, FriMmcs> {
     /// Commits a streaming iterator of `(domain, trace, retain_1x)` items.
     ///
@@ -715,10 +720,7 @@ impl<FriMmcs> CudaTwoAdicFriPcs<Goldilocks, CudaDft, CudaMmcs, FriMmcs> {
                 bool,
             ),
         >,
-    ) -> Option<(
-        MerkleCap<Goldilocks, [u8; 32]>,
-        CudaMmcsData<RowMajorMatrix<Goldilocks>>,
-    )> {
+    ) -> Option<CudaCommitOutput> {
         let Some(dir) = self.spill_dir.as_deref() else {
             // Without a spill directory, fall back to the standard CUDA commit
             // path (keeping retained 1× traces when requested).
@@ -751,15 +753,14 @@ impl<FriMmcs> CudaTwoAdicFriPcs<Goldilocks, CudaDft, CudaMmcs, FriMmcs> {
                 } else if let CudaMmcsData::Cuda {
                     retained_traces, ..
                 } = &mut data
+                    && originals.iter().all(Option::is_some)
                 {
-                    if originals.iter().all(Option::is_some) {
-                        let _ = retained_traces.set(
-                            originals
-                                .into_iter()
-                                .map(|o| o.expect("retained trace"))
-                                .collect(),
-                        );
-                    }
+                    let _ = retained_traces.set(
+                        originals
+                            .into_iter()
+                            .map(|o| o.expect("retained trace"))
+                            .collect(),
+                    );
                 }
             }
             return Some((commit, data));

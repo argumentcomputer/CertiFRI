@@ -685,8 +685,9 @@ where
             .map(|input| {
                 let quotient_degree = input.circuit.quotient_degree();
                 let trace_height = input.quotient_domain.size() / quotient_degree;
-                let lde_height = trace_height
-                    .checked_shl(log_blowup as u32)
+                let lde_height = u32::try_from(log_blowup)
+                    .ok()
+                    .and_then(|shift| trace_height.checked_shl(shift))
                     .unwrap_or(usize::MAX);
                 lde_height
                     .saturating_mul(quotient_degree * ext_degree)

@@ -1,0 +1,95 @@
+name: Build and Test
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # All runner families share this AVX-512 baseline. Explicit flags keep
+  # cached build scripts and proc macros compatible across Intel and AMD.
+  RUSTFLAGS: "-Ctarget-cpu=x86-64-v4 -Ctarget-feature=+avx512vbmi2,+gfni"
+
+jobs:
+  linux-test:
+    runs-on: runs-on=${{ github.run_id }}-linux-test-${{ github.run_attempt }}/cpu=8/family=r7i+r8i+r7a+r8a/image=ubuntu26-full-x64/volume=100gb/extras=s3-cache
+    steps:
+      - uses: runs-on/action@dfae4d98c5537a0dc7bbb7e6b9211f30ba240f6d # v2.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Deny warnings through cargo's build.warnings while preserving the
+      # shared AVX-512 baseline for both host and target code.
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+      - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
+        with:
+          tool: nextest
+      - name: Linux Tests
+        run: |
+          cargo nextest run --profile ci --cargo-profile dev-ci --workspace --features parallel
+
+  lints:
+    runs-on: runs-on=${{ github.run_id }}-lints-${{ github.run_attempt }}/cpu=8/family=r7i+r8i+r7a+r8a/image=ubuntu26-full-x64/volume=100gb/extras=s3-cache
+    steps:
+      - uses: runs-on/action@dfae4d98c5537a0dc7bbb7e6b9211f30ba240f6d # v2.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # actionlint, shellcheck, pinact and zizmor over this repo's workflows.
+      # Runs before the toolchain setup so a workflow problem fails fast.
+      - name: Lint workflows
+        uses: argumentcomputer/ci-workflows/.github/actions/lint-workflows@main
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+      - name: Check Rustfmt code style
+        run: cargo fmt --all --check
+      # Runtime correctness is validated on NVIDIA runners via cuda/smoke.sh. Keep the
+      # ordinary CI path independent of the CUDA toolkit.
+      - name: Check CPU targets compile
+        run: cargo check --release --all-targets --features parallel --workspace
+      - name: Check clippy lints
+        run: cargo clippy --release --workspace --all-targets --features parallel
+      - name: Doctests
+        run: cargo test --doc --workspace
+      - name: Get Rust version
+        id: rust-version
+        run: echo "version=$(awk -F '"' '/^channel/ {print $2}' rust-toolchain.toml)" | tee -a "$GITHUB_OUTPUT"
+      # Lint dependencies for licensing and auditing issues as per `deny.toml`
+      - name: Cargo-deny
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          rust-version: ${{ steps.rust-version.outputs.version }}
+
+  cuda-compile:
+    # A toolkit container is sufficient for compile coverage; no GPU runner
+    # is needed. The runner request mirrors Ix CI, the downstream consumer
+    # of the CUDA backend. The container cannot see a host bind mount, so
+    # its Cargo cache lives in the S3-backed actions cache.
+    runs-on: runs-on=${{ github.run_id }}-cuda-compile-${{ github.run_attempt }}/cpu=8/family=r7i+r8i+r7a+r8a/image=ubuntu26-full-x64/volume=100gb/extras=s3-cache
+    container: nvidia/cuda:12.8.1-devel-ubuntu24.04
+    env:
+      MULTI_STARK_CUDA_ARCHS: "80"
+    steps:
+      - uses: runs-on/action@dfae4d98c5537a0dc7bbb7e6b9211f30ba240f6d # v2.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The devel image ships build-essential (a dependency of cuda-nvcc)
+      # and ca-certificates, but purges curl after adding NVIDIA's apt
+      # repository, and the toolchain action fetches rustup with curl.
+      - name: Install curl for the rustup installer
+        run: |
+          apt-get update
+          apt-get install --yes --no-install-recommends curl
+      # Use the same AVX-512 host baseline as the other jobs. The action
+      # sets build.warnings=deny, including clippy warnings.
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+      - name: Compile and lint CUDA targets
+        run: cargo clippy --release --locked --all-targets --features parallel,cuda

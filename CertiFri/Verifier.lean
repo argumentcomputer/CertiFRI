@@ -59,6 +59,8 @@ of degree below `2 ^ (c.logHeight - logBlowup)` that takes the value
   (`firstMessage`), commitments first, then points, then the claimed values;
   the last part is what `pcs.verify` absorbs. A caller reproduces this in
   Plonky3 by observing the commitments and the points before `pcs.open`.
+  `verifyFrom` is the entry point with Plonky3's contract: it starts from the
+  caller's challenger state and absorbs the claimed values only.
 * Only folding by two. Plonky3 reads the arity of each round from the proof and
   allows any up to `max_log_arity`.
 * The checks are evaluated in another order, and a failed check gives `false`,
@@ -72,6 +74,10 @@ of degree below `2 ^ (c.logHeight - logBlowup)` that takes the value
 
 Nothing in this file. The proofs package relates `verify` to the model verifier
 of the security theory, and derives soundness (`Proofs/CertiFriProofs/Exec/`).
+Those theorems are about `verify`. `verifyFrom` runs the same checks on another
+transcript; what it guarantees depends on the protocol around it. For the
+multi-stark verifier, which calls it, that is proved in
+`Proofs/CertiFriProofs/Exec/Stark/`.
 -/
 
 namespace CertiFri.Fri
@@ -198,16 +204,14 @@ def commitPhase [Inhabited D] (chal : Challenger σ F EF D) (commitPowBits : Nat
     let beta := chal.sampleExt pow.2
     (prev.1.push beta.1, prev.2.1 && pow.1, beta.2)
 
-/-- The challenges of a run, derived from the challenger in state `init`. The
-order of the operations is that of Plonky3's `pcs.verify` and `verify_fri`,
-after the commitments and the opening points are absorbed. -/
-def transcript [Inhabited D] (chal : Challenger σ F EF D) (init : σ) (params : FriParams)
-    (shape : ClaimShape) (commitments : Array D) (points values : Array EF)
-    {InputProof CommitProof : Type} (proof : FriProof F EF D InputProof CommitProof) :
-    Challenges EF :=
+/-- The challenges of a run from the batching challenge on, derived from the
+challenger in state `s`: the state after the claimed values are absorbed. The
+order of the operations is that of Plonky3's `verify_fri`. -/
+def transcriptTail [Inhabited D] (chal : Challenger σ F EF D) (s : σ) (params : FriParams)
+    (shape : ClaimShape) {InputProof CommitProof : Type}
+    (proof : FriProof F EF D InputProof CommitProof) : Challenges EF :=
   let n := logMaxHeight params.logBlowup shape
   let rounds := numRounds params shape
-  let s := chal.observeAll init (firstMessage commitments points values)
   let alpha := chal.sampleExt s
   let commit := commitPhase chal params.commitPowBits proof.commitPhaseCommits
     proof.commitPowWitnesses rounds alpha.2
@@ -217,6 +221,26 @@ def transcript [Inhabited D] (chal : Challenger σ F EF D) (init : σ) (params :
     betas := commit.1
     powOk := commit.2.1 && pow.1
     indices := (chal.sampleIndices n params.numQueries pow.2).toArray }
+
+/-- The challenges of a run, derived from the challenger in state `init`: the
+verifier absorbs the commitments, the opening points and the claimed values
+(`firstMessage`), and continues as Plonky3's `verify_fri`. -/
+def transcript [Inhabited D] (chal : Challenger σ F EF D) (init : σ) (params : FriParams)
+    (shape : ClaimShape) (commitments : Array D) (points values : Array EF)
+    {InputProof CommitProof : Type} (proof : FriProof F EF D InputProof CommitProof) :
+    Challenges EF :=
+  transcriptTail chal (chal.observeAll init (firstMessage commitments points values)) params
+    shape proof
+
+/-- The challenges of a run inside a larger protocol, derived from the
+challenger in state `s`: the verifier absorbs the claimed values only, and
+continues as Plonky3's `verify_fri`. This is the transcript of Plonky3's
+`pcs.verify`: whatever fixes the commitments and the opening points was
+absorbed, or squeezed, by the caller on the way to `s`. -/
+def transcriptFrom [Inhabited D] (chal : Challenger σ F EF D) (s : σ) (params : FriParams)
+    (shape : ClaimShape) (values : Array EF) {InputProof CommitProof : Type}
+    (proof : FriProof F EF D InputProof CommitProof) : Challenges EF :=
+  transcriptTail chal (chal.observeAll s (values.toList.map .ext)) params shape proof
 
 end Transcript
 
@@ -454,6 +478,22 @@ def verify {σ : Type} [Inhabited D] (inputMmcs : Mmcs F D) (friMmcs : Mmcs EF D
   shapeOk (F := F) params shape commitments points values proof
     && verifyWith inputMmcs friMmcs params shape commitments points values proof
       (transcript chal init params shape commitments points values proof)
+
+/-- **The FRI verifier inside a larger protocol.** As `verify`, but the
+challenger is in a state `s` the caller brought it to, and only the claimed
+values are absorbed before the batching challenge (`transcriptFrom`). This is
+the contract of Plonky3's `pcs.verify`.
+
+The caller is responsible for what `s` binds. The commitments and the opening
+points are not absorbed here: each must be absorbed before `s`, or be a
+function of what was absorbed and squeezed before `s`. -/
+def verifyFrom {σ : Type} [Inhabited D] (inputMmcs : Mmcs F D) (friMmcs : Mmcs EF D)
+    (chal : Challenger σ F EF D) (s : σ) (params : FriParams) (shape : ClaimShape)
+    (commitments : Array D) (points values : Array EF)
+    (proof : FriProof F EF D inputMmcs.MultiProof friMmcs.MultiProof) : Bool :=
+  shapeOk (F := F) params shape commitments points values proof
+    && verifyWith inputMmcs friMmcs params shape commitments points values proof
+      (transcriptFrom chal s params shape values proof)
 
 end Checks
 

@@ -1,0 +1,552 @@
+import CertiFriP3.Bn254
+
+/-!
+# Tests of the scalar field of BN254
+
+Checks of `CertiFriP3/Bn254.lean`, and through it of the prime field of
+`CertiFriP3/PrimeField.lean` on numbers of several words.
+
+* Against natural-number arithmetic. The operations are compared with the same
+  operations on natural numbers and on integers modulo `r`, on numbers at the
+  edges of the reduction (around the powers `2^64`, `2^128`, `2^192`, `2^254`,
+  `2^256` and around `r`) and on pseudo-random numbers of 256 bits.
+* Algebraic identities. The laws of exponents, and the consistency of the table
+  of generators of the two-adic subgroups.
+* Against Plonky3. The vectors of the section named so were computed by
+  Plonky3 at revision `0d803737`, by a program linked with its crates
+  `p3-bn254` and `p3-field` (`CertiFriTest/vectors/fields`; `Bn254`): sums,
+  differences, products, opposites, inverses, powers, the generators of the
+  two-adic subgroups, the generator of the multiplicative group and the order
+  of the field.
+
+The operands of a vector may be numbers of 256 bits that are not canonical
+(Plonky3's `Bn254::new` reduces four words); the results are canonical.
+-/
+
+namespace CertiFriTest.P3.Bn254
+
+open CertiFri CertiFri.P3
+
+/-- The order of the field. -/
+def r : Nat := Bn254.order
+
+/-- The element a natural number represents. -/
+def f (n : Nat) : Bn254 := Fp.ofNat n
+
+/-! ## Construction and representation -/
+
+-- The order, as the four words of Plonky3's `BN254_PRIME` list it.
+#guard r = 0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001
+#guard 2 ^ 253 < r ∧ r < 2 ^ 254
+#guard (f 0).val = 0 ∧ (f r).val = 0 ∧ (f (r + 5)).val = 5 ∧ (f (r - 1)).val = r - 1
+#guard (f (2 ^ 600 + 3)).val = (2 ^ 600 + 3) % r
+#guard (Fp.ofCanonical? 0 : Option Bn254).map (·.val) = some 0
+#guard (Fp.ofCanonical? (r - 1) : Option Bn254).map (·.val) = some (r - 1)
+#guard (Fp.ofCanonical? r : Option Bn254).isNone
+#guard (Fp.ofCanonical? (r + 1) : Option Bn254).isNone
+#guard (Fp.ofCanonical? (2 ^ 254) : Option Bn254).isNone
+#guard (0 : Bn254).val = 0 ∧ (1 : Bn254).val = 1 ∧ (default : Bn254).val = 0
+#guard f 5 = f (r + 5) ∧ f 5 ≠ f 6 ∧ f 5 == f (r + 5) ∧ !(f 5 == f 6)
+#guard reprStr (f (r + 5)) = "5"
+
+/-! ## Against natural-number arithmetic -/
+
+/-- Numbers at the edges of the reduction. -/
+def edges : Array Nat := #[
+  0, 1, 2, 3, 5, 2 ^ 32, 2 ^ 63, 2 ^ 64 - 1, 2 ^ 64, 2 ^ 64 + 1, 2 ^ 127, 2 ^ 128 - 1, 2 ^ 128,
+  2 ^ 128 + 1, 2 ^ 192 - 1, 2 ^ 192, 2 ^ 253 - 1, 2 ^ 253, 2 ^ 253 + 1, (r - 1) / 2, (r + 1) / 2,
+  r - 2 ^ 28, r - 2 ^ 28 + 1, r - 3, r - 2, r - 1, r, r + 1, 2 * r - 1, 2 ^ 254 - 1, 2 ^ 254,
+  2 ^ 255, 2 ^ 256 - 1, 2 ^ 256, r * r - 1, r * r, 2 ^ 512 - 1]
+
+/-- The four operations on the elements `m` and `n` represent agree with the
+operations on natural numbers and on integers, reduced modulo `r`. -/
+def agrees (m n : Nat) : Bool :=
+  let x := f m
+  let y := f n
+  (x + y).val == (m + n) % r && (x - y).val == (((m : Int) - n) % r).toNat
+    && (x * y).val == m * n % r && (-x).val == ((-(m : Int)) % r).toNat
+
+#guard edges.all fun m => edges.all fun n => agrees m n
+
+-- A number is canonical exactly when it is below `r`.
+#guard edges.all fun n =>
+  (Fp.ofCanonical? n : Option Bn254) == if n < r then some (f n) else none
+
+/-- One step of the SplitMix64 generator: the next state and the output. -/
+def splitMix (state : UInt64) : UInt64 × UInt64 :=
+  let state := state + 0x9E3779B97F4A7C15
+  let z := (state ^^^ (state >>> 30)) * 0xBF58476D1CE4E5B9
+  let z := (z ^^^ (z >>> 27)) * 0x94D049BB133111EB
+  (state, z ^^^ (z >>> 31))
+
+/-- A pseudo-random number of 256 bits, from four words, with the next
+state. -/
+def randomNat (state : UInt64) : UInt64 × Nat :=
+  let first := splitMix state
+  let second := splitMix first.1
+  let third := splitMix second.1
+  let fourth := splitMix third.1
+  (fourth.1, first.2.toNat + 2 ^ 64 * second.2.toNat + 2 ^ 128 * third.2.toNat
+    + 2 ^ 192 * fourth.2.toNat)
+
+/-- Whether `check` holds on `count` pairs of pseudo-random numbers of 256
+bits. -/
+def onRandomPairs (check : Nat → Nat → Bool) : (count : Nat) → (state : UInt64) → Bool
+  | 0, _ => true
+  | count + 1, state =>
+    let first := randomNat state
+    let second := randomNat first.1
+    check first.2 second.2 && onRandomPairs check count second.1
+
+#guard onRandomPairs agrees 2000 1
+-- Numbers of 254 bits: about three quarters of them are canonical.
+#guard onRandomPairs (fun m n => agrees (m % 2 ^ 254) (n % 2 ^ 254)) 2000 2
+
+/-- The identities that tie the difference and the opposite to the sum. -/
+def differenceAgrees (m n : Nat) : Bool :=
+  let x := f m
+  let y := f n
+  x - y + y == x && x + -x == 0 && x - y == x + -y && x - x == 0 && -(-x) == x
+
+#guard edges.all fun m => edges.all fun n => differenceAgrees m n
+#guard onRandomPairs differenceAgrees 2000 3
+
+/-- The inverse of the element `n` represents is the element whose product
+with it is one, in the field and on natural numbers, and it is the power
+`r - 2`. The inverse of zero is zero. -/
+def inverseAgrees (n : Nat) : Bool :=
+  let x := f n
+  if n % r = 0 then x⁻¹ == 0
+  else
+    x * x⁻¹ == 1 && x⁻¹.val * n % r == 1 && x⁻¹ == fieldPow x (r - 2) && x⁻¹⁻¹ == x
+
+#guard edges.all inverseAgrees
+#guard onRandomPairs (fun m n => inverseAgrees m && inverseAgrees n) 100 4
+-- The inverses of the numbers below 200, among them `0⁻¹ = 0`.
+#guard (List.range 200).all inverseAgrees
+#guard (0 : Bn254)⁻¹ = 0 ∧ (1 : Bn254)⁻¹ = 1 ∧ (-1 : Bn254)⁻¹ = -1
+
+/-- The power `k` of the element `n` represents agrees with the power of
+natural numbers. -/
+def powerAgrees (n k : Nat) : Bool :=
+  (fieldPow (f n) k).val == n ^ k % r
+
+#guard edges.all fun n => (List.range 40).all fun k => powerAgrees n k
+#guard onRandomPairs (fun n k => powerAgrees n (k % 256)) 200 5
+
+/-- The laws of exponents, on exponents of 256 bits, and the theorem of
+Fermat: the power `r` of an element is the element. -/
+def powerLaws (m n : Nat) : Bool :=
+  let x := f (m + 3 * n)
+  fieldPow x (m + n) == fieldPow x m * fieldPow x n
+    && fieldPow x (m * n) == fieldPow (fieldPow x m) n
+    && fieldPow x r == x && (x == 0 || fieldPow x (r - 1) == 1)
+
+#guard onRandomPairs powerLaws 50 6
+#guard edges.all fun m => powerLaws m (r - 2) && powerLaws 5 m
+
+/-! ## The two-adic structure -/
+
+#guard TwoAdicOps.twoAdicity Bn254 = 28
+#guard (TwoAdicOps.cosetShift : Bn254).val = 5
+#guard (r - 1) % 2 ^ 28 = 0 ∧ (r - 1) % 2 ^ 29 ≠ 0
+#guard Bn254.twoAdicGenerators.size = 29 ∧ Bn254.twoAdicGenerators.all (· < r)
+
+/-- The generator of order `2^k` has order exactly `2^k`, and it is the square
+of the generator of order `2^(k+1)`. -/
+def generatorAgrees (k : Nat) : Bool :=
+  let w : Bn254 := TwoAdicOps.twoAdicGenerator k
+  fieldPow w (2 ^ k) == 1 && (k = 0 || fieldPow w (2 ^ (k - 1)) == -1)
+    && (k = 28 || (let next : Bn254 := TwoAdicOps.twoAdicGenerator (k + 1); next * next == w))
+
+#guard (List.range 29).all generatorAgrees
+#guard (TwoAdicOps.twoAdicGenerator 0 : Bn254) = 1
+#guard (TwoAdicOps.twoAdicGenerator 1 : Bn254) = -1
+#guard (List.range 29).all fun k =>
+  some (TwoAdicOps.twoAdicGenerator k : Bn254).val == Bn254.twoAdicGenerators[k]?
+
+-- The generator of the largest two-adic subgroup is the power `(r - 1) / 2^28`
+-- of the generator of the multiplicative group, as the documentation of
+-- Plonky3's `TWO_ADIC_GENERATOR` says, and every entry `k` of the table is
+-- the power `(r - 1) / 2^k`.
+#guard fieldPow Bn254.generator ((r - 1) / 2 ^ 28) = Bn254.twoAdicGenerator 28
+#guard (List.range 29).all fun k =>
+  fieldPow Bn254.generator ((r - 1) / 2 ^ k) == Bn254.twoAdicGenerator k
+-- The value Plonky3's documentation gives for `TWO_ADIC_GENERATOR`.
+#guard (Bn254.twoAdicGenerator 28).val
+  = 19103219067921713944291392827692070036145651957329286315305642004821462161904
+
+/-- The factorisation of `r - 1`: the factors and their exponents. That the
+factors are prime is not checked here. -/
+def orderFactors : Array (Nat × Nat) := #[
+  (2, 28), (3, 2), (13, 1), (29, 1), (983, 1), (11003, 1), (237073, 1), (405928799, 1),
+  (1670836401704629, 1), (13818364434197438864469338081, 1)]
+
+-- The generator of the multiplicative group has order `r - 1`: no power
+-- `(r - 1) / q` of it is one, for `q` a factor of `r - 1`.
+#guard orderFactors.foldl (fun n (q, k) => n * q ^ k) 1 = r - 1
+#guard fieldPow Bn254.generator (r - 1) = 1
+#guard fieldPow Bn254.generator ((r - 1) / 2) = -1
+#guard orderFactors.all fun (q, _) => fieldPow Bn254.generator ((r - 1) / q) != 1
+-- Past the two-adicity there is no generator.
+#guard (Bn254.twoAdicGenerator 29).val = 0 ∧ (Bn254.twoAdicGenerator 1000).val = 0
+
+/-! ## Against Plonky3 -/
+
+/-- `(a, b, a + b, a - b, a * b)`: the operands are any numbers of 256 bits, the
+results are canonical. -/
+def arithmeticVectors : Array (Nat × Nat × Nat × Nat × Nat) := #[
+  (0x0000000000000000000000000000000000000000000000000000000000000000,
+    0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000000,
+    0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000000,
+    0x0000000000000000000000000000000000000000000000000000000000000001,
+    0x0000000000000000000000000000000000000000000000000000000000000000),
+  (0x0000000000000000000000000000000000000000000000000000000000000000,
+    0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff,
+    0x0e0a77c19a07df2f666ea36f7879462e36fc76959f60cd29ac96341c4ffffffa,
+    0x2259d6b14729c0fa51e1a2470908122ef13771b2da58a367974bc177a0000007,
+    0x0000000000000000000000000000000000000000000000000000000000000000),
+  (0x0000000000000000000000000000000000000000000000000000000000000001,
+    0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000000,
+    0x0000000000000000000000000000000000000000000000000000000000000000,
+    0x0000000000000000000000000000000000000000000000000000000000000002,
+    0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000000),
+  (0x0000000000000000000000000000000000000000000000000000000000000001,
+    0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff,
+    0x0e0a77c19a07df2f666ea36f7879462e36fc76959f60cd29ac96341c4ffffffb,
+    0x2259d6b14729c0fa51e1a2470908122ef13771b2da58a367974bc177a0000008,
+    0x0e0a77c19a07df2f666ea36f7879462e36fc76959f60cd29ac96341c4ffffffa),
+  (0x0000000000000000000000000000000000000000000000000000000000000005,
+    0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000000,
+    0x0000000000000000000000000000000000000000000000000000000000000004,
+    0x0000000000000000000000000000000000000000000000000000000000000006,
+    0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593effffffc),
+  (0x0000000000000000000000000000000000000000000000000000000000000005,
+    0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff,
+    0x0e0a77c19a07df2f666ea36f7879462e36fc76959f60cd29ac96341c4fffffff,
+    0x2259d6b14729c0fa51e1a2470908122ef13771b2da58a367974bc177a000000c,
+    0x15d0085520f5bbc347d8eb76d8dd0689eaba68a3a32a913f1b0d0ef99fffffe1),
+  (0x000000000000000000000000000000000000000000000000ffffffffffffffff,
+    0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000000,
+    0x000000000000000000000000000000000000000000000000fffffffffffffffe,
+    0x0000000000000000000000000000000000000000000000010000000000000000,
+    0x30644e72e131a029b85045b68181585d2833e84879b9709043e1f593f0000002),
+  (0x000000000000000000000000000000000000000000000000ffffffffffffffff,
+    0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff,
+    0x0e0a77c19a07df2f666ea36f7879462e36fc76959f60cd2aac96341c4ffffff9,
+    0x2259d6b14729c0fa51e1a2470908122ef13771b2da58a368974bc177a0000006,
+    0x13508aeb00314937398e7a748c7e9ac1399016bb208ac6940830b9dd2c5fb58c),
+  (0x0000000000000000000000000000000000000000000000010000000000000000,
+    0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000000,
+    0x000000000000000000000000000000000000000000000000ffffffffffffffff,
+    0x0000000000000000000000000000000000000000000000010000000000000001,
+    0x30644e72e131a029b85045b68181585d2833e84879b9709043e1f593f0000001),
+  (0x0000000000000000000000000000000000000000000000010000000000000000,
+    0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff,
+    0x0e0a77c19a07df2f666ea36f7879462e36fc76959f60cd2aac96341c4ffffffa,
+    0x2259d6b14729c0fa51e1a2470908122ef13771b2da58a368974bc177a0000007,
+    0x215b02ac9a3928669ffd1de404f7e0ef708c8d50bfeb93bdb4c6edf97c5fb586),
+  (0x0000000000000000000000000000000100000000000000000000000000000000,
+    0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000000,
+    0x00000000000000000000000000000000ffffffffffffffffffffffffffffffff,
+    0x0000000000000000000000000000000100000000000000000000000000000001,
+    0x30644e72e131a029b85045b68181585c2833e84879b9709143e1f593f0000001),
+  (0x0000000000000000000000000000000100000000000000000000000000000000,
+    0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff,
+    0x0e0a77c19a07df2f666ea36f7879462f36fc76959f60cd29ac96341c4ffffffa,
+    0x2259d6b14729c0fa51e1a2470908122ff13771b2da58a367974bc177a0000007,
+    0x03d581d748ffa25e32c475047957bf7aa7f12acca5b6cd8cb075da81ef8cfeb9),
+  (0x2000000000000000000000000000000000000000000000000000000000000000,
+    0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000000,
+    0x1fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff,
+    0x2000000000000000000000000000000000000000000000000000000000000001,
+    0x10644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001),
+  (0x2000000000000000000000000000000000000000000000000000000000000000,
+    0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff,
+    0x2e0a77c19a07df2f666ea36f7879462e36fc76959f60cd29ac96341c4ffffffa,
+    0x11f5883e65f820d099915c908786b9d1c903896a609f32d65369cbe3b0000006,
+    0x16b3b2576d419cc3a0e37ed4fc28f37977ba2ca7c55c29dfcfd5510f23c42db6),
+  (0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593efffffff,
+    0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000000,
+    0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593effffffe,
+    0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000000,
+    0x0000000000000000000000000000000000000000000000000000000000000002),
+  (0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593efffffff,
+    0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff,
+    0x0e0a77c19a07df2f666ea36f7879462e36fc76959f60cd29ac96341c4ffffff8,
+    0x2259d6b14729c0fa51e1a2470908122ef13771b2da58a367974bc177a0000005,
+    0x144f5eefad21e1caeb72fed7908ecc00ba3afb1d3af7d63deab58d5b5000000d),
+  (0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000000,
+    0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000000,
+    0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593efffffff,
+    0x0000000000000000000000000000000000000000000000000000000000000000,
+    0x0000000000000000000000000000000000000000000000000000000000000001),
+  (0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000000,
+    0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff,
+    0x0e0a77c19a07df2f666ea36f7879462e36fc76959f60cd29ac96341c4ffffff9,
+    0x2259d6b14729c0fa51e1a2470908122ef13771b2da58a367974bc177a0000006,
+    0x2259d6b14729c0fa51e1a2470908122ef13771b2da58a367974bc177a0000007),
+  (0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001,
+    0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000000,
+    0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000000,
+    0x0000000000000000000000000000000000000000000000000000000000000001,
+    0x0000000000000000000000000000000000000000000000000000000000000000),
+  (0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001,
+    0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff,
+    0x0e0a77c19a07df2f666ea36f7879462e36fc76959f60cd29ac96341c4ffffffa,
+    0x2259d6b14729c0fa51e1a2470908122ef13771b2da58a367974bc177a0000007,
+    0x0000000000000000000000000000000000000000000000000000000000000000),
+  (0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000002,
+    0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000000,
+    0x0000000000000000000000000000000000000000000000000000000000000000,
+    0x0000000000000000000000000000000000000000000000000000000000000002,
+    0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000000),
+  (0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000002,
+    0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff,
+    0x0e0a77c19a07df2f666ea36f7879462e36fc76959f60cd29ac96341c4ffffffb,
+    0x2259d6b14729c0fa51e1a2470908122ef13771b2da58a367974bc177a0000008,
+    0x0e0a77c19a07df2f666ea36f7879462e36fc76959f60cd29ac96341c4ffffffa),
+  (0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff,
+    0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000000,
+    0x0e0a77c19a07df2f666ea36f7879462e36fc76959f60cd29ac96341c4ffffff9,
+    0x0e0a77c19a07df2f666ea36f7879462e36fc76959f60cd29ac96341c4ffffffb,
+    0x2259d6b14729c0fa51e1a2470908122ef13771b2da58a367974bc177a0000007),
+  (0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff,
+    0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff,
+    0x1c14ef83340fbe5eccdd46def0f28c5c6df8ed2b3ec19a53592c68389ffffff4,
+    0x0000000000000000000000000000000000000000000000000000000000000000,
+    0x16662fa12c70267077bc8214e44a4c860e3935cf1e543021066e73a0fe216db3),
+  (0x0c75cc853703229b02f4631061c835cf3690f74ab20006086cbc0ae1118d118c,
+    0x94ffc723c9edb7d77d9a7a8196d09051cd2187ad519c05b21396faecfcb0c924,
+    0x1048a8505d5bf9f5579e0c6e7414bd098b16c61e966fba06b4ad25123e3ddaad,
+    0x08a2f0ba10aa4b40ae4ab9b24f7bae94e20b2876cd90520a24caf0afe4dc486b,
+    0x2e74cd66304af96721469ace8109aee2c594da97e9ae9078659a3c450f1aa9cf),
+  (0x10b839c08e25acdd6cbeb8a054903d2f62b6d06247fb83782124fe5731e2c97e,
+    0x4e7c7e8218d05579c7b41be9f82d6afed16764c2436d19bec29335cb88173565,
+    0x2ed069cfc5c4622d7c228ed3cb3c4fd10bea4cdc11af2ca59fd63e8ec9f9fee2,
+    0x2304582437b897b715ab28235f6582eae1b73c30f8014adbe655b3b389cb941b,
+    0x111c067a49678f98d7fc1b6eb45d3a7a1de9040038a00d43e4fdeacb6064afc8),
+  (0xd5caceac272a0cb368dbd35a7bbeb2b4b38b2ff2bbbbcb78069730f15a6f6a4f,
+    0x44099967b92c66a4bb2165e8a37f8224b60b8656a1173a0dd800719cc5391000,
+    0x27dedfd57a5e52878a6bdcb297b77b07a0932cdefc33d2af8b2dd6aa6fa87a4a,
+    0x009449ebca68c59184c99c4e53bb277884e3f0c2ad783fb662f0de98c5365a4c,
+    0x2a22f06837f5fa3a93a49e21a102373a0660a585bedc8f5af308866fb7b0a069),
+  (0xf9b4a0b13c92fa59a076baa7d7615bcc4e7a61ebcc6ac29ab03eb92e6191394d,
+    0xe2f4ce4f9d4b5cfd97dc4c54f4e393eddfcfa32ba469e60131eb8ac008c0e7dd,
+    0x2922acf6ef1fb5dfbd8093923eb8d473c476da8b294fb3807f38a1bafa522121,
+    0x16bfd2619f479d5c089a6e52e27dc7de6eaabec02800dc997e532e6e58d05170,
+    0x27db91ad97d7715383525f96692225724d31b2fe10acf7a264090a83da9f3d20),
+  (0x86b302aed88be1b656a326ba2f48dfd9a1c2c0dd0bd46a236f78c93ec0b65cb2,
+    0x3318850413b5a906803816358636f8f1e0b30b02bb676074b238e82bc3f3022e,
+    0x289e9c5a48acaa3fadea6bcc30fbcfb409da13065a0f78e4560bd0aeb4a95edd,
+    0x23362f37e3a498861e1acace27908e8a98dbcd91d6b3991d795deb7f0cc35a83,
+    0x049b0d1e3ef5b517b22df91dcb10bcdfcd178eac2f080672065287a3f288594b),
+  (0x856f969c3cd2b11b23bd0c57927abc375c8ec57cbd4af3576d4ad1a91105535b,
+    0x762c6632b000d92d697d89752ca8ff390c84714fcfa49ea5148bba9c8df6befb,
+    0x09a6749086db6977f3a9393c379d019ea00fad622c505f262e6cc061eefc1251,
+    0x0f4330698cd1d7edba3f82e265d1bcfe500a542ceda654b258bf170c830e9460,
+    0x03aafd4dd357babf9a5e92794dd4644bbf0ccc84d88be2c18866659069ce1681),
+  (0x4b04810174b3687ce8a4103945039f99ce56e840e374fedfcad809b8237f17f1,
+    0xff15e0290de66f690314410e31815cd37d01629f92be35962ef2daea9f07d77a,
+    0x27c08a793b7016eb99d6af006d7cea3e5a20d92d9bda910e627f232b2286ef65,
+    0x0d7fdaa3eb9379bac6d0e6051987a43af22526c3379c8b8eab6d051d4477407b,
+    0x28072889919df65532739ca39587ca185f93b2483640d2c58ff12ff919258143),
+  (0x33640b7734eb8a78fcc16d6b719df288247db9586ebfaa90a9c39b3b3808edd4,
+    0xfe0cf41a130aade1688f7e55ac0a3370fc4e7a692bccf46f0fe1e87f7bb17a7f,
+    0x0f1728e000cc7760136f497a14a013ca2f94c20ec033fb982259c24313ba684d,
+    0x274c9f9b87d8fd682dc34ba64d1a78e8f132c859a391e8f7ed4b7e9f6c57735a,
+    0x229752d1670248b991fd4ef6c932a485815350b56e121028f2a1d260b743a9bb),
+  (0x91a3e3f96711218c7435a1f360a8b2b14fe9caf8f9fed2fcc531c4f63a6e940a,
+    0x93861eca827676990250b85e918f7022bac603d69d512e8f9c7cb970cb2ee2a4,
+    0x02d02c12a25dd72b24a4b80ae93010a519785d1cbcf75e24ca62bcef659d76a8,
+    0x2e8213a1c5cc4b1d2a352f4b509a9aebbd57af6ad66714fe6c9701195f3fb167,
+    0x0b0615e3c94461cfe3e823773fb9bb023816879f0810a3e5acbf9224bfa0f780),
+  (0x07065b1e75be5a36af41d24965105b3fb031be3d2656c1c0a5baed0a57a88d1a,
+    0x99cff54726f22a123ae7ad3be5397954170f89e0ba31fdc4800ff7c32e501294,
+    0x0fa9650cf91ba3cbc138ae61c5c5cb7c4ea58f44735c6dd15a250411b5f89fab,
+    0x2ec79fa2d392b0cb559b3be785dc436039f1d57e530a86413532cb96e9587a8a,
+    0x0f6c26fc43856989d01332a3d5ac127668c100cc36ec4d855a0442a9dbc11057),
+  (0xb07bbe8c29fadc5582e50127a6a3c9dbba805ab83084989b8293395ce4afb286,
+    0xc66876f5da53137ae5a7f1970bbc0fbf7301a156dd1780e228e5b9593b487449,
+    0x2426105ddbf28eac5e5b0ac127d66f0f1416a213b98a0584d04b3baa8ff826c8,
+    0x1a77960930d96904558d55471c6912796fb2a1a9cd26884a9d8f759799673e3e,
+    0x204421650a349825d7d1a4fa6c5c606f142b969265b7d42e08a59ec37983ab27),
+  (0xd2f8232d79224de05f8d76ce5bbf141ce4cbe288330897700a788fcb114c1be8,
+    0x15270d8095e54e323731c54892f2d7f9b171b7c74d51dbee97874eb57af08acd,
+    0x268df6e28a411b6bb57e253ce8ac8aa1f56df92d9974b11992780830cc3ca6b1,
+    0x2ca42a543fa81f30ff6ae0624448330bbabe71e7788a69cda74b6059c65b9118,
+    0x1c1af44e85bf0fe25028b84c246be412dcd456827acd235e7a1b022c80c9bb7f),
+  (0xe95f93cdfe863f755779846e33d4aacaf03f337b8a49e9276f7c65654ae7ad13,
+    0x59be89198e727e7cb033f87c98e29a5f9316bec3c7a775222a5ac6c82ada3aa0,
+    0x20c4463645cefcf7b5cbdaa3c3af32fb921e808c7798bae2028b6ab5d5c1e7ad,
+    0x2ed86dceadb080a536a5008497ef5fb10cc0a426cf2f92e2bd5db375400d7271,
+    0x10b80fe90fba1bcd1c5fb4e0a87fd28fa8edd4df3b0e758a2ef6120d860f2d67),
+  (0xe5faa7c1a4141045b536f2d8dd0bbd71a167eb201928c62f98aeccbfe7d090f3,
+    0x72c1a8f113d9cd855da59856d7b9584545587cfe3e3884812e01f6d1a558cdec,
+    0x05fe2b8e8f927ca708aaa3322a3bab2acd550e23034f36b7eb830c85fd295ed8,
+    0x127061eacdd7026ce6f0cf15024fb4720ba79d90e77d608be2e8eac66277c305,
+    0x0c6d3aa285e18276bc25577e8c46b11e0ce81286e44447556811e3e8fea8904d),
+  (0x3ea1c3a9cfc4a8ae763b43046dc73e6467fc7585a85ea4b8560d8c4c45690869,
+    0x2d15ca36f46a73cce634339ee18ecda055617c342371e12a0327e427c49cb8c1,
+    0x0aeef0fb01cbdc27ebceeb364c535b4a6cf62128d85da4bfd171854c2a05c128,
+    0x118bf972db5a34e190070f658c3870c4129af95184ecc38e52e5a82480cc4fa8,
+    0x2ccdf9e18c59521e9017a066d3add9f0a6a990d5dbb4b51a95202c6c50813d30),
+  (0xe86054ce077d112073abc2a41e5351ba3e4f89d17e0456e3e9e5390f20bf6d27,
+    0xb2da536f2bec4a375775c0f9f7c2adb26a6514c0382cb7dc4c1a3f99c297fdfa,
+    0x181834a629dc5a0a089f55ea0a0b3c8367155c4de8658a3616efcc0963576b19,
+    0x0521b2ebfa5f26bf63e5bbf3a50f4baaabb68cc8cc1e2e7659e903e16e276f2c,
+    0x09e225300f36dac2ff13106372950f52eeadcee76b5cb56ac03b1d583aab7d32)]
+
+/-- `(a, -a, a⁻¹)` for nonzero `a`. -/
+def unaryVectors : Array (Nat × Nat × Nat) := #[
+  (0x0000000000000000000000000000000000000000000000000000000000000001,
+    0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000000,
+    0x0000000000000000000000000000000000000000000000000000000000000001),
+  (0x0000000000000000000000000000000000000000000000000000000000000005,
+    0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593effffffc,
+    0x135b52945a13d9aa49b9b57c33cd568ba9ae5ce9ca4a2d06e7f3fbd4c6666667),
+  (0x000000000000000000000000000000000000000000000000ffffffffffffffff,
+    0x30644e72e131a029b85045b68181585d2833e84879b9709043e1f593f0000002,
+    0x0d9987ab880b7ba0ce83e6b257876b1565e146827c5379aa1523cd271018fcd0),
+  (0x0000000000000000000000000000000000000000000000010000000000000000,
+    0x30644e72e131a029b85045b68181585d2833e84879b9709043e1f593f0000001,
+    0x24d6ba07f7aa8f04b2d8f06f77f52a93ca478dbeab3c92cd2d3e8053e396ee4d),
+  (0x0000000000000000000000000000000100000000000000000000000000000000,
+    0x30644e72e131a029b85045b68181585c2833e84879b9709143e1f593f0000001,
+    0x133100d71fdf35792b16366f4f7684df54ad7e14a329e70f18ee753c76f9dc6f),
+  (0x2000000000000000000000000000000000000000000000000000000000000000,
+    0x10644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001,
+    0x1e32df337295c869183f9e01f13ee1d0cfdbf4759b63128b17371f6f9d88ca6d),
+  (0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593efffffff,
+    0x0000000000000000000000000000000000000000000000000000000000000002,
+    0x183227397098d014dc2822db40c0ac2e9419f4243cdcb848a1f0fac9f8000000),
+  (0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000000,
+    0x0000000000000000000000000000000000000000000000000000000000000001,
+    0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000000),
+  (0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000002,
+    0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000000,
+    0x0000000000000000000000000000000000000000000000000000000000000001),
+  (0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff,
+    0x2259d6b14729c0fa51e1a2470908122ef13771b2da58a367974bc177a0000007,
+    0x0a59106b249ce9f43045ec542bb9c86372ec32cdd9902f7012384487c916de77),
+  (0xf2facf41d77ed55083833a97d2d0fe8112889280d4d3e26ad075caaaab52b16b,
+    0x2f5f076f6faaeba9ce5e67af363713addeaedf320584c0fcc6d5f6ccf4ad4e9b,
+    0x1792e17ddb695a70103bb6f0f069ae3728f9e642e1a61f1e25a8246cc423a922),
+  (0x951e88ddbb6f1a2cdb8c47ea286cba0892d08ebdeb93b238a93fc88116896f71,
+    0x2c72b0edc957667a05b4ceefdd98a76c0dff1263fb52100c66480dcea9769093,
+    0x23c03e1c809d25edfd51e016f7c5aab71886fa5b65874282eb4daeb7edcae6bb),
+  (0x5671134e686e3a3b86ce730c034a75fd7e2cb53f8b4425dc8190fd346ff2a9cf,
+    0x0a57899759f50617e9d21860ffb83abcd23b1b51682ebb460632edf3700d5633,
+    0x2cf010a37b20a05d160282721ea4a754029472ed816f4f7b3289c171c50c57bd),
+  (0x449eb8f3651fedfc0a07014f2424ac82e484b91886cd310b11f1e6c7eb06aa60,
+    0x1c29e3f25d43525766998a1ddede04376be317786ca5b01775d2045ff4f955a2,
+    0x0ee657630e016fc523abb9fb5d2b7e010a0011c7e3d0342ff50515d2cc021cca),
+  (0x3117b5336833fc47523f737dbef5ebd852405759f84993130ed492b8e08f35b2,
+    0x2fb0e7b25a2f440c1e6117ef440cc4e1fe277936fb294e0f78ef586eff70ca50,
+    0x1ad2987afc1a7b0cac5187d3a2a1a5368729a1c41e28cc1024ac69b064722577),
+  (0x171f2a21f35eddb1e7b40631a84f117a2e331d3d850bf7772ef3e8a10062e946,
+    0x19452450edd2c277d09c3f84d93246e2fa00cb0af4ad791a14ee0cf2ef9d16bb,
+    0x1506261af70bdd0afa6aff259ccde3e0800a2ff28bbd83fd0b6f5868d313c066),
+  (0x4adb80315da3ed60588ede5cdd3f2837395b79e17179dcdaf8f8c8234fc74a07,
+    0x15ed1cb464bf52f31811ad1025c38883170c56af81f904478ecb23049038b5fb,
+    0x2983913cf3bcba2dba8fbc2a0a2a7e39f441de253d89dd460e5d04de424c00db),
+  (0x0d5b22fe53bd323036ea4766d852d12864e619ccf6dbec5d88d10657c7763878,
+    0x23092b748d746df98165fe4fa92e8734c34dce7b82dd8433bb10ef3c2889c789,
+    0x1e01e23bae691fba55503ae149a60f415d3e243f8c2e6f6a71668fb06aedcabe),
+  (0xa1c20ba42df0fa5c342208af62f0235a2f71bd5ac66800cc2c5454da40c4201e,
+    0x1fcf2e2756d5864aad1f0e2aa3153e1a715de3c7207dc178e33381757f3bdfe6,
+    0x2b0878b00a3bfe152e09272adc81d3924c92d8490d38fcaf9a308de1e30bf816),
+  (0xfce8678899f249545f1a9a24ce330fa75c13968d2a96f3fee475513bf8924c4c,
+    0x25716f28ad3777a5f2c708223ad502879523db25afc1af68b2d6703ba76db3ba,
+    0x29da698a649b90b3645f18d61cbe3befaf61999e3be54dc7ff60a636839e850a),
+  (0x351f156e17c762526c7a2a141bad7281219b82410d48868224ccd9f684aa8b2a,
+    0x2ba98777aa9bde0104266158e7553e392ecc4e4fe62a5aa062f711315b5574d8,
+    0x0efd257bb0e46c5b63a37d92df36b0605a95f58fcadaeb47679552f4991a6811),
+  (0x66a9ba365dac9a97c588854768b1b1d8282c0c96ae502586e481915d4a948254,
+    0x2a83312245e845e563684bdc1bd2573f506fac42bedc2c2ce7244f5e856b7daf,
+    0x10b349f3e78ef7ead6873a810e04dc1b2bf7c7a84b63b2c920f413d95d6e5286)]
+
+/-- `(a, n, a ^ n)`. -/
+def powerVectors : Array (Nat × Nat × Nat) := #[
+  (0x0dec1f1ee7c6737263a76f8831e446a30cf3d4c2a39663ce2ec8add00303387f,
+    0,
+    0x0000000000000000000000000000000000000000000000000000000000000001),
+  (0x7b07b817ae482eec5d1531b64fea260f64b96d6f73b5a0380d12620ee701df2b,
+    1,
+    0x1a3f1b31ebe4ee98ec74a6494ce7755514519cde8042bf15854e76e70701df29),
+  (0xbd313581fef0e4dcc947208879df45f9de5a5dd5fe7d2830225d4fb4cefa9692,
+    2,
+    0x20048cebf2b44b20e98dbd4d4e75d4febb3a8ac5ee94be2c7d40c3b9c0ebef2f),
+  (0x37b683d6ee9c32c46c1282b120e0dc0748259da865e2713ea80314180219c2c6,
+    3,
+    0x0643be1f05279a68861a1f15d8b2565dab15c8e1aeb2d65a3e618f6304f2f400),
+  (0x06f1a266ee1ac9723410ce480f2e05f4cbe59cd085abb08be7f424aa866ab011,
+    268435456,
+    0x2a5ff62c0d31469ca4e8f7cf5a2a7d57ea8c83ae5b9122b0999e5416a9cfb07c),
+  (0xfef2aafdd2ae73ee5c0d5960b281ab02f5c248403416b83d6a5327cb85be0cf8,
+    4294967297,
+    0x04741171f334623e6fd15242e8f48e960179ac39b5dcc13d05ce4bf3a04f516d),
+  (0xe2aa86eadf1891db9a864d9da33b917e0600b03646643cbf92adc0a05e830cf9,
+    18446744073709551615,
+    0x1b32bf40673323e235966b11004307aed9345109b514f3c74170788a3a81bd6b)]
+
+/-- `Bn254::two_adic_generator(k)` for `k = 0, …, 28`. -/
+def twoAdicGeneratorVectors : Array Nat := #[
+  0x0000000000000000000000000000000000000000000000000000000000000001,
+  0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000000,
+  0x30644e72e131a029048b6e193fd841045cea24f6fd736bec231204708f703636,
+  0x2b337de1c8c14f22ec9b9e2f96afef3652627366f8170a0a948dad4ac1bd5e80,
+  0x21082ca216cbbf4e1c6e4f4594dd508c996dfbe1174efb98b11509c6e306460b,
+  0x09c532c6306b93d29678200d47c0b2a99c18d51b838eeb1d3eed4c533bb512d0,
+  0x1418144d5b080fcac24cdb7649bdadf246a6cb2426e324bedb94fb05118f023a,
+  0x16e73dfdad310991df5ce19ce85943e01dcb5564b6f24c799d0e470cba9d1811,
+  0x07b0c561a6148404f086204a9f36ffb0617942546750f230c893619174a57a76,
+  0x0f1ded1ef6e72f5bffc02c0edd9b0675e8302a41fc782d75893a7fa1470157ce,
+  0x06fd19c17017a420ebbebc2bb08771e339ba79c0a8d2d7ab11f995e1bc2e5912,
+  0x027a358499c5042bb4027fd7a5355d71b8c12c177494f0cad00a58f9769a2ee2,
+  0x0931d596de2fd10f01ddd073fd5a90a976f169c76f039bb91c4775720042d43a,
+  0x006fab49b869ae62001deac878b2667bd31bf3e28e3a2d764aa49b8d9bbdd310,
+  0x2d965651cdd9e4811f4e51b80ddca8a8b4a93ee17420aae6adaa01c2617c6e85,
+  0x2d1ba66f5941dc91017171fa69ec2bd0022a2a2d4115a009a93458fd4e26ecfb,
+  0x00eeb2cb5981ed45649abebde081dcff16c8601de4347e7dd1628ba2daac43b7,
+  0x1bf82deba7d74902c3708cc6e70e61f30512eca95655210e276e5858ce8f58e5,
+  0x19ddbcaf3a8d46c15c0176fbb5b95e4dc57088ff13f4d1bd84c6bfa57dcdc0e0,
+  0x2260e724844bca5251829353968e4915305258418357473a5c1d597f613f6cbd,
+  0x26125da10a0ed06327508aba06d1e303ac616632dbed349f53422da953337857,
+  0x1ded8980ae2bdd1a4222150e8598fc8c58f50577ca5a5ce3b2c87885fcd0b523,
+  0x1ad92f46b1f8d9a7cda0ceb68be08215ec1a1f05359eebbba76dde56a219447e,
+  0x0210fe635ab4c74d6b7bcf70bc23a1395680c64022dd991fb54d4506ab80c59d,
+  0x0c9fabc7845d50d2852e2a0371c6441f145e0db82e8326961c25f1e3e32b045b,
+  0x2a734ebb326341efa19b0361d9130cd47b26b7488dc6d26eeccd4f3eb878331a,
+  0x1067569af1ff73b20113eff9b8d89d4a605b52b63d68f9ae1c79bd572f4e9212,
+  0x049ae702b363ebe85f256a9f6dc6e364b4823532f6437da2034afc4580928c44,
+  0x2a3c09f0a58a7e8500e0a7eb8ef62abc402d111e41112ed49bd61b6e725b19f0]
+
+/-- `Bn254::GENERATOR`. -/
+def generatorVector : Nat := 5
+
+/-- The order of the field, as Plonky3 prints `Bn254::order()`. -/
+def orderVector : Nat :=
+  21888242871839275222246405745257275088548364400416034343698204186575808495617
+
+#guard arithmeticVectors.size = 40
+#guard arithmeticVectors.all fun (m, n, sum, difference, product) =>
+  (f m + f n).val == sum && (f m - f n).val == difference && (f m * f n).val == product
+
+#guard unaryVectors.size = 22
+#guard unaryVectors.all fun (n, opposite, inverse) =>
+  (-f n).val == opposite && (f n)⁻¹.val == inverse
+
+#guard powerVectors.size = 7
+#guard powerVectors.all fun (n, k, power) => (fieldPow (f n) k).val == power
+
+#guard twoAdicGeneratorVectors.size = 29
+#guard (List.range 29).all fun k =>
+  some (TwoAdicOps.twoAdicGenerator k : Bn254).val == twoAdicGeneratorVectors[k]?
+#guard Bn254.twoAdicGenerators = twoAdicGeneratorVectors
+
+#guard (TwoAdicOps.cosetShift : Bn254).val = generatorVector
+#guard Bn254.generator.val = generatorVector
+#guard Bn254.order = orderVector
+
+end CertiFriTest.P3.Bn254

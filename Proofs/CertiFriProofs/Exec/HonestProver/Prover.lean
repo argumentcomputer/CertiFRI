@@ -472,7 +472,7 @@ theorem transcript_honestProof [Inhabited D] :
       (HonestProver.batching params shape hIn chal init w points values).1
       (HonestProver.batching params shape hIn chal init w points values).2 (numRounds params shape)
       (numRounds params shape) le_rfl
-  unfold transcript
+  unfold transcript transcriptTail
   simp only [honestProof, h]
   rfl
 

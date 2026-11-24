@@ -32,8 +32,10 @@ arbitrary.
 
 * That an honest proof exists. `Exec/HonestProver.lean` constructs one, round
   by round, and proves it honest (`completeness_honestProver`).
-* Completeness for Plonky3's pruned Merkle proofs, and for the instantiation of
-  `CertiFriP3`, whose fields are not proved to be a `FieldModel`.
+* Completeness for Plonky3's pruned Merkle proofs, and for the hash functions
+  and the challenger of `CertiFriP3` as such: the theorem holds for any, and
+  nothing is proved about those. The fields of `CertiFriP3` are a `FieldModel`
+  (`P3/GoldilocksModel.lean`).
 -/
 
 namespace CertiFri.Exec

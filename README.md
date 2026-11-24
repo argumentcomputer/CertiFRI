@@ -4,8 +4,11 @@ A FRI polynomial commitment verifier in Lean 4, with a proof of soundness.
 Only the verifier is certified. The prover is an ordinary Rust program.
 
 The protocol is Plonky3's `TwoAdicFriPcs` at revision `3152b14a`, the revision
-the Rust prover pins, with folding by two. Only the commitment scheme is in
-scope, not the STARK built on it. The protocol is not zero-knowledge.
+the Rust prover pins, with folding by two. The theorems are about the
+commitment scheme and about the verifier of the STARK built on it, multi-stark
+(`CertiFri/Stark/`): see
+[The multi-stark verifier](#the-multi-stark-verifier). The protocol is not
+zero-knowledge.
 
 ## Status
 
@@ -26,8 +29,27 @@ scope, not the STARK built on it. The protocol is not zero-knowledge.
   challenger code of `CertiFriP3`, it accepts the opening proofs that Plonky3
   produces and derives the same challenges, and it rejects tampered ones
   (`CertiFriTest/P3/Fri.lean`). This is a test on a handful of proofs, not a
-  theorem. The primitives of `CertiFriP3` are tested against Plonky3, not
-  proved.
+  theorem. BLAKE3 and the challenger of `CertiFriP3` are tested against
+  Plonky3, not proved.
+- **The field arithmetic is proved.** The Goldilocks code on machine words and
+  its quadratic extension implement a field of `p ^ 2` elements, with the
+  structure the theorems need (`P3.Goldilocks.starkModel`), so the theorems
+  hold over Goldilocks with nothing assumed about the arithmetic. The same is
+  proved for BabyBear with its quartic extension and for the scalar field of
+  BN254; see [The fields](#the-fields).
+- **The multi-stark verifier** (`Stark.verify`, `Stark.verifyBatch` in
+  `CertiFri/Stark/`) is a port of the STARK verifier that runs on this
+  commitment scheme. It accepts proofs made by multi-stark and derives the
+  same challenges (`CertiFriTest/Stark/MultiStark.lean`). **It is proved
+  sound** in the random-oracle model (`Exec.Stark.soundness_verify_ud`,
+  `Exec.Stark.soundness_verifyBatch_ud`): except with small probability, an
+  accepted proof has committed columns that decode to base-field traces which
+  satisfy every constraint on every row, and whose lookup messages are
+  balanced. The theorems cover proofs of every trace height within stated size
+  bounds. Over Goldilocks they are `P3.Goldilocks.soundness_verify` and
+  `P3.Goldilocks.soundness_verifyBatch`; see
+  [What is proved about it](#what-is-proved-about-it).
+- **What remains** is listed in [TODO.md](TODO.md).
 
 ## The verifier
 
@@ -175,16 +197,17 @@ evaluation of the final polynomial (`Proofs/CertiFriProofs/Poly.lean`).
 - **The fields.** The two executable fields implement one mathematical field,
   every element of which is represented (`Exec.FieldModel`), the generator of
   the first domain is a primitive root of unity, and the coset shift is not
-  zero (`Exec.WellFormed`).
+  zero (`Exec.WellFormed`). Both are proved for the Goldilocks code of
+  `CertiFriP3` (`P3.Goldilocks.fieldModel`, `P3.Goldilocks.wellFormed`).
 - **Merkle commitments with one path per query** (`merkleMmcs`).
 - **A fixed shape.** The parameters and the shape of the claims are fixed
   before the adversary runs. The shape is not absorbed into the transcript.
 
 ### What they do not establish
 
-- Anything about the code in `CertiFriP3`: that its Goldilocks arithmetic is a
-  `FieldModel`, that BLAKE3 or the challenger are implemented correctly, or
-  that they behave like a random oracle.
+- Anything about BLAKE3 or the challenger of `CertiFriP3`: that they are
+  implemented correctly, or that they behave like a random oracle. The field
+  arithmetic is proved ([The fields](#the-fields)).
 - Soundness with Plonky3's pruned Merkle proofs as such. A pruned proof is
   unpacked and then checked by the certified Merkle check
   (`P3.prunedMmcs_accepts`), but the soundness theorem is stated for one path
@@ -204,6 +227,202 @@ evaluation of the final polynomial (`Proofs/CertiFriProofs/Poly.lean`).
   asked at the claim's own opening point. The committed functions take values
   in the extension field.
 
+## The multi-stark verifier
+
+`CertiFri/Stark/` is a port of the verifier of
+[multi-stark](https://github.com/argumentcomputer/multi-stark) at revision
+`3515632`: a STARK for systems of several circuits connected by lookups, over
+Plonky3's FRI.
+
+```lean
+Stark.verify      inputMmcs friMmcs chal init sys claims proof : Bool   -- System::verify_multiple_claims
+Stark.verifyBatch inputMmcs friMmcs chal init sys batch        : Bool   -- System::verify_batch
+```
+
+`sys` is the verifying key: for each circuit its constraint graph, its lookups
+and its widths, the commitment to the fixed traces, and the parameters. The
+verifier checks the shape of the proof, derives the lookup challenges, the
+constraint challenge and the out-of-domain point with the challenger, checks
+the opened values with `Fri.verifyFrom` (the FRI verifier above, started from
+the challenger state the STARK transcript reaches, as Plonky3's `pcs.verify`
+is), and evaluates the constraints of every active circuit, the logUp
+constraints among them, on the opened values.
+
+| File | Content |
+| --- | --- |
+| `Stark/Graph.lean` | Constraint graphs and their evaluation |
+| `Stark/Logup.lean` | The values of the lookup constraints, in coordinates of the extension |
+| `Stark/System.lean` | Systems, proofs, batch preambles |
+| `Stark/Verifier.lean` | The shape check, the transcript, the opening claims, the constraint check, `verify`, `verifyBatch` |
+
+### What is proved about it
+
+The theorems are in `Proofs/CertiFriProofs/Exec/Stark/`, over the algebra in
+`Proofs/CertiFriProofs/Theory/Stark/`. All are on `propext`, `Classical.choice`
+and `Quot.sound`, with no `sorry`.
+
+**The experiment.** The system (the verifying key) is fixed. An adversary with
+`Q` queries to a random oracle outputs public claims and a proof, or a batch.
+Then the queries of the verification are made. One oracle answers the
+challenge queries of the Fiat–Shamir chains and the hash queries of the Merkle
+trees.
+
+**Soundness** (`soundness_verify_ud`, `soundness_verifyBatch_ud` in
+`Unconditional.lean`). Let `δ ≥ 0` with `2 * δ + 2 ^ (-logBlowup) < 1`. The
+probability of the following event is at most
+`N * starkErr + ((S + 1) * r + 3) * N * (N - 1) / (2 * |D|)`: some answer
+function that agrees with the final log makes the verifier accept a proof
+within the size bounds (`Covered`), and some constraint value of some active circuit (a zero of its graph,
+or a lookup constraint) is not zero on some row of its trace domain. The
+constraint values are those of the polynomials that the committed columns
+decode to, at agreement `1 - δ`, against the log; they are functions of the
+commitments and the oracle queries alone.
+
+`N` is the number of oracle queries of the experiment, `S` the bound on the
+number of shards, `r` the largest number of rounds of a chain and `|D|` the
+number of digests. `starkErr` is the largest error of a round:
+
+| Round | Error |
+| --- | --- |
+| lookup challenge `β` | `2 * itemBound / \|K\|` |
+| lookup challenge `γ` | `2 * itemBound * lenBound / \|K\|` |
+| constraint challenge `α` | `(constraintBound - 1) / \|K\|` |
+| out-of-domain point `ζ` | `(zetaBound + cosetBound) / \|K\|` |
+| opening proof, batching | `valueBound * c / \|K\|` |
+| opening proof, each folding round | `2 * c / \|K\| / 2 ^ commitPowBits` |
+| opening proof, queries | `(1 - δ) ^ numQueries / 2 ^ queryPowBits` |
+
+Here `c = 2 ^ n * (δ * 2 ^ n + 1) + 1` with `n = maxLogDegree + logBlowup`;
+`itemBound` bounds the number of lookup messages and `lenBound` their length,
+`constraintBound` is the largest number of constraint values of a circuit,
+`zetaBound` the degree of the polynomial checked at `ζ`, `cosetBound` the
+number of points `ζ` at which an opening point falls in a committed coset, and
+`valueBound` the number of opened values.
+
+The columns are decoded with no slack (`decodeT` in
+`Theory/PcsRbr/DecodeTight.lean`): inside the unique-decoding radius, which is
+what `2 * δ + 2 ^ (-logBlowup) < 1` says, a word has at most one polynomial at
+agreement `1 - δ`, whatever the height of the trace. The opening proof only
+guarantees agreement away from an opening point that lies in the committed
+coset; the `cosetBound` term pays for the points `ζ` where that can happen.
+
+**What the conclusion means** (`Meaning.lean`, `Lookups.lean`,
+`Theory/Stark/BalanceInt.lean`).
+
+- If the zeros of a circuit read only the fixed and the main traces
+  (`Circuit.ZerosPlain`), every one of them holds on every row, on the values
+  of the decoded fixed and main columns (`zeros_of_not_constraintFail`). These
+  columns have base-field coefficients (`coeff_shardCols_mem_base`).
+- If the lookups of every circuit read only the fixed and the main traces
+  (`Circuit.LookupsPlain`; the zeros may read anything), the lookup messages of
+  an accepted proof are balanced (`soundness_verify_lookups_ud`,
+  `soundness_verifyBatch_lookups_ud`, with the same bound): the public claims,
+  what every circuit sends on every row of its trace, and the messages of a
+  batch are such that, for every message, its multiplicities add up to zero in
+  the field. multi-stark compiles the lookups of a circuit first and without
+  the lookup trace, so its systems meet the condition once public values are
+  kept out of lookups.
+- Balanced in the field is balanced over the integers when the multiplicities
+  are integers whose absolute values add up to less than the characteristic
+  (`balanced_int_of_balanced`); for multiplicities `1` and `-1`, the multiset
+  of sent messages is then the multiset of received ones
+  (`map_fpPoly_eq_of_balanced`). That the multiplicities of a circuit are such
+  integers is not proved here.
+
+**On the way.** The state function of the protocol and its round-by-round
+soundness (`rbrSound_sdoomed` in `State.lean`); the injectivity of the
+transcript encoding of both entry points (`Encode.lean`); the round-by-round
+soundness of the opening protocol for every supported shape, with one error
+bound (`PcsSound.lean`); the refinement of the executable checks
+(`Arith.lean`, `Run.lean`).
+
+### What these theorems assume
+
+- **The random-oracle model with ideal primitives**, as for the commitment
+  scheme. The challenger is idealised (`uChallenger`): the field challenge, the
+  proof-of-work bits and the query indices of a round are independent parts of
+  one uniform answer of the oracle to everything absorbed so far. Merkle trees
+  hash with the same oracle.
+- **`StarkModel`**: the executable fields implement a field, with the
+  extension basis and coordinates the verifier uses, and compatible two-adic
+  generators that are primitive roots. These laws are proved for the
+  Goldilocks code of `CertiFriP3` (`P3.Goldilocks.starkModel`), and the four
+  theorems are restated over Goldilocks without this assumption
+  (`Proofs/CertiFriProofs/P3/GoldilocksSoundness.lean`).
+- **A system fixed before the adversary runs.** The transcript absorbs the
+  sizes of the circuits, not their constraint graphs.
+- **A well-formed system**: a circuit without a fixed trace has fixed-trace
+  width zero (`System.FixedOk`), no fixed trace is taller than the largest
+  trace the system supports (`System.HeightOk`), and that largest trace exists
+  in the field.
+- **`Covered`**, the only condition on the proof the event is about: the
+  numbers of shards, public claims and messages, and their lengths, are within
+  bounds. The bounds enter the errors, and all sizes are below the
+  characteristic. There is no condition on the shape of the proof or on the
+  heights of its traces: what the theorems need of them follows from
+  acceptance.
+- For the meaning of the conclusion: `Circuit.ZerosPlain` or
+  `Circuit.LookupsPlain` as above, and a characteristic other than two.
+
+### What they do not establish
+
+- What the constraints mean for a particular system, and any policy on claims
+  and messages (ix's `validate_preamble` is not part of multi-stark and not
+  modelled). "Balanced" is in the field: multiplicities are field elements, and
+  two messages that differ by trailing zeros are the same message.
+- Anything about proofs that are not covered: more shards, claims or messages
+  than the bounds.
+- Completeness of the STARK verifier, which is tested on proofs made by
+  multi-stark and not proved. Zero knowledge.
+- The exact degree: a decoded column has degree at most `2 ^ k`, one more than
+  an honest column of a trace of `2 ^ k` rows.
+- The Plonky3 instantiation, as for the commitment scheme.
+
+## The fields
+
+The theorems hold for any executable fields that implement a mathematical
+field with the structure the verifier uses (`FieldModel`, `StarkModel`). For
+the fields of `CertiFriP3` this is proved, in `Proofs/CertiFriProofs/P3/`.
+
+| Field | Code | Model |
+| --- | --- | --- |
+| Goldilocks, `p = 2^64 - 2^32 + 1` | `Goldilocks.lean`, on 64-bit words | `ZMod p` |
+| its quadratic extension | `GoldilocksExt.lean` | `(ZMod p)[X] / (X^2 - 7)`, `p ^ 2` elements |
+| BabyBear, `p = 2^31 - 2^27 + 1` | `BabyBear.lean`, on natural numbers | `ZMod p` |
+| its quartic extension | `Quartic.lean` | `(ZMod p)[X] / (X^4 - 11)`, `p ^ 4` elements |
+| the scalar field of BN254 | `Bn254.lean`, on natural numbers | `ZMod r` |
+
+For each of them:
+
+- **The order is prime** (`Primes.lean`), by Lucas's test on a factorisation
+  of `p - 1`, with the modular powers evaluated by Lean's kernel. For BN254
+  the two large prime factors of `r - 1` have their own certificates.
+- **Each operation of the code is the field operation.** For Goldilocks this
+  is a proof about machine words (`GoldilocksWord.lean`): sums and differences
+  with one correction, the product through a 128-bit value reduced with
+  `2^64 = 2^32 - 1` and `2^96 = -1` modulo `p`, and the inverse by the extended
+  Euclidean algorithm. BabyBear and BN254 share one implementation on natural
+  numbers (`CertiFriP3/PrimeField.lean`, proved in `FpLaws.lean`), whose
+  inverse is a power, by Fermat's little theorem.
+- **The extension is a field**: `X^2 - 7` is irreducible over Goldilocks and
+  `X^4 - 11` over BabyBear (`Binomial.lean`, `Primes.lean`), and the code of
+  the extension computes in the quotient (`GoldilocksModel.lean`,
+  `QuarticLaws.lean`), inverses included.
+- **The generators of the two-adic subgroups are primitive roots of unity**
+  of their orders: each entry of Plonky3's table is the square of the next,
+  checked by evaluating the code, and the entry of order two is `-1`.
+
+The results are `P3.Goldilocks.starkModel` and `P3.BabyBear.starkModel`, the
+models the theorems assume, and `P3.Bn254.refines` with
+`P3.Bn254.isPrimitiveRoot_twoAdicGenerator`. A new field needs three facts
+(`PrimeRep`, `TwoAdicRep`, `BinomialRep` in `PrimeRep.lean` and `Model.lean`),
+from which `P3.starkModel` builds the model.
+
+Not proved: the encodings of field elements as bytes, which the hashers and
+the challenger use. BabyBear has no hasher and no challenger in this
+repository, so no verifier runs over it end to end; the scalar field of BN254
+is there for the field alone.
+
 ## Tests
 
 They run as part of the build: a failing `#guard` fails the build.
@@ -219,9 +438,22 @@ They run as part of the build: a failing `#guard` fails the build.
   opened entries, witnesses and parameters are rejected.
 - `CertiFriTest/P3/`: Goldilocks, its quadratic extension, BLAKE3, the Merkle
   hashers, the challenger and the pruned Merkle proofs against values computed
-  by Plonky3.
+  by Plonky3. BabyBear, its quartic extension and the scalar field of BN254
+  against natural-number arithmetic and against values computed by Plonky3 at
+  revision `0d803737` (`CertiFriTest/vectors/fields`).
 - `CertiFriTest/Merkle.lean`: the Merkle tree layout against openings produced
   by Plonky3.
+- `CertiFriTest/Stark/MultiStark.lean`: `Stark.verify` on three proofs and
+  `Stark.verifyBatch` on a batch of two shards, all made by multi-stark in its
+  production configuration (`CertiFriTest/vectors/stark`, a Rust program that
+  also checks each proof with multi-stark's verifier). Between them the
+  systems have circuits of different heights, fixed traces, an inactive
+  circuit with and without a fixed trace, lookups in groups, extension
+  constraints and quotients of up to four chunks. Each proof is accepted, the
+  derived challenges equal multi-stark's, and changed opened values,
+  accumulators, commitments, bitmaps, claims, messages, constraints and
+  parameters are rejected. `CertiFriTest/Stark/Arith.lean` checks the
+  coordinate arithmetic of the lookup constraints.
 
 The JSON format of the vectors is this repository's own. Decoding the bytes a
 Plonky3 prover serializes is not written.
@@ -252,8 +484,8 @@ claimed value; Plonky3 inverts one per opening point, in a batch.
 
 | Path | Contents |
 | --- | --- |
-| `CertiFri/` | The certified verifier. No dependency beyond the Lean toolchain. Proofs that need only core Lean sit next to the code. |
-| `CertiFriP3/` | The Plonky3 instantiation: Goldilocks, BLAKE3, the challenger, pruned Merkle proofs. Tested, not proved. |
+| `CertiFri/` | The certified FRI verifier, and the port of the multi-stark verifier (`Stark/`). No dependency beyond the Lean toolchain. Proofs that need only core Lean sit next to the code. |
+| `CertiFriP3/` | The Plonky3 instantiation: the fields (Goldilocks, BabyBear, the scalar field of BN254, and extensions), BLAKE3, the challenger, pruned Merkle proofs. The fields are proved in `Proofs/CertiFriProofs/P3/`; the rest is tested. |
 | `CertiFriTest/` | Executable checks against reference code and against Plonky3, and the generators of their vectors. |
 | `Proofs/` | A separate Lake package that depends on Mathlib and on `CertiFri`: the security theory, and the refinement of the executable verifier to it. |
 | `plonky3/` | Submodule: a Plonky3 checkout for reference. Nothing builds from it. |

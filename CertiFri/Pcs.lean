@@ -11,14 +11,16 @@ the opening points with the claimed evaluations of every column
 
 `verifyClaims` is `Fri.verify` on the shape and the flat arrays of nested
 claims. The flattening keeps Plonky3's order: batch, matrix, point, column.
+`verifyClaimsFrom` is the same for `Fri.verifyFrom`.
 
 Nested claims can give different numbers of values at two points of one matrix,
 which a shape cannot express. Plonky3 rejects such claims (the count of values
 at every point must be the width of the opened row), and so does
 `verifyClaims`.
 
-Nothing is proved here. The security theorems are about `Fri.verify`; this
-file only rearranges its input.
+Nothing is proved here. The security theorems are about `Fri.verify`, and
+about the multi-stark verifier, which calls `verifyClaimsFrom`; this file only
+rearranges its input.
 -/
 
 namespace CertiFri.Fri
@@ -60,6 +62,18 @@ def verifyClaims {σ F : Type} [FieldOps F] [FieldOps EF] [TwoAdicOps F] [Extens
     (proof : FriProof F EF D inputMmcs.MultiProof friMmcs.MultiProof) : Bool :=
   widthsUniform claims
     && verify inputMmcs friMmcs chal init params (claimShape claims)
+      (claims.map (·.commitment)) (claimPoints claims) (claimValues claims) proof
+
+/-- The verifier on nested claims, inside a larger protocol: `Fri.verifyFrom`
+on their shape, their opening points and their claimed values, from the
+challenger state `s` the caller reached. This has the contract of Plonky3's
+`pcs.verify`. -/
+def verifyClaimsFrom {σ F : Type} [FieldOps F] [FieldOps EF] [TwoAdicOps F] [ExtensionOps F EF]
+    [Inhabited D] (inputMmcs : Mmcs F D) (friMmcs : Mmcs EF D) (chal : Challenger σ F EF D)
+    (s : σ) (params : FriParams) (claims : Array (CommitmentOpening EF D))
+    (proof : FriProof F EF D inputMmcs.MultiProof friMmcs.MultiProof) : Bool :=
+  widthsUniform claims
+    && verifyFrom inputMmcs friMmcs chal s params (claimShape claims)
       (claims.map (·.commitment)) (claimPoints claims) (claimValues claims) proof
 
 end CertiFri.Fri

@@ -19,8 +19,11 @@ words and reduced with `2^64 = 2^32 - 1` and `2^96 = -1` modulo `p`, as in
 Plonky3's `reduce128`. The inverse is computed by the extended Euclidean
 algorithm on words; Plonky3 uses a different algorithm for the same value.
 
-That each word is canonical is proved. That the operations compute the field
-operations is not: it is tested, against natural-number arithmetic and against
+That each word is canonical is proved here. That the order is prime, that the
+operations compute the field operations and that the generators are primitive
+roots of unity is proved in the proofs package
+(`Proofs/CertiFriProofs/P3/GoldilocksWord.lean`, `GoldilocksModel.lean`). The
+operations are also tested, against natural-number arithmetic and against
 values computed by Plonky3 (`CertiFriTest/P3/Goldilocks.lean`).
 
 Not covered: square roots, Plonky3's vectorized arithmetic, and encodings other

@@ -75,7 +75,7 @@ theorem size_indices [FieldOps F] [Inhabited D] (chal : Challenger σ F EF D) (i
     {InputProof CommitProof : Type} (proof : FriProof F EF D InputProof CommitProof) :
     (transcript chal init params shape commitments points values proof).indices.size =
       params.numQueries := by
-  simp only [transcript, List.size_toArray, length_sampleIndices]
+  simp only [transcript, transcriptTail, List.size_toArray, length_sampleIndices]
 
 end Indices
 

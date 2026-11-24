@@ -1,0 +1,3 @@
+# multi-stark requires Rust 1.98; this is the toolchain it pins itself.
+[toolchain]
+channel = "1.98.1"

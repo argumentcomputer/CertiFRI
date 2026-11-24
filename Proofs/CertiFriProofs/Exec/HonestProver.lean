@@ -48,9 +48,8 @@ oracle is involved.
 
 ## Not covered
 
-Zero-knowledge; a prover program; Plonky3's pruned Merkle proofs; the
-instantiation of `CertiFriP3`, whose fields are not proved to be a
-`FieldModel`.
+Zero-knowledge; a prover program; Plonky3's pruned Merkle proofs; the hash
+functions and the challenger of `CertiFriP3`.
 -/
 
 namespace CertiFri.Exec

@@ -6,8 +6,9 @@ import CertiFriProofs.Exec.SoundnessTensor
 # Formal 128-Bit Soundness of `multi-stark/v6-zk` Hiding-PCS
 
 Certifies the `multi-stark/v6-zk` zero-knowledge hiding-PCS extension over
-`GoldilocksExt3` (`Fp3Model`, `p^3 ≈ 2^192`) with 48-byte BLAKE3 XOF (`Digest48`),
-incremental sponge chaining (`c = 3 / 2`), and `FriBatching::Tensor`:
+`GoldilocksExt3` (`Fp3Model`, `p^3 ≈ 2^192`) with 64-byte RFC 7693 `BLAKE2b-512`
+(`Digest64`, true 512-bit internal state), incremental sponge chaining (`c = 3 / 2`),
+and `FriBatching::Tensor`:
 
 1. **Salted Merkle leaf binding & ROM soundness preservation:**
    * `salted_merkle_binding_of_no_collision`: 16-byte leaf salting (`Salt16`,
@@ -16,12 +17,13 @@ incremental sponge chaining (`c = 3 / 2`), and `FriBatching::Tensor`:
    * `salted_sponge_binding_le`: in the `SpongeCommitted` ROM with leaf domain
      `T × Salt16`, the incremental sponge binding bound retains the exact
      prefactor `c = 3 / 2` (`3 * N ^ 2 / (2 * |D|)`) with **zero** security
-     degradation (`191.71b` classical + exact `128.0b` BHT quantum for `Digest48`).
-   * `v6Zk_keyed_input_disjoint`: `v6-zk` salted leaves (`ZkMerkleLeaf`),
-     internal 2-to-1 nodes (`ZkMerkleCompress`), and transcripts
-     (`ZkTranscriptSingle` / `ZkTranscriptBatch`) are jointly injective and
-     pairwise disjoint from one another, from plain `v5`, and from all `v6`
-     non-ZK domains.
+     degradation (`255.71b` classical / `170.7b` BHT / `204.8b` CNS / `256b`
+     Grover for `Digest64`; `127.71b` classical for 32-byte `BLAKE3-256`).
+   * `v6Zk_saltedLeaf_injective_and_disjoint` (32-byte `BLAKE3-256` classical) and
+     `v6Zk_saltedLeaf_blake2b512_injective_and_disjoint` (64-byte `BLAKE2b-512` PQ):
+     `v6-zk` salted leaves, internal 2-to-1 nodes, and transcripts are jointly
+     injective and pairwise disjoint from one another, from plain, and from all
+     non-ZK `v6` domains.
 
 2. **2× interleaved odd-coset witness blinding & half-stride telescoping quotient slicing:**
    * `zk_oddCoset_blinding_agrees_on_trace`: `T(X) = T₀(X) + (X^N - 1) * b(X)`
@@ -50,15 +52,15 @@ incremental sponge chaining (`c = 3 / 2`), and `FriBatching::Tensor`:
      columns of degree `< 2N` into the quotient MMCS and batching via
      `FriBatching::Tensor` preserves unconditional `≤ (3 / 4) / 2 ^ 128`
      RS proximity (`Tensor2DMCA`).
-   * `goldilocksExt3_v6Zk_soundness_xof48_ud_128` &
-     `goldilocksExt3_v6Zk_soundness_xof48_johnson_128`: literal `≤ N / 2 ^ 128`
-     executable `Fri.verify` soundness for `v6-zk` under 48B BLAKE3 XOF.
+   * `goldilocksExt3_v6Zk_soundness_blake2b512_ud_128` &
+     `goldilocksExt3_v6Zk_soundness_blake2b512_johnson_*`: literal `≤ N / 2 ^ 128`
+     executable `Fri.verify` soundness for `v6-zk` under 64B RFC 7693 `BLAKE2b-512`.
 
 4. **Checked predicates & constructive negative controls for all 4 `v6-zk` guardrails:**
    * Trap 1: `N ≥ next_pow2(2Q + 2D)` (`minZkLogDegree`),
    * Trap 2: `W_R ≥ 4` (`ZK_RANDOMIZER_WIDTH`),
    * Trap 3: `1 ≤ logBlowup ∧ zkQuotientDegree maxConstraintDegree ≤ 2 ^ logBlowup`,
-   * Trap 4: `v6` ↔ `v6-zk` BLAKE3 `derive_key` domain separation.
+   * Trap 4: `v6` ↔ `v6-zk` domain separation.
 
 All theorems depend strictly on `[propext, Classical.choice, Quot.sound]`.
 -/
@@ -190,6 +192,30 @@ theorem v6Zk_saltedLeaf_injective_and_disjoint
    DomainSep.saltedLeafInput_ne_transcriptInput .v6ZkSingle row₁ salt₁ msg,
    DomainSep.leafInput_ne_plainInput .v6ZkSingle (DomainSep.saltedRowBytes row₁ salt₁) msg,
    DomainSep.v6Zk_leafInput_ne_v6_leafInput (DomainSep.saltedRowBytes row₁ salt₁) msg⟩
+
+/-- **Complete `v6-zk` salted leaf injectivity & domain separation for RFC 7693 `BLAKE2b-512`:**
+salted leaf inputs under `DomainSepBlake2b512.v6ZkSingle` are jointly injective in
+`(row, salt)` and strictly disjoint from 64B 1-block internal nodes (`node64Input`),
+transcript invocations, plain unpersonalized `BLAKE2b-512`, and non-ZK `v6` leaves. -/
+theorem v6Zk_saltedLeaf_blake2b512_injective_and_disjoint
+    (row₁ row₂ : Array Goldilocks) (salt₁ salt₂ : DomainSep.Salt16)
+    (l64 r64 : Digest64) (msg : ByteArray) :
+    (DomainSepBlake2b512.v6ZkSingle.saltedLeafInput row₁ salt₁ =
+        DomainSepBlake2b512.v6ZkSingle.saltedLeafInput row₂ salt₂ →
+      row₁ = row₂ ∧ salt₁ = salt₂) ∧
+    DomainSepBlake2b512.v6ZkSingle.saltedLeafInput row₁ salt₁ ≠
+      DomainSepBlake2b512.v6ZkSingle.node64Input l64 r64 ∧
+    DomainSepBlake2b512.v6ZkSingle.saltedLeafInput row₁ salt₁ ≠
+      DomainSepBlake2b512.v6ZkSingle.transcriptInput msg ∧
+    DomainSepBlake2b512.v6ZkSingle.saltedLeafInput row₁ salt₁ ≠
+      DomainSepBlake2b512.plainInput msg ∧
+    DomainSepBlake2b512.v6ZkSingle.saltedLeafInput row₁ salt₁ ≠
+      DomainSepBlake2b512.v6Single.leafInput msg :=
+  ⟨DomainSepBlake2b512.saltedLeafInput_injective .v6ZkSingle,
+   DomainSepBlake2b512.saltedLeafInput_ne_node64Input .v6ZkSingle row₁ salt₁ l64 r64,
+   DomainSepBlake2b512.saltedLeafInput_ne_transcriptInput .v6ZkSingle row₁ salt₁ msg,
+   DomainSepBlake2b512.leafInput_ne_plainInput .v6ZkSingle (DomainSep.saltedRowBytes row₁ salt₁) msg,
+   DomainSepBlake2b512.v6Zk_leafInput_ne_v6_leafInput (DomainSep.saltedRowBytes row₁ salt₁) msg⟩
 
 end SaltedMerkle
 
@@ -875,13 +901,15 @@ theorem negControl_zk_trap4_v6_domain_rejected :
 /-- **Executable `multi-stark/v6-zk` 128-Bit Unconditional UD Soundness (`≤ N / 2 ^ 128`):**
 for any valid `v6-zk` configuration (`ZkGuardrailsOk cfg`) with
 `(logBlowup = 2, numQueries = 160, queryPowBits = 20)` over `GoldilocksExt3`
-using 48-byte BLAKE3 XOF (`Digest48`), incremental sponge chaining (`c = 3 / 2`),
-salted Merkle leaves (`Salt16` under `ZkMerkleLeaf`), 2× odd-coset blinding,
-and `W_R ≥ 4` randomizer columns merged into the quotient claim shape:
+using 64-byte RFC 7693 `BLAKE2b-512` (`Digest64`, true 512-bit internal state),
+incremental sponge chaining (`c = 3 / 2`), salted Merkle leaves (`Salt16` under
+`zkMerkleLeaf`), 2× odd-coset blinding, and `W_R ≥ 4` randomizer columns merged
+into the quotient claim shape:
 1. Executable `Fri.verify` soundness error is literally `≤ N / 2 ^ 128` for all `N ≤ 2 ^ 128`;
-2. BHT quantum collision probability is exact `(Q / 2 ^ 128) ^ 3` (`128.0b`);
-3. All 4 `v6-zk` BLAKE3 domains are strictly separated from non-ZK `v6` and `plain`. -/
-theorem goldilocksExt3_v6Zk_soundness_xof48_ud_128
+2. Concrete PQ collision security is `170.7b` BHT (`+42.7b` headroom above 128b),
+   `204.8b` CNS, and `256b` Grover preimage;
+3. All `v6-zk` domains are strictly separated from non-ZK `v6` and `plain`. -/
+theorem goldilocksExt3_v6Zk_soundness_blake2b512_ud_128
     (cfg : ZkConfig) (hcfg : ZkGuardrailsOk cfg)
     (params : FriParams) (shape : ClaimShape)
     (hbl : params.logBlowup = cfg.logBlowup) (hbl2 : cfg.logBlowup = 2)
@@ -891,8 +919,8 @@ theorem goldilocksExt3_v6Zk_soundness_xof48_ud_128
     (hheight : params.logFinalHeight ≤ Fri.logMaxHeight params.logBlowup shape)
     (hclaims : (Fri.claimRefs params.logBlowup shape).length *
         2 ^ Fri.logMaxHeight params.logBlowup shape ≤ 2 ^ 60)
-    (s₀ : Digest48) {A : Type*}
-    {adv : OracleComp (SpongeOracleAnswer (D := Digest48) goldilocksExt3_fieldModel params shape
+    (s₀ : Digest64) {A : Type*}
+    {adv : OracleComp (SpongeOracleAnswer (D := Digest64) goldilocksExt3_fieldModel params shape
       (goldilocksExt3_wellFormed params shape (hmax.trans hcfg.2.1))) A}
     {Q : ℕ} (hadv : adv.QueryBound Q)
     (hN : Q + ((modelParams goldilocksExt3_fieldModel params shape
@@ -901,12 +929,12 @@ theorem goldilocksExt3_v6Zk_soundness_xof48_ud_128
         (goldilocksExt3_wellFormed params shape (hmax.trans hcfg.2.1))).rounds + 2)) +
       (modelParams goldilocksExt3_fieldModel params shape
         (goldilocksExt3_wellFormed params shape (hmax.trans hcfg.2.1))).verifierQueries ≤ 2 ^ 128)
-    (attempt : A → Attempt Goldilocks GoldilocksExt3 Digest48) :
+    (attempt : A → Attempt Goldilocks GoldilocksExt3 Digest64) :
     let wf := goldilocksExt3_wellFormed params shape (hmax.trans hcfg.2.1)
     let P := modelParams goldilocksExt3_fieldModel params shape wf
     let N : ℕ := Q + (P.batches + (P.rounds + 2)) + P.verifierQueries
     prob (fun res l =>
-        (∃ f : ∀ x, SpongeOracleAnswer (D := Digest48) goldilocksExt3_fieldModel params shape wf x,
+        (∃ f : ∀ x, SpongeOracleAnswer (D := Digest64) goldilocksExt3_fieldModel params shape wf x,
           (∀ x y, l.dlookup x = some y → f x = y) ∧
             spongeAccepts goldilocksExt3_fieldModel params shape wf s₀ f (attempt res.1) = true) ∧
         PcsRbr.ClaimsFail P.ldt P.shift (5 / 8)
@@ -915,14 +943,14 @@ theorem goldilocksExt3_v6Zk_soundness_xof48_ud_128
               (attempt res.1).points (attempt res.1).values)) (spongeCommittedRow l)))
       (spongeExperiment goldilocksExt3_fieldModel params shape wf s₀ adv attempt) [] ≤
       (N : ℝ) / (2 : ℝ) ^ 128 :=
-  goldilocksExt3_soundness_sponge_xof48_uniqueDecoding_128 params shape
+  goldilocksExt3_soundness_sponge_blake2b512_uniqueDecoding_128 params shape
     (hbl.trans hbl2) (hqn.trans hqn160) hqpow (hmax.trans hcfg.2.1) hheight hclaims s₀
     hadv hN attempt
 
 /-- **Executable `multi-stark/v6-zk` 128-Bit Johnson Soundness (`≤ N / 2 ^ 128`):**
-same 48-byte BLAKE3 XOF `v6-zk` hiding-PCS soundness theorem in the Johnson
-regime `(logBlowup = 2, numQueries ≥ 118, queryPowBits = 20)` under `CurveListCA`. -/
-theorem goldilocksExt3_v6Zk_soundness_xof48_johnson_128
+same 64-byte RFC 7693 `BLAKE2b-512` `v6-zk` hiding-PCS soundness theorem in the
+Johnson regime `(logBlowup = 2, numQueries ≥ 118, queryPowBits = 20)` under `CurveListCA`. -/
+theorem goldilocksExt3_v6Zk_soundness_blake2b512_johnson_128
     (cfg : ZkConfig) (hcfg : ZkGuardrailsOk cfg)
     (params : FriParams) (shape : ClaimShape)
     (hbl : params.logBlowup = cfg.logBlowup) (hbl2 : cfg.logBlowup = 2)
@@ -930,7 +958,7 @@ theorem goldilocksExt3_v6Zk_soundness_xof48_johnson_128
     (hqpow : params.queryPowBits = 20)
     (hmax : Fri.logMaxHeight params.logBlowup shape ≤ cfg.logTraceHeight + 1 + cfg.logBlowup)
     (hheight : params.logFinalHeight ≤ Fri.logMaxHeight params.logBlowup shape)
-    (s₀ : Digest48) {T : ℕ → ℕ → ℕ → ℕ → ℕ} (hca : CurveListCA Fp3Model T)
+    (s₀ : Digest64) {T : ℕ → ℕ → ℕ → ℕ → ℕ} (hca : CurveListCA Fp3Model T)
     {cT : ℝ} (hcT0 : 0 ≤ cT)
     (hT : ∀ (j k : ℕ), j ≤ Fri.numRounds params shape → 2 ≤ k →
       (T (2 ^ (Fri.logMaxHeight params.logBlowup shape - j))
@@ -941,7 +969,7 @@ theorem goldilocksExt3_v6Zk_soundness_xof48_johnson_128
         (cT + 17 * (2 : ℝ) ^ Fri.logMaxHeight params.logBlowup shape) ≤ (2 : ℝ) ^ 62)
     (hβ_budget : 2 * cT + 17 * (2 : ℝ) ^ Fri.logMaxHeight params.logBlowup shape ≤ (2 : ℝ) ^ 62)
     {A : Type*}
-    {adv : OracleComp (SpongeOracleAnswer (D := Digest48) goldilocksExt3_fieldModel params shape
+    {adv : OracleComp (SpongeOracleAnswer (D := Digest64) goldilocksExt3_fieldModel params shape
       (goldilocksExt3_wellFormed params shape (hmax.trans hcfg.2.1))) A}
     {Q : ℕ} (hadv : adv.QueryBound Q)
     (hN : Q + ((modelParams goldilocksExt3_fieldModel params shape
@@ -950,12 +978,12 @@ theorem goldilocksExt3_v6Zk_soundness_xof48_johnson_128
         (goldilocksExt3_wellFormed params shape (hmax.trans hcfg.2.1))).rounds + 2)) +
       (modelParams goldilocksExt3_fieldModel params shape
         (goldilocksExt3_wellFormed params shape (hmax.trans hcfg.2.1))).verifierQueries ≤ 2 ^ 128)
-    (attempt : A → Attempt Goldilocks GoldilocksExt3 Digest48) :
+    (attempt : A → Attempt Goldilocks GoldilocksExt3 Digest64) :
     let wf := goldilocksExt3_wellFormed params shape (hmax.trans hcfg.2.1)
     let P := modelParams goldilocksExt3_fieldModel params shape wf
     let N : ℕ := Q + (P.batches + (P.rounds + 2)) + P.verifierQueries
     prob (fun res l =>
-        (∃ f : ∀ x, SpongeOracleAnswer (D := Digest48) goldilocksExt3_fieldModel params shape wf x,
+        (∃ f : ∀ x, SpongeOracleAnswer (D := Digest64) goldilocksExt3_fieldModel params shape wf x,
           (∀ x y, l.dlookup x = some y → f x = y) ∧
             spongeAccepts goldilocksExt3_fieldModel params shape wf s₀ f (attempt res.1) = true) ∧
         PcsRbr.ClaimsFail P.ldt P.shift (65 / 128)
@@ -964,15 +992,16 @@ theorem goldilocksExt3_v6Zk_soundness_xof48_johnson_128
               (attempt res.1).points (attempt res.1).values)) (spongeCommittedRow l)))
       (spongeExperiment goldilocksExt3_fieldModel params shape wf s₀ adv attempt) [] ≤
       (N : ℝ) / (2 : ℝ) ^ 128 :=
-  goldilocksExt3_soundness_sponge_xof48_johnson_128 params shape
+  goldilocksExt3_soundness_sponge_blake2b512_johnson_128 params shape
     (hbl.trans hbl2) (hqn.symm ▸ hqn118) hqpow (hmax.trans hcfg.2.1) hheight s₀
     hca hcT0 hT hα_budget hβ_budget hadv hN attempt
 
 /-- **100% UNCONDITIONAL `multi-stark/v6-zk` 128-Bit Johnson Soundness (`lb = 2, q ≥ 128`):**
 ZERO `CurveListCA` hypothesis! Literal `≤ N / 2 ^ 128` executable `Fri.verify` soundness
 for `v6-zk` at `θ = 71 / 128` (`logBlowup = 2, numQueries ≥ 128, queryPowBits = 20`)
-under 48B BLAKE3 XOF, incremental sponge chaining (`c = 3 / 2`), and `ZkGuardrailsOk cfg`. -/
-theorem goldilocksExt3_v6Zk_soundness_xof48_johnson_128_unconditional
+under 64B RFC 7693 `BLAKE2b-512` (`Digest64`), incremental sponge chaining (`c = 3 / 2`),
+and `ZkGuardrailsOk cfg`. -/
+theorem goldilocksExt3_v6Zk_soundness_blake2b512_johnson_128_unconditional
     (cfg : ZkConfig) (hcfg : ZkGuardrailsOk cfg)
     (params : FriParams) (shape : ClaimShape)
     (hbl : params.logBlowup = cfg.logBlowup) (hbl2 : cfg.logBlowup = 2)
@@ -982,8 +1011,8 @@ theorem goldilocksExt3_v6Zk_soundness_xof48_johnson_128_unconditional
     (hheight : params.logFinalHeight ≤ Fri.logMaxHeight params.logBlowup shape)
     (hclaims : (Fri.claimRefs params.logBlowup shape).length *
         2 ^ Fri.logMaxHeight params.logBlowup shape ≤ 2 ^ 36)
-    (s₀ : Digest48) {A : Type*}
-    {adv : OracleComp (SpongeOracleAnswer (D := Digest48) goldilocksExt3_fieldModel params shape
+    (s₀ : Digest64) {A : Type*}
+    {adv : OracleComp (SpongeOracleAnswer (D := Digest64) goldilocksExt3_fieldModel params shape
       (goldilocksExt3_wellFormed params shape (hmax.trans hcfg.2.1))) A}
     {Q : ℕ} (hadv : adv.QueryBound Q)
     (hN : Q + ((modelParams goldilocksExt3_fieldModel params shape
@@ -992,12 +1021,12 @@ theorem goldilocksExt3_v6Zk_soundness_xof48_johnson_128_unconditional
         (goldilocksExt3_wellFormed params shape (hmax.trans hcfg.2.1))).rounds + 2)) +
       (modelParams goldilocksExt3_fieldModel params shape
         (goldilocksExt3_wellFormed params shape (hmax.trans hcfg.2.1))).verifierQueries ≤ 2 ^ 128)
-    (attempt : A → Attempt Goldilocks GoldilocksExt3 Digest48) :
+    (attempt : A → Attempt Goldilocks GoldilocksExt3 Digest64) :
     let wf := goldilocksExt3_wellFormed params shape (hmax.trans hcfg.2.1)
     let P := modelParams goldilocksExt3_fieldModel params shape wf
     let N : ℕ := Q + (P.batches + (P.rounds + 2)) + P.verifierQueries
     prob (fun res l =>
-        (∃ f : ∀ x, SpongeOracleAnswer (D := Digest48) goldilocksExt3_fieldModel params shape wf x,
+        (∃ f : ∀ x, SpongeOracleAnswer (D := Digest64) goldilocksExt3_fieldModel params shape wf x,
           (∀ x y, l.dlookup x = some y → f x = y) ∧
             spongeAccepts goldilocksExt3_fieldModel params shape wf s₀ f (attempt res.1) = true) ∧
         PcsRbr.ClaimsFail P.ldt P.shift (71 / 128)
@@ -1006,14 +1035,14 @@ theorem goldilocksExt3_v6Zk_soundness_xof48_johnson_128_unconditional
               (attempt res.1).points (attempt res.1).values)) (spongeCommittedRow l)))
       (spongeExperiment goldilocksExt3_fieldModel params shape wf s₀ adv attempt) [] ≤
       (N : ℝ) / (2 : ℝ) ^ 128 :=
-  goldilocksExt3_soundness_sponge_xof48_johnson_128_unconditional params shape
+  goldilocksExt3_soundness_sponge_blake2b512_johnson_128_unconditional params shape
     (hbl.trans hbl2) (hqn.symm ▸ hqn128) hqpow (hmax.trans hcfg.2.1) hheight hclaims s₀
     hadv hN attempt
 
 /-- **100% UNCONDITIONAL `multi-stark/v6-zk` Native STARK Shrinker Johnson Soundness
-(`lb = 3, q ≥ 78, queryPow = 20`):**
+(`lb = 3, q ≥ 78, queryPow = 20`, `BLAKE2b-512`):**
 ZERO `CurveListCA` hypothesis! Literal `≤ N / 2 ^ 128` at `θ = 19 / 50`. -/
-theorem goldilocksExt3_v6Zk_soundness_xof48_johnson_lb3_78_128_unconditional
+theorem goldilocksExt3_v6Zk_soundness_blake2b512_johnson_lb3_78_128_unconditional
     (cfg : ZkConfig) (hcfg : ZkGuardrailsOk cfg)
     (params : FriParams) (shape : ClaimShape)
     (hbl : params.logBlowup = cfg.logBlowup) (hbl3 : cfg.logBlowup = 3)
@@ -1023,8 +1052,8 @@ theorem goldilocksExt3_v6Zk_soundness_xof48_johnson_lb3_78_128_unconditional
     (hheight : params.logFinalHeight ≤ Fri.logMaxHeight params.logBlowup shape)
     (hclaims : (Fri.claimRefs params.logBlowup shape).length *
         2 ^ Fri.logMaxHeight params.logBlowup shape ≤ 2 ^ 32)
-    (s₀ : Digest48) {A : Type*}
-    {adv : OracleComp (SpongeOracleAnswer (D := Digest48) goldilocksExt3_fieldModel params shape
+    (s₀ : Digest64) {A : Type*}
+    {adv : OracleComp (SpongeOracleAnswer (D := Digest64) goldilocksExt3_fieldModel params shape
       (goldilocksExt3_wellFormed params shape (hmax.trans (by decide)))) A}
     {Q : ℕ} (hadv : adv.QueryBound Q)
     (hN : Q + ((modelParams goldilocksExt3_fieldModel params shape
@@ -1033,12 +1062,12 @@ theorem goldilocksExt3_v6Zk_soundness_xof48_johnson_lb3_78_128_unconditional
         (goldilocksExt3_wellFormed params shape (hmax.trans (by decide)))).rounds + 2)) +
       (modelParams goldilocksExt3_fieldModel params shape
         (goldilocksExt3_wellFormed params shape (hmax.trans (by decide)))).verifierQueries ≤ 2 ^ 128)
-    (attempt : A → Attempt Goldilocks GoldilocksExt3 Digest48) :
+    (attempt : A → Attempt Goldilocks GoldilocksExt3 Digest64) :
     let wf := goldilocksExt3_wellFormed params shape (hmax.trans (by decide))
     let P := modelParams goldilocksExt3_fieldModel params shape wf
     let N : ℕ := Q + (P.batches + (P.rounds + 2)) + P.verifierQueries
     prob (fun res l =>
-        (∃ f : ∀ x, SpongeOracleAnswer (D := Digest48) goldilocksExt3_fieldModel params shape wf x,
+        (∃ f : ∀ x, SpongeOracleAnswer (D := Digest64) goldilocksExt3_fieldModel params shape wf x,
           (∀ x y, l.dlookup x = some y → f x = y) ∧
             spongeAccepts goldilocksExt3_fieldModel params shape wf s₀ f (attempt res.1) = true) ∧
         PcsRbr.ClaimsFail P.ldt P.shift (19 / 50)
@@ -1048,13 +1077,13 @@ theorem goldilocksExt3_v6Zk_soundness_xof48_johnson_lb3_78_128_unconditional
       (spongeExperiment goldilocksExt3_fieldModel params shape wf s₀ adv attempt) [] ≤
       (N : ℝ) / (2 : ℝ) ^ 128 := by
   let _ := hcfg
-  exact goldilocksExt3_soundness_sponge_xof48_johnson_lb3_78_128_unconditional params shape
+  exact goldilocksExt3_soundness_sponge_blake2b512_johnson_lb3_78_128_unconditional params shape
     (hbl.trans hbl3) (hqn.symm ▸ hqn78) hqpow hmax hheight hclaims s₀ hadv hN attempt
 
 /-- **100% UNCONDITIONAL `multi-stark/v6-zk` Native STARK Shrinker Johnson Soundness
-(`lb = 4, q ≥ 58, queryPow = 20`):**
+(`lb = 4, q ≥ 58, queryPow = 20`, `BLAKE2b-512`):**
 ZERO `CurveListCA` hypothesis! Literal `≤ N / 2 ^ 128` at `θ = 35 / 128`. -/
-theorem goldilocksExt3_v6Zk_soundness_xof48_johnson_lb4_58_128_unconditional
+theorem goldilocksExt3_v6Zk_soundness_blake2b512_johnson_lb4_58_128_unconditional
     (cfg : ZkConfig) (hcfg : ZkGuardrailsOk cfg)
     (params : FriParams) (shape : ClaimShape)
     (hbl : params.logBlowup = cfg.logBlowup) (hbl4 : cfg.logBlowup = 4)
@@ -1064,8 +1093,8 @@ theorem goldilocksExt3_v6Zk_soundness_xof48_johnson_lb4_58_128_unconditional
     (hheight : params.logFinalHeight ≤ Fri.logMaxHeight params.logBlowup shape)
     (hclaims : (Fri.claimRefs params.logBlowup shape).length *
         2 ^ Fri.logMaxHeight params.logBlowup shape ≤ 2 ^ 33)
-    (s₀ : Digest48) {A : Type*}
-    {adv : OracleComp (SpongeOracleAnswer (D := Digest48) goldilocksExt3_fieldModel params shape
+    (s₀ : Digest64) {A : Type*}
+    {adv : OracleComp (SpongeOracleAnswer (D := Digest64) goldilocksExt3_fieldModel params shape
       (goldilocksExt3_wellFormed params shape (hmax.trans hcfg.2.1))) A}
     {Q : ℕ} (hadv : adv.QueryBound Q)
     (hN : Q + ((modelParams goldilocksExt3_fieldModel params shape
@@ -1074,12 +1103,12 @@ theorem goldilocksExt3_v6Zk_soundness_xof48_johnson_lb4_58_128_unconditional
         (goldilocksExt3_wellFormed params shape (hmax.trans hcfg.2.1))).rounds + 2)) +
       (modelParams goldilocksExt3_fieldModel params shape
         (goldilocksExt3_wellFormed params shape (hmax.trans hcfg.2.1))).verifierQueries ≤ 2 ^ 128)
-    (attempt : A → Attempt Goldilocks GoldilocksExt3 Digest48) :
+    (attempt : A → Attempt Goldilocks GoldilocksExt3 Digest64) :
     let wf := goldilocksExt3_wellFormed params shape (hmax.trans hcfg.2.1)
     let P := modelParams goldilocksExt3_fieldModel params shape wf
     let N : ℕ := Q + (P.batches + (P.rounds + 2)) + P.verifierQueries
     prob (fun res l =>
-        (∃ f : ∀ x, SpongeOracleAnswer (D := Digest48) goldilocksExt3_fieldModel params shape wf x,
+        (∃ f : ∀ x, SpongeOracleAnswer (D := Digest64) goldilocksExt3_fieldModel params shape wf x,
           (∀ x y, l.dlookup x = some y → f x = y) ∧
             spongeAccepts goldilocksExt3_fieldModel params shape wf s₀ f (attempt res.1) = true) ∧
         PcsRbr.ClaimsFail P.ldt P.shift (35 / 128)
@@ -1088,7 +1117,7 @@ theorem goldilocksExt3_v6Zk_soundness_xof48_johnson_lb4_58_128_unconditional
               (attempt res.1).points (attempt res.1).values)) (spongeCommittedRow l)))
       (spongeExperiment goldilocksExt3_fieldModel params shape wf s₀ adv attempt) [] ≤
       (N : ℝ) / (2 : ℝ) ^ 128 :=
-  goldilocksExt3_soundness_sponge_xof48_johnson_lb4_58_128_unconditional params shape
+  goldilocksExt3_soundness_sponge_blake2b512_johnson_lb4_58_128_unconditional params shape
     (hbl.trans hbl4) (hqn.symm ▸ hqn58) hqpow (hmax.trans hcfg.2.1) hheight hclaims s₀
     hadv hN attempt
 

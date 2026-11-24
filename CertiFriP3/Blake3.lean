@@ -269,9 +269,15 @@ under `flagDeriveKeyContext` and ORs `flagDeriveKeyMaterial` into every block
 and parent compression. A 64-byte Merkle internal node (`left || right`) stays
 a single 1-block compression (`deriveKeyPair`).
 
-A 48-byte XOF digest (`Digest48`) reads words `0..11` of the single 16-word
+A legacy 48-byte XOF digest (`Digest48`) reads words `0..11` of the single 16-word
 root compression output block (zero extra root compressions), and compressing
-two 48-byte digests (`96` bytes) takes two 64-byte blocks (`deriveKeyPairXof48`). -/
+two 48-byte digests (`96` bytes) takes two 64-byte blocks (`deriveKeyPairXof48`).
+**Note:** because BLAKE3's internal chaining value (`cv`) remains 256 bits,
+`BLAKE3-XOF48` (and `BLAKE3-XOF64`) do **not** provide concrete 128-bit
+post-quantum collision resistance (concrete BHT collision resistance is capped at
+`85.3` bits on every `> 64`-byte input). Use RFC 7693 `BLAKE2b-512` (`CertiFriP3.Blake2b`,
+`Digest64`, true 512-bit internal state) for certified 128-bit post-quantum proofs,
+and 32-byte `BLAKE3-256` (`Digest`) for 128-bit classical proofs. -/
 
 /-- The root compression function producing 48 bytes (words `0..11` of the
 16-word BLAKE3 output block, `counter = 0`). Words `0..7` coincide with

@@ -1,5 +1,6 @@
 import CertiFriP3.Hashers
 import CertiFriP3.Challenger
+import CertiFriP3.Blake2b
 
 /-!
 # Native BLAKE3 `derive_key` domain separation (aligned with `multi-stark` `v6` and `v6-zk`)
@@ -1249,24 +1250,32 @@ def ext3HasherSep (sep : DomainSep := .standard) : MerkleHasher GoldilocksExt3 D
   hashRows row := Blake3.deriveKeyBlocks sep.leafKey (24 * row.size) (Hashers.ext3RowBlock row)
   compress left right := Blake3.deriveKeyPair sep.compressKey left right
 
-/-- 48-byte (384-bit) BLAKE3 `derive_key` XOF Merkle hasher over `Goldilocks`
-(2 blocks per 96-byte internal node, 1 root output block). -/
+/-- Legacy 48-byte (384-bit) BLAKE3 `derive_key` XOF Merkle hasher over `Goldilocks`
+(2 blocks per 96-byte internal node, 1 root output block).
+**Retired for concrete 128-bit PQ:** BLAKE3's 256-bit internal `cv` caps concrete BHT
+collision resistance at `85.3` bits on every `> 64`-byte input. Use
+`baseHasherSepBlake2b512` (`Digest64`, true 512-bit internal state) for certified
+128-bit PQ proofs. -/
 def baseHasherSepXof48 (sep : DomainSep := .standard) : MerkleHasher Goldilocks Digest48 where
   hashRows row := Blake3.deriveKeyBlocksXof48 sep.leafKey (8 * row.size) (Hashers.rowBlock row)
   compress left right := Blake3.deriveKeyPairXof48 sep.compressKey left right
 
-/-- 48-byte (384-bit) BLAKE3 `derive_key` XOF Merkle hasher over `GoldilocksExt3`
-(2 blocks per 96-byte internal node, 1 root output block). -/
+/-- Legacy 48-byte (384-bit) BLAKE3 `derive_key` XOF Merkle hasher over `GoldilocksExt3`.
+**Retired for concrete 128-bit PQ** (256-bit internal `cv` cap at `85.3b` BHT);
+use `ext3HasherSepBlake2b512` instead. -/
 def ext3HasherSepXof48 (sep : DomainSep := .standard) : MerkleHasher GoldilocksExt3 Digest48 where
   hashRows row :=
     Blake3.deriveKeyBlocksXof48 sep.leafKey (24 * row.size) (Hashers.ext3RowBlock row)
   compress left right := Blake3.deriveKeyPairXof48 sep.compressKey left right
 
-/-- Native BLAKE3 `derive_key` byte hash for the Fiat–Shamir challenger (32 bytes). -/
+/-- Native BLAKE3 `derive_key` byte hash for the Fiat–Shamir challenger (32 bytes,
+production 128-bit classical instantiation). -/
 def blake3Transcript (sep : DomainSep := .standard) (input : ByteArray) : ByteArray :=
   (Blake3.deriveKeyWithKey sep.transcriptKey input).toBytes
 
-/-- Native BLAKE3 `derive_key` XOF byte hash for the Fiat–Shamir challenger (48 bytes). -/
+/-- Legacy 48-byte BLAKE3 `derive_key` XOF byte hash for the Fiat–Shamir challenger.
+**Retired for concrete 128-bit PQ** (256-bit internal `cv` cap); use
+`blake2b512Transcript` instead. -/
 def blake3TranscriptXof48 (sep : DomainSep := .standard) (input : ByteArray) : ByteArray :=
   (Blake3.deriveKeyWithKeyXof48 sep.transcriptKey input).toBytes
 
@@ -1288,7 +1297,9 @@ def challenger3V6Single : Challenger ChallengerState Goldilocks GoldilocksExt3 D
 def challenger3V6Batch : Challenger ChallengerState Goldilocks GoldilocksExt3 Digest :=
   challenger3Sep .v6Batch
 
-/-- 48-byte XOF `multi-stark` `v6` challenger over `Goldilocks` / `GoldilocksExt3`. -/
+/-- Legacy 48-byte XOF `multi-stark` `v6` challenger over `Goldilocks` / `GoldilocksExt3`.
+**Retired for concrete 128-bit PQ** (256-bit internal `cv` cap); use
+`challenger3Blake2b512` instead. -/
 def challenger3Xof48 (sep : DomainSep := .standard) :
     Challenger ChallengerState Goldilocks GoldilocksExt3 Digest48 where
   observe s
@@ -1302,7 +1313,9 @@ def challenger3Xof48 (sep : DomainSep := .standard) :
 def hashSaltedRow (row : Array Goldilocks) (salt : DomainSep.Salt16) : Digest :=
   Blake3Domain.zkMerkleLeaf.hash (DomainSep.saltedRowBytes row salt)
 
-/-- `v6-zk` salted Merkle leaf hash (48-byte XOF digest) under `ZkMerkleLeaf`. -/
+/-- Legacy 48-byte XOF `v6-zk` salted Merkle leaf hash under `ZkMerkleLeaf`.
+**Retired for concrete 128-bit PQ** (256-bit internal `cv` cap); use
+`hashSaltedRowBlake2b512` instead. -/
 def hashSaltedRowXof48 (row : Array Goldilocks) (salt : DomainSep.Salt16) : Digest48 :=
   Blake3Domain.zkMerkleLeaf.hashXof48 (DomainSep.saltedRowBytes row salt)
 
@@ -1314,8 +1327,462 @@ def challenger3V6ZkSingle : Challenger ChallengerState Goldilocks GoldilocksExt3
 def challenger3V6ZkBatch : Challenger ChallengerState Goldilocks GoldilocksExt3 Digest :=
   challenger3Sep .v6ZkBatch
 
-/-- 48-byte XOF `multi-stark` `v6-zk` single-proof challenger over `Goldilocks` / `GoldilocksExt3`. -/
+/-- Legacy 48-byte XOF `multi-stark` `v6-zk` single-proof challenger.
+**Retired for concrete 128-bit PQ** (256-bit internal `cv` cap); use
+`challenger3V6ZkBlake2b512` instead. -/
 def challenger3V6ZkXof48 : Challenger ChallengerState Goldilocks GoldilocksExt3 Digest48 :=
   challenger3Xof48 .v6ZkSingle
+
+/-! ## RFC 7693 `BLAKE2b-512` (`Digest64`) native personalization domain separation
+
+Certified **128-bit post-quantum** instantiation (512-bit internal state,
+128-byte block = single-block 2-to-1 compression of `left64 || right64`,
+`255.71b` classical BCS `c = 3/2`, `170.7b` BHT / `204.8b` CNS / `256b` Grover).
+
+Domain separation uses RFC 7693 §2.5's native 16-byte `personal` parameter
+(XORed into `IV[6..7]` in the parameter block): every role starts from a
+provably distinct 512-bit initial state with zero extra compression calls and
+zero extra message bytes. -/
+
+/-- RFC 7693 `personal` tag (`14 ≤ 16` bytes) for `v6` `BLAKE2b-512` Merkle leaves. -/
+def v6Blake2bMerkleLeafPersonal : String := "ix/v6/b2b/leaf"
+
+/-- RFC 7693 `personal` tag (`14 ≤ 16` bytes) for `v6` `BLAKE2b-512` Merkle 2-to-1 nodes. -/
+def v6Blake2bMerkleCompressPersonal : String := "ix/v6/b2b/node"
+
+/-- RFC 7693 `personal` tag (`14 ≤ 16` bytes) for `v6` `BLAKE2b-512` single-proof transcripts. -/
+def v6Blake2bTranscriptSinglePersonal : String := "ix/v6/b2b/tr/1"
+
+/-- RFC 7693 `personal` tag (`14 ≤ 16` bytes) for `v6` `BLAKE2b-512` batch-proof transcripts. -/
+def v6Blake2bTranscriptBatchPersonal : String := "ix/v6/b2b/tr/b"
+
+/-- RFC 7693 `personal` tag (`12 ≤ 16` bytes) for `v6` `BLAKE2b-512` verifying-key digests. -/
+def v6Blake2bVkPersonal : String := "ix/v6/b2b/vk"
+
+/-- RFC 7693 `personal` tag (`16 ≤ 16` bytes) for `v6-zk` `BLAKE2b-512` salted Merkle leaves. -/
+def v6ZkBlake2bMerkleLeafPersonal : String := "ix/v6zk/b2b/leaf"
+
+/-- RFC 7693 `personal` tag (`16 ≤ 16` bytes) for `v6-zk` `BLAKE2b-512` Merkle 2-to-1 nodes. -/
+def v6ZkBlake2bMerkleCompressPersonal : String := "ix/v6zk/b2b/node"
+
+/-- RFC 7693 `personal` tag (`16 ≤ 16` bytes) for `v6-zk` `BLAKE2b-512` single-proof transcripts. -/
+def v6ZkBlake2bTranscriptSinglePersonal : String := "ix/v6zk/b2b/tr/1"
+
+/-- RFC 7693 `personal` tag (`16 ≤ 16` bytes) for `v6-zk` `BLAKE2b-512` batch-proof transcripts. -/
+def v6ZkBlake2bTranscriptBatchPersonal : String := "ix/v6zk/b2b/tr/b"
+
+/-- RFC 7693 `personal` tag (`14 ≤ 16` bytes) for `v6-zk` `BLAKE2b-512` verifying-key digests. -/
+def v6ZkBlake2bVkPersonal : String := "ix/v6zk/b2b/vk"
+
+/-- Complete domain enumeration for RFC 7693 `BLAKE2b-512`: plain (unpersonalized),
+the 5 `v6` domains, and the 5 `v6-zk` domains. -/
+inductive Blake2b512Domain where
+  | plain
+  | merkleLeaf
+  | merkleCompress
+  | transcriptSingle
+  | transcriptBatch
+  | verifyingKey
+  | zkMerkleLeaf
+  | zkMerkleCompress
+  | zkTranscriptSingle
+  | zkTranscriptBatch
+  | zkVerifyingKey
+  deriving DecidableEq, Repr
+
+namespace Blake2b512Domain
+
+/-- The RFC 7693 `personal` string for each `BLAKE2b-512` domain (each `≤ 16` bytes). -/
+def personalString : Blake2b512Domain → String
+  | .plain => ""
+  | .merkleLeaf => v6Blake2bMerkleLeafPersonal
+  | .merkleCompress => v6Blake2bMerkleCompressPersonal
+  | .transcriptSingle => v6Blake2bTranscriptSinglePersonal
+  | .transcriptBatch => v6Blake2bTranscriptBatchPersonal
+  | .verifyingKey => v6Blake2bVkPersonal
+  | .zkMerkleLeaf => v6ZkBlake2bMerkleLeafPersonal
+  | .zkMerkleCompress => v6ZkBlake2bMerkleCompressPersonal
+  | .zkTranscriptSingle => v6ZkBlake2bTranscriptSinglePersonal
+  | .zkTranscriptBatch => v6ZkBlake2bTranscriptBatchPersonal
+  | .zkVerifyingKey => v6ZkBlake2bVkPersonal
+
+/-- UTF-8 bytes of `personalString`. -/
+def personalBytes (d : Blake2b512Domain) : ByteArray :=
+  d.personalString.toUTF8
+
+/-- RFC 7693 512-bit initial chaining state `initState512 d.personalBytes`. -/
+def initState (d : Blake2b512Domain) : Digest64 :=
+  Blake2b.initState512 d.personalBytes
+
+/-- Whether the domain belongs to the `v6-zk` hiding-PCS profile. -/
+def isZk : Blake2b512Domain → Bool
+  | .zkMerkleLeaf | .zkMerkleCompress | .zkTranscriptSingle | .zkTranscriptBatch
+  | .zkVerifyingKey => true
+  | _ => false
+
+/-- Every `BLAKE2b-512` personalization string fits within RFC 7693's 16-byte `personal`
+field with zero truncation. -/
+theorem personalBytes_size_le_16 (d : Blake2b512Domain) : d.personalBytes.size ≤ 16 := by
+  cases d <;> decide
+
+/-- All 11 `BLAKE2b-512` domains (`plain` + 5 `v6` + 5 `v6-zk`) have pairwise distinct
+512-bit RFC 7693 initial chaining states. -/
+theorem initState_injective {d₁ d₂ : Blake2b512Domain}
+    (h : d₁.initState = d₂.initState) : d₁ = d₂ := by
+  cases d₁ <;> cases d₂ <;> first | rfl | exact absurd h (by decide)
+
+/-- Every `v6-zk` `BLAKE2b-512` domain has a strictly distinct initial state from every
+non-ZK (`plain` or `v6`) domain. -/
+theorem v6Zk_initState_ne_nonZk {d₁ d₂ : Blake2b512Domain}
+    (h₁ : d₁.isZk = true) (h₂ : d₂.isZk = false) :
+    d₁.initState ≠ d₂.initState := by
+  intro heq
+  have := initState_injective heq
+  subst this
+  simp [h₁] at h₂
+
+/-- Domain-separated `BLAKE2b-512` hash of an arbitrary byte slice. -/
+def hash (d : Blake2b512Domain) (bytes : ByteArray) : Digest64 :=
+  Blake2b.hashWithInit d.initState bytes
+
+/-- Domain-separated single-block `BLAKE2b-512` 2-to-1 compression of `left || right`
+(exact 128-byte block: `tLo = 128, tHi = 0, isLast = true`). -/
+def hashPair64 (d : Blake2b512Domain) (left right : Digest64) : Digest64 :=
+  Blake2b.hashPair64WithInit d.initState left right
+
+end Blake2b512Domain
+
+/-- RFC 7693 `BLAKE2b-512` domain-separation configuration for the three active oracle
+roles of a 128-bit post-quantum FRI verifier: Merkle leaf hashing, 1-block 2-to-1
+Merkle compression (`128` bytes), and Fiat–Shamir transcript hashing. -/
+structure DomainSepBlake2b512 where
+  leafPersonal : String
+  compressPersonal : String
+  transcriptPersonal : String
+  leafInit : Digest64 := Blake2b.initState512OfString leafPersonal
+  compressInit : Digest64 := Blake2b.initState512OfString compressPersonal
+  transcriptInit : Digest64 := Blake2b.initState512OfString transcriptPersonal
+  leafInit_eq : leafInit = Blake2b.initState512OfString leafPersonal
+  compressInit_eq : compressInit = Blake2b.initState512OfString compressPersonal
+  transcriptInit_eq : transcriptInit = Blake2b.initState512OfString transcriptPersonal
+  leafPersonal_le_16 : leafPersonal.toUTF8.size ≤ 16
+  compressPersonal_le_16 : compressPersonal.toUTF8.size ≤ 16
+  transcriptPersonal_le_16 : transcriptPersonal.toUTF8.size ≤ 16
+  leafInit_ne_compressInit : leafInit ≠ compressInit
+  leafInit_ne_transcriptInit : leafInit ≠ transcriptInit
+  compressInit_ne_transcriptInit : compressInit ≠ transcriptInit
+  leafInit_ne_plain : leafInit ≠ Blake2b.initState512Plain
+  compressInit_ne_plain : compressInit ≠ Blake2b.initState512Plain
+  transcriptInit_ne_plain : transcriptInit ≠ Blake2b.initState512Plain
+
+namespace DomainSepBlake2b512
+
+/-- Protocol `v6` single-proof RFC 7693 `BLAKE2b-512` domain separation. -/
+def v6Single : DomainSepBlake2b512 where
+  leafPersonal := v6Blake2bMerkleLeafPersonal
+  compressPersonal := v6Blake2bMerkleCompressPersonal
+  transcriptPersonal := v6Blake2bTranscriptSinglePersonal
+  leafInit_eq := rfl
+  compressInit_eq := rfl
+  transcriptInit_eq := rfl
+  leafPersonal_le_16 := by decide
+  compressPersonal_le_16 := by decide
+  transcriptPersonal_le_16 := by decide
+  leafInit_ne_compressInit := by decide
+  leafInit_ne_transcriptInit := by decide
+  compressInit_ne_transcriptInit := by decide
+  leafInit_ne_plain := by decide
+  compressInit_ne_plain := by decide
+  transcriptInit_ne_plain := by decide
+
+/-- Protocol `v6` batch-proof RFC 7693 `BLAKE2b-512` domain separation. -/
+def v6Batch : DomainSepBlake2b512 where
+  leafPersonal := v6Blake2bMerkleLeafPersonal
+  compressPersonal := v6Blake2bMerkleCompressPersonal
+  transcriptPersonal := v6Blake2bTranscriptBatchPersonal
+  leafInit_eq := rfl
+  compressInit_eq := rfl
+  transcriptInit_eq := rfl
+  leafPersonal_le_16 := by decide
+  compressPersonal_le_16 := by decide
+  transcriptPersonal_le_16 := by decide
+  leafInit_ne_compressInit := by decide
+  leafInit_ne_transcriptInit := by decide
+  compressInit_ne_transcriptInit := by decide
+  leafInit_ne_plain := by decide
+  compressInit_ne_plain := by decide
+  transcriptInit_ne_plain := by decide
+
+/-- Default `BLAKE2b-512` domain separation (`v6` single-proof). -/
+def standard : DomainSepBlake2b512 := v6Single
+
+/-- Protocol `v6-zk` single-proof RFC 7693 `BLAKE2b-512` domain separation. -/
+def v6ZkSingle : DomainSepBlake2b512 where
+  leafPersonal := v6ZkBlake2bMerkleLeafPersonal
+  compressPersonal := v6ZkBlake2bMerkleCompressPersonal
+  transcriptPersonal := v6ZkBlake2bTranscriptSinglePersonal
+  leafInit_eq := rfl
+  compressInit_eq := rfl
+  transcriptInit_eq := rfl
+  leafPersonal_le_16 := by decide
+  compressPersonal_le_16 := by decide
+  transcriptPersonal_le_16 := by decide
+  leafInit_ne_compressInit := by decide
+  leafInit_ne_transcriptInit := by decide
+  compressInit_ne_transcriptInit := by decide
+  leafInit_ne_plain := by decide
+  compressInit_ne_plain := by decide
+  transcriptInit_ne_plain := by decide
+
+/-- Protocol `v6-zk` batch-proof RFC 7693 `BLAKE2b-512` domain separation. -/
+def v6ZkBatch : DomainSepBlake2b512 where
+  leafPersonal := v6ZkBlake2bMerkleLeafPersonal
+  compressPersonal := v6ZkBlake2bMerkleCompressPersonal
+  transcriptPersonal := v6ZkBlake2bTranscriptBatchPersonal
+  leafInit_eq := rfl
+  compressInit_eq := rfl
+  transcriptInit_eq := rfl
+  leafPersonal_le_16 := by decide
+  compressPersonal_le_16 := by decide
+  transcriptPersonal_le_16 := by decide
+  leafInit_ne_compressInit := by decide
+  leafInit_ne_transcriptInit := by decide
+  compressInit_ne_transcriptInit := by decide
+  leafInit_ne_plain := by decide
+  compressInit_ne_plain := by decide
+  transcriptInit_ne_plain := by decide
+
+/-- A tagged `BLAKE2b-512` invocation `(initState, payload)`. -/
+structure KeyedInput64 where
+  initState : Digest64
+  payload : ByteArray
+  deriving DecidableEq
+
+/-- Plain (unpersonalized) `BLAKE2b-512` invocation input. -/
+def plainInput (payload : ByteArray) : KeyedInput64 :=
+  ⟨Blake2b.initState512Plain, payload⟩
+
+/-- Domain-separated `BLAKE2b-512` Merkle leaf invocation input. -/
+def leafInput (sep : DomainSepBlake2b512) (payload : ByteArray) : KeyedInput64 :=
+  ⟨sep.leafInit, payload⟩
+
+/-- Domain-separated `BLAKE2b-512` Merkle 2-to-1 internal-node invocation input
+(exact 128-byte single block: `left.toBytes ++ right.toBytes`). -/
+def node64Input (sep : DomainSepBlake2b512) (left right : Digest64) : KeyedInput64 :=
+  ⟨sep.compressInit, left.toBytes ++ right.toBytes⟩
+
+/-- Domain-separated `BLAKE2b-512` Fiat–Shamir transcript invocation input. -/
+def transcriptInput (sep : DomainSepBlake2b512) (input : ByteArray) : KeyedInput64 :=
+  ⟨sep.transcriptInit, input⟩
+
+/-- Domain-separated `v6-zk` `BLAKE2b-512` salted base-field Merkle leaf input. -/
+def saltedLeafInput (sep : DomainSepBlake2b512) (row : Array Goldilocks)
+    (salt : DomainSep.Salt16) : KeyedInput64 :=
+  sep.leafInput (DomainSep.saltedRowBytes row salt)
+
+/-- Domain-separated `v6-zk` `BLAKE2b-512` salted cubic-extension Merkle leaf input. -/
+def saltedExt3LeafInput (sep : DomainSepBlake2b512) (row : Array GoldilocksExt3)
+    (salt : DomainSep.Salt16) : KeyedInput64 :=
+  sep.leafInput (DomainSep.saltedExt3RowBytes row salt)
+
+/-- Concatenating two 64-byte digests is injective in both children. -/
+theorem pair64Bytes_injective {l₁ r₁ l₂ r₂ : Digest64}
+    (h : l₁.toBytes ++ r₁.toBytes = l₂.toBytes ++ r₂.toBytes) : l₁ = l₂ ∧ r₁ = r₂ := by
+  have hlist : (l₁.toBytes ++ r₁.toBytes).data.toList = (l₂.toBytes ++ r₂.toBytes).data.toList :=
+    congrArg (fun b => b.data.toList) h
+  rw [ByteArray.data_append, ByteArray.data_append, Array.toList_append, Array.toList_append] at hlist
+  have hlr := List.append_inj hlist (by rw [Digest64.toBytes_length, Digest64.toBytes_length])
+  refine ⟨digest64_toBytes_injective ?_, digest64_toBytes_injective ?_⟩
+  · cases h1 : l₁.toBytes; cases h2 : l₂.toBytes
+    rw [h1, h2] at hlr
+    exact congrArg ByteArray.mk (Array.toList_inj.mp hlr.1)
+  · cases h1 : r₁.toBytes; cases h2 : r₂.toBytes
+    rw [h1, h2] at hlr
+    exact congrArg ByteArray.mk (Array.toList_inj.mp hlr.2)
+
+/-- `node64Input` is injective in both 64-byte child digests. -/
+theorem node64Input_injective (sep : DomainSepBlake2b512) {l₁ r₁ l₂ r₂ : Digest64}
+    (h : sep.node64Input l₁ r₁ = sep.node64Input l₂ r₂) : l₁ = l₂ ∧ r₁ = r₂ := by
+  have hp : l₁.toBytes ++ r₁.toBytes = l₂.toBytes ++ r₂.toBytes := by
+    simpa [node64Input] using congrArg KeyedInput64.payload h
+  exact pair64Bytes_injective hp
+
+/-- A `BLAKE2b-512` Merkle leaf invocation never collides with a 2-to-1 internal node. -/
+theorem leafInput_ne_node64Input (sep : DomainSepBlake2b512) (payload : ByteArray)
+    (left right : Digest64) :
+    sep.leafInput payload ≠ sep.node64Input left right :=
+  fun h => sep.leafInit_ne_compressInit (congrArg KeyedInput64.initState h)
+
+/-- A `BLAKE2b-512` Merkle leaf invocation never collides with a transcript invocation. -/
+theorem leafInput_ne_transcriptInput (sep : DomainSepBlake2b512) (payload input : ByteArray) :
+    sep.leafInput payload ≠ sep.transcriptInput input :=
+  fun h => sep.leafInit_ne_transcriptInit (congrArg KeyedInput64.initState h)
+
+/-- A `BLAKE2b-512` internal-node invocation never collides with a transcript invocation. -/
+theorem node64Input_ne_transcriptInput (sep : DomainSepBlake2b512) (left right : Digest64)
+    (input : ByteArray) :
+    sep.node64Input left right ≠ sep.transcriptInput input :=
+  fun h => sep.compressInit_ne_transcriptInit (congrArg KeyedInput64.initState h)
+
+/-- Every personalized `BLAKE2b-512` domain is disjoint from unpersonalized plain `BLAKE2b-512`. -/
+theorem leafInput_ne_plainInput (sep : DomainSepBlake2b512) (p₁ p₂ : ByteArray) :
+    sep.leafInput p₁ ≠ plainInput p₂ :=
+  fun h => sep.leafInit_ne_plain (congrArg KeyedInput64.initState h)
+
+theorem node64Input_ne_plainInput (sep : DomainSepBlake2b512) (left right : Digest64)
+    (p : ByteArray) :
+    sep.node64Input left right ≠ plainInput p :=
+  fun h => sep.compressInit_ne_plain (congrArg KeyedInput64.initState h)
+
+theorem transcriptInput_ne_plainInput (sep : DomainSepBlake2b512) (p₁ p₂ : ByteArray) :
+    sep.transcriptInput p₁ ≠ plainInput p₂ :=
+  fun h => sep.transcriptInit_ne_plain (congrArg KeyedInput64.initState h)
+
+/-- `saltedLeafInput` is jointly injective in `(row, salt)` under any `DomainSepBlake2b512`. -/
+theorem saltedLeafInput_injective (sep : DomainSepBlake2b512) {r₁ r₂ : Array Goldilocks}
+    {s₁ s₂ : DomainSep.Salt16}
+    (h : sep.saltedLeafInput r₁ s₁ = sep.saltedLeafInput r₂ s₂) : r₁ = r₂ ∧ s₁ = s₂ := by
+  have hp : DomainSep.saltedRowBytes r₁ s₁ = DomainSep.saltedRowBytes r₂ s₂ := by
+    simpa [saltedLeafInput, leafInput] using congrArg KeyedInput64.payload h
+  exact DomainSep.saltedRowBytes_injective hp
+
+/-- `saltedExt3LeafInput` is jointly injective in `(row, salt)` under any `DomainSepBlake2b512`. -/
+theorem saltedExt3LeafInput_injective (sep : DomainSepBlake2b512) {r₁ r₂ : Array GoldilocksExt3}
+    {s₁ s₂ : DomainSep.Salt16}
+    (h : sep.saltedExt3LeafInput r₁ s₁ = sep.saltedExt3LeafInput r₂ s₂) : r₁ = r₂ ∧ s₁ = s₂ := by
+  have hp : DomainSep.saltedExt3RowBytes r₁ s₁ = DomainSep.saltedExt3RowBytes r₂ s₂ := by
+    simpa [saltedExt3LeafInput, leafInput] using congrArg KeyedInput64.payload h
+  exact DomainSep.saltedExt3RowBytes_injective hp
+
+/-- A `v6-zk` salted leaf invocation never collides with a 64B internal Merkle node. -/
+theorem saltedLeafInput_ne_node64Input (sep : DomainSepBlake2b512) (row : Array Goldilocks)
+    (salt : DomainSep.Salt16) (left right : Digest64) :
+    sep.saltedLeafInput row salt ≠ sep.node64Input left right :=
+  sep.leafInput_ne_node64Input (DomainSep.saltedRowBytes row salt) left right
+
+/-- A `v6-zk` salted leaf invocation never collides with a transcript invocation. -/
+theorem saltedLeafInput_ne_transcriptInput (sep : DomainSepBlake2b512) (row : Array Goldilocks)
+    (salt : DomainSep.Salt16) (input : ByteArray) :
+    sep.saltedLeafInput row salt ≠ sep.transcriptInput input :=
+  sep.leafInput_ne_transcriptInput (DomainSep.saltedRowBytes row salt) input
+
+/-- A `v6-zk` `BLAKE2b-512` leaf never collides with a non-ZK `v6` leaf. -/
+theorem v6Zk_leafInput_ne_v6_leafInput (p₁ p₂ : ByteArray) :
+    v6ZkSingle.leafInput p₁ ≠ v6Single.leafInput p₂ :=
+  fun h => (by decide : v6ZkSingle.leafInit ≠ v6Single.leafInit)
+    (congrArg KeyedInput64.initState h)
+
+/-- A `v6-zk` `BLAKE2b-512` internal node never collides with a non-ZK `v6` internal node. -/
+theorem v6Zk_node64Input_ne_v6_node64Input (l₁ r₁ l₂ r₂ : Digest64) :
+    v6ZkSingle.node64Input l₁ r₁ ≠ v6Single.node64Input l₂ r₂ :=
+  fun h => (by decide : v6ZkSingle.compressInit ≠ v6Single.compressInit)
+    (congrArg KeyedInput64.initState h)
+
+/-- A `v6-zk` `BLAKE2b-512` single-proof transcript never collides with non-ZK `v6`. -/
+theorem v6Zk_transcriptSingle_ne_v6_transcriptSingle (p₁ p₂ : ByteArray) :
+    v6ZkSingle.transcriptInput p₁ ≠ v6Single.transcriptInput p₂ :=
+  fun h => (by decide : v6ZkSingle.transcriptInit ≠ v6Single.transcriptInit)
+    (congrArg KeyedInput64.initState h)
+
+/-- A `v6-zk` `BLAKE2b-512` batch-proof transcript never collides with non-ZK `v6`. -/
+theorem v6Zk_transcriptBatch_ne_v6_transcriptBatch (p₁ p₂ : ByteArray) :
+    v6ZkBatch.transcriptInput p₁ ≠ v6Batch.transcriptInput p₂ :=
+  fun h => (by decide : v6ZkBatch.transcriptInit ≠ v6Batch.transcriptInit)
+    (congrArg KeyedInput64.initState h)
+
+end DomainSepBlake2b512
+
+namespace DomainSep
+
+/-- Re-export of `Digest64.toBytes` length (`64` bytes). -/
+theorem digest64_toBytes_length (d : Digest64) : d.toBytes.data.toList.length = 64 :=
+  Digest64.toBytes_length d
+
+/-- Re-export of `Digest64.toBytes` injectivity in `DomainSep`. -/
+theorem digest64_toBytes_injective {d₁ d₂ : Digest64} (h : d₁.toBytes = d₂.toBytes) : d₁ = d₂ :=
+  CertiFri.P3.digest64_toBytes_injective h
+
+/-- Re-export of 64-byte digest pair concatenation injectivity in `DomainSep`. -/
+theorem pair64Bytes_injective {l₁ r₁ l₂ r₂ : Digest64}
+    (h : l₁.toBytes ++ r₁.toBytes = l₂.toBytes ++ r₂.toBytes) : l₁ = l₂ ∧ r₁ = r₂ :=
+  DomainSepBlake2b512.pair64Bytes_injective h
+
+/-- Domain-separated 64-byte `BLAKE2b-512` internal-node invocation input (`128` bytes,
+single compression block). -/
+abbrev node64Input := DomainSepBlake2b512.node64Input
+
+/-- `node64Input` is injective in both 64-byte child digests. -/
+theorem node64Input_injective (sep : DomainSepBlake2b512) {l₁ r₁ l₂ r₂ : Digest64}
+    (h : sep.node64Input l₁ r₁ = sep.node64Input l₂ r₂) : l₁ = l₂ ∧ r₁ = r₂ :=
+  DomainSepBlake2b512.node64Input_injective sep h
+
+end DomainSep
+
+/-! ## RFC 7693 `BLAKE2b-512` Merkle hashers and Fiat–Shamir challengers -/
+
+/-- 128-byte `BLAKE2b` block `i` of a `Goldilocks` base-field row (16 `UInt64`
+canonical elements directly, zero 32-bit word splitting). -/
+def rowBlock64 (row : Array Goldilocks) (i : Nat) : Blake2b.Block :=
+  let j := 16 * i
+  ⟨Hashers.wordOrZero row j, Hashers.wordOrZero row (j + 1),
+   Hashers.wordOrZero row (j + 2), Hashers.wordOrZero row (j + 3),
+   Hashers.wordOrZero row (j + 4), Hashers.wordOrZero row (j + 5),
+   Hashers.wordOrZero row (j + 6), Hashers.wordOrZero row (j + 7),
+   Hashers.wordOrZero row (j + 8), Hashers.wordOrZero row (j + 9),
+   Hashers.wordOrZero row (j + 10), Hashers.wordOrZero row (j + 11),
+   Hashers.wordOrZero row (j + 12), Hashers.wordOrZero row (j + 13),
+   Hashers.wordOrZero row (j + 14), Hashers.wordOrZero row (j + 15)⟩
+
+/-- 128-byte `BLAKE2b` block `i` of a `GoldilocksExt3` cubic-extension row
+(16 base-field `UInt64` coordinates per block). -/
+def ext3RowBlock64 (row : Array GoldilocksExt3) (i : Nat) : Blake2b.Block :=
+  let j := 16 * i
+  ⟨Hashers.ext3WordOrZero row j, Hashers.ext3WordOrZero row (j + 1),
+   Hashers.ext3WordOrZero row (j + 2), Hashers.ext3WordOrZero row (j + 3),
+   Hashers.ext3WordOrZero row (j + 4), Hashers.ext3WordOrZero row (j + 5),
+   Hashers.ext3WordOrZero row (j + 6), Hashers.ext3WordOrZero row (j + 7),
+   Hashers.ext3WordOrZero row (j + 8), Hashers.ext3WordOrZero row (j + 9),
+   Hashers.ext3WordOrZero row (j + 10), Hashers.ext3WordOrZero row (j + 11),
+   Hashers.ext3WordOrZero row (j + 12), Hashers.ext3WordOrZero row (j + 13),
+   Hashers.ext3WordOrZero row (j + 14), Hashers.ext3WordOrZero row (j + 15)⟩
+
+/-- Certified 128-bit PQ RFC 7693 `BLAKE2b-512` Merkle hasher over `Goldilocks`
+(1 compression block per 128-byte internal node `left64 || right64`). -/
+def baseHasherSepBlake2b512 (sep : DomainSepBlake2b512 := .standard) :
+    MerkleHasher Goldilocks Digest64 where
+  hashRows row := Blake2b.hashBlocksFrom sep.leafInit 0 0 (8 * row.size) (rowBlock64 row)
+  compress left right := Blake2b.hashPair64WithInit sep.compressInit left right
+
+/-- Certified 128-bit PQ RFC 7693 `BLAKE2b-512` Merkle hasher over `GoldilocksExt3`
+(1 compression block per 128-byte internal node `left64 || right64`). -/
+def ext3HasherSepBlake2b512 (sep : DomainSepBlake2b512 := .standard) :
+    MerkleHasher GoldilocksExt3 Digest64 where
+  hashRows row := Blake2b.hashBlocksFrom sep.leafInit 0 0 (24 * row.size) (ext3RowBlock64 row)
+  compress left right := Blake2b.hashPair64WithInit sep.compressInit left right
+
+/-- Personalized RFC 7693 `BLAKE2b-512` byte hash for the Fiat–Shamir challenger (64 bytes). -/
+def blake2b512Transcript (sep : DomainSepBlake2b512 := .standard) (input : ByteArray) :
+    ByteArray :=
+  (Blake2b.hashWithInit sep.transcriptInit input).toBytes
+
+/-- Certified 128-bit PQ RFC 7693 `BLAKE2b-512` challenger over `Goldilocks` / `GoldilocksExt3`. -/
+def challenger3Blake2b512 (sep : DomainSepBlake2b512 := .standard) :
+    Challenger ChallengerState Goldilocks GoldilocksExt3 Digest64 where
+  observe s
+    | .base a => s.observeBytes (a.pushBytes ByteArray.empty)
+    | .ext e => s.observeBytes (e.pushBytes ByteArray.empty)
+    | .digest d => s.observeBytes d.toBytes
+  sampleExt := ChallengerState.sampleExt3 (blake2b512Transcript sep)
+  sampleBits := ChallengerState.sampleBits (blake2b512Transcript sep)
+
+/-- `v6-zk` salted Merkle leaf hash (64-byte `BLAKE2b-512` digest) under `zkMerkleLeaf`. -/
+def hashSaltedRowBlake2b512 (row : Array Goldilocks) (salt : DomainSep.Salt16) : Digest64 :=
+  Blake2b512Domain.zkMerkleLeaf.hash (DomainSep.saltedRowBytes row salt)
+
+/-- Certified 128-bit PQ `v6-zk` single-proof `BLAKE2b-512` challenger over
+`Goldilocks` / `GoldilocksExt3`. -/
+def challenger3V6ZkBlake2b512 :
+    Challenger ChallengerState Goldilocks GoldilocksExt3 Digest64 :=
+  challenger3Blake2b512 .v6ZkSingle
 
 end CertiFri.P3

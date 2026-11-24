@@ -192,4 +192,63 @@ def extMatchingRow : Array GoldilocksExt :=
     && Merkle.verifyOpening h root dims 1 #[row1] [leaf0]
     && !Merkle.verifyOpening h root dims 0 #[row1] [leaf1]
 
+/-! ## Certified 128-bit PQ RFC 7693 `BLAKE2b-512` (`Digest64`) checks -/
+
+-- 1-block `Blake2b.hashPair64WithInit` matches streaming 128-byte `Blake2b512Domain.hash`.
+#guard
+  let a := Blake2b512Domain.merkleLeaf.hash (v6Pattern 64)
+  let b := Blake2b512Domain.merkleLeaf.hash (v6Pattern 512)
+  a.toBytes.size == 64 && b.toBytes.size == 64
+    && Digest64.ofBytes? a.toBytes == some a
+    && Digest64.ofHex? a.toHex == some a
+    && Blake2b512Domain.merkleCompress.hashPair64 a b
+        == Blake2b512Domain.merkleCompress.hash (a.toBytes ++ b.toBytes)
+    && a != Blake2b512Domain.plain.hash (v6Pattern 64)
+    && a != Blake2b512Domain.zkMerkleLeaf.hash (v6Pattern 64)
+
+-- `baseHasherSepBlake2b512` and `ext3HasherSepBlake2b512` match `rowBytes`/`ext3RowBytes`
+-- across single- and multi-block row widths (`< 16`, `= 16`, `> 16` elements).
+#guard
+  let r3 := #[Goldilocks.ofUInt64 1, Goldilocks.ofUInt64 2, Goldilocks.ofUInt64 3]
+  let r16 := Array.ofFn (n := 16) (fun i => Goldilocks.ofUInt64 (i.val.toUInt64 + 100))
+  let r25 := Array.ofFn (n := 25) (fun i => Goldilocks.ofUInt64 (i.val.toUInt64 + 1000))
+  let hb := baseHasherSepBlake2b512
+  hb.hashRows r3 == Blake2b512Domain.merkleLeaf.hash (Hashers.rowBytes r3)
+    && hb.hashRows r16 == Blake2b512Domain.merkleLeaf.hash (Hashers.rowBytes r16)
+    && hb.hashRows r25 == Blake2b512Domain.merkleLeaf.hash (Hashers.rowBytes r25)
+
+#guard
+  let e7 := Array.ofFn (n := 7) fun i =>
+    ({ c0 := Goldilocks.ofUInt64 (3 * i.val.toUInt64 + 1),
+       c1 := Goldilocks.ofUInt64 (3 * i.val.toUInt64 + 2),
+       c2 := Goldilocks.ofUInt64 (3 * i.val.toUInt64 + 3) } : GoldilocksExt3)
+  let he := ext3HasherSepBlake2b512
+  he.hashRows e7 == Blake2b512Domain.merkleLeaf.hash (Hashers.ext3RowBytes e7)
+
+-- `BLAKE2b-512` Merkle opening verification passes and rejects tampered leaves.
+#guard
+  let h := baseHasherSepBlake2b512
+  let row0 := #[Goldilocks.ofUInt64 10, Goldilocks.ofUInt64 20]
+  let row1 := #[Goldilocks.ofUInt64 30, Goldilocks.ofUInt64 40]
+  let leaf0 := h.hashRows row0
+  let leaf1 := h.hashRows row1
+  let root := h.compress leaf0 leaf1
+  let dims := #[{ width := 2, logHeight := 1 : Dimensions }]
+  Merkle.verifyOpening h root dims 0 #[row0] [leaf1]
+    && Merkle.verifyOpening h root dims 1 #[row1] [leaf0]
+    && !Merkle.verifyOpening h root dims 0 #[row1] [leaf1]
+
+-- `v6-zk` salted `BLAKE2b-512` leaf hash and `challenger3Blake2b512` domain separation.
+#guard
+  let row := #[Goldilocks.ofUInt64 7, Goldilocks.ofUInt64 11]
+  let saltA : DomainSep.Salt16 := ⟨1, 2, 3, 4⟩
+  let saltB : DomainSep.Salt16 := ⟨1, 2, 3, 5⟩
+  let dA := hashSaltedRowBlake2b512 row saltA
+  let dB := hashSaltedRowBlake2b512 row saltB
+  let sV6 := (challenger3Blake2b512 .v6Single).observe (ChallengerState.new ByteArray.empty) (.digest dA)
+  let sZk := challenger3V6ZkBlake2b512.observe (ChallengerState.new ByteArray.empty) (.digest dA)
+  dA != dB
+    && ((challenger3Blake2b512 .v6Single).sampleExt sV6).1
+        != (challenger3V6ZkBlake2b512.sampleExt sZk).1
+
 end CertiFriTest.P3.DomainSep

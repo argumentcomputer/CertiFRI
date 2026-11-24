@@ -6,6 +6,7 @@ import CertiFriTest.P3.BabyBear
 import CertiFriTest.P3.Bn254
 import CertiFriTest.P3.GoldilocksExt3
 import CertiFriTest.P3.Blake3
+import CertiFriTest.P3.Blake2b
 import CertiFriTest.P3.Hashers
 import CertiFriTest.P3.Challenger
 import CertiFriTest.P3.DomainSep

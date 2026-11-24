@@ -576,8 +576,9 @@ A joint Bellman potential `jointHitPotential M pM pS q` proves that for ANY
 the empty log,
   `prob (HasBad (JointHit s₀ stepDigestsOf r)) c [] ≤ 3 * Q ^ 2 / (2 * |D|)`.
 This shrinks the BCS collision prefactor from `7.75` to the optimal `3 / 2`
-(`126.52b → 127.71b` on 32-byte BLAKE3 with zero prover cost, and `191.71b`
-classical / `128.0b` BHT quantum on 48-byte BLAKE3 XOF). -/
+(`126.52b → 127.71b` on 32-byte `BLAKE3-256` classical with zero prover cost,
+and `255.71b` classical / `170.7b` BHT / `204.8b` CNS / `256b` Grover on
+64-byte RFC 7693 `BLAKE2b-512`). -/
 
 /-- Queries to an incremental sponge + auxiliary random oracle:
 `.chal i prev m` absorbs step `i`'s message `m` into sponge chaining state `prev`

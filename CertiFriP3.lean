@@ -1,4 +1,5 @@
 import CertiFriP3.GoldilocksExt3
+import CertiFriP3.Blake2b
 import CertiFriP3.Hashers
 import CertiFriP3.Challenger
 import CertiFriP3.DomainSep

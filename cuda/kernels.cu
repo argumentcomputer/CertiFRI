@@ -125,9 +125,6 @@ __device__ __constant__ uint32_t BLAKE3_V6ZK_COMPRESS_CV[8] = {
     0x6E9B081EU, 0xBAEEB5DAU, 0x18652A0DU, 0xA2D1B4E1U,
     0x9E40FB01U, 0xE905254DU, 0x451628D5U, 0x3D606842U,
 };
-__device__ __constant__ unsigned int BLAKE3_PERMUTATION[16] = {
-    2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8,
-};
 
 __device__ __forceinline__ const uint32_t* blake3_leaf_cv(
     Blake3DomainMode domain) {
@@ -206,6 +203,9 @@ __device__ __forceinline__ void blake3_compress(
         blake3_g(state, 2, 7, 8, 13, message[12], message[13]);
         blake3_g(state, 3, 4, 9, 14, message[14], message[15]);
         if (round != 6) {
+            constexpr unsigned int BLAKE3_PERMUTATION[16] = {
+                2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8,
+            };
             uint32_t permuted[16];
 #pragma unroll
             for (unsigned int i = 0; i < 16; ++i) {

@@ -16,7 +16,7 @@ Checks of `CertiFriP3/BabyBear.lean`, and through it of the prime field of
   the extension on pseudo-random elements, and the consistency of the table of
   generators of the two-adic subgroups.
 * Against Plonky3. The vectors of the two sections named so were computed by
-  Plonky3 at revision `0d803737`, by a program linked with its crates
+  Plonky3 at revision `3152b14a`, by a program linked with its crates
   `p3-baby-bear` and `p3-field` (`CertiFriTest/vectors/fields`; `BabyBear` and
   `BinomialExtensionField<BabyBear, 4>`): sums, differences, products,
   opposites, inverses, squares, powers, the generators of the two-adic

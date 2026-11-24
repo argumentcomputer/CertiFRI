@@ -148,9 +148,6 @@ the generators of the two-adic subgroups are primitive roots.
 - [ ] **Graphs that are not built by multi-stark's `compile`** (a deserialised
   key, ix's `stark-key` decoder) bypass both compile errors. They need the
   same check when they are loaded.
-- [ ] **The Plonky3 submodule** points at `0d803737`; the verifier follows
-  `3152b14a`, the revision multi-stark pins. The constants of BabyBear and
-  BN254 were read at `0d803737`.
 
 ## 7. Outside this repository
 

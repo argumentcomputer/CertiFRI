@@ -13,7 +13,7 @@ Checks of `CertiFriP3/Bn254.lean`, and through it of the prime field of
 * Algebraic identities. The laws of exponents, and the consistency of the table
   of generators of the two-adic subgroups.
 * Against Plonky3. The vectors of the section named so were computed by
-  Plonky3 at revision `0d803737`, by a program linked with its crates
+  Plonky3 at revision `3152b14a`, by a program linked with its crates
   `p3-bn254` and `p3-field` (`CertiFriTest/vectors/fields`; `Bn254`): sums,
   differences, products, opposites, inverses, powers, the generators of the
   two-adic subgroups, the generator of the multiplicative group and the order

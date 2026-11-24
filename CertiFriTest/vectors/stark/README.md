@@ -5,9 +5,10 @@ checks every proof with multi-stark's own verifier, and writes everything that
 verifier reads as JSON. The JSON files next to it are its output. The Lean
 tests read the JSON files; the program is needed only to regenerate them.
 
-multi-stark is taken at revision `3515632f1dc1a5764b60fc0146ea2226bb6fc32d` of
-`https://github.com/argumentcomputer/multi-stark.git`, as a git dependency in
-`Cargo.toml`, with its `parallel` and `cuda` features off. It builds on Plonky3
+multi-stark is the crate `multi-stark/` of this repository, a path dependency
+in `Cargo.toml`, with its `parallel` and `cuda` features off. It is revision
+`3515632f1dc1a5764b60fc0146ea2226bb6fc32d` of
+`https://github.com/argumentcomputer/multi-stark.git`. It builds on Plonky3
 at revision `3152b14a89067c83775a8076cc262ffc48a1fd7c`. `Cargo.lock` pins every
 other crate. multi-stark requires Rust 1.98; `rust-toolchain.toml` selects
 1.98.1, the toolchain multi-stark pins for itself.

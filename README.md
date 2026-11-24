@@ -232,7 +232,7 @@ evaluation of the final polynomial (`Proofs/CertiFriProofs/Poly.lean`).
 `CertiFri/Stark/` is a port of the verifier of
 [multi-stark](https://github.com/argumentcomputer/multi-stark) at revision
 `3515632`: a STARK for systems of several circuits connected by lookups, over
-Plonky3's FRI.
+Plonky3's FRI. That revision is the crate `multi-stark/` of this repository.
 
 ```lean
 Stark.verify      inputMmcs friMmcs chal init sys claims proof : Bool   -- System::verify_multiple_claims
@@ -488,6 +488,7 @@ claimed value; Plonky3 inverts one per opening point, in a batch.
 | `CertiFriP3/` | The Plonky3 instantiation: the fields (Goldilocks, BabyBear, the scalar field of BN254, and extensions), BLAKE3, the challenger, pruned Merkle proofs. The fields are proved in `Proofs/CertiFriProofs/P3/`; the rest is tested. |
 | `CertiFriTest/` | Executable checks against reference code and against Plonky3, and the generators of their vectors. |
 | `Proofs/` | A separate Lake package that depends on Mathlib and on `CertiFri`: the security theory, and the refinement of the executable verifier to it. |
+| `multi-stark/` | The Rust crate multi-stark, prover and verifier, with its CPU and CUDA backends: revision `3515632` of `argumentcomputer/multi-stark`, imported with its history. Its license files are in the directory. The STARK test vectors are made with it. |
 | `plonky3/` | Submodule: a Plonky3 checkout for reference. Nothing builds from it. |
 
 Mathlib is confined to `Proofs/` so that a project can depend on the verifier

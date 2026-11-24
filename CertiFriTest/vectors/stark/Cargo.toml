@@ -9,11 +9,12 @@ description = "Generator of the multi-stark proofs that the Lean tests of the ST
 # This package is its own workspace: it is not a member of any enclosing one.
 [workspace]
 
-# multi-stark is pinned to the revision the Lean verifier is a port of, and
-# Plonky3 to the revision that multi-stark builds on. The `parallel` and `cuda`
+# multi-stark is the crate of this repository (`multi-stark/`), the revision the
+# Lean verifier is a port of, and Plonky3 is pinned to the revision that
+# multi-stark builds on. The `parallel` and `cuda`
 # features of multi-stark stay off. Only the Plonky3 crates that multi-stark
 # does not re-export are named here.
 [dependencies]
-multi-stark = { git = "https://github.com/argumentcomputer/multi-stark.git", rev = "3515632f1dc1a5764b60fc0146ea2226bb6fc32d" }
+multi-stark = { path = "../../../multi-stark" }
 p3-blake3 = { git = "https://github.com/Plonky3/Plonky3", rev = "3152b14a89067c83775a8076cc262ffc48a1fd7c" }
 p3-challenger = { git = "https://github.com/Plonky3/Plonky3", rev = "3152b14a89067c83775a8076cc262ffc48a1fd7c" }

@@ -223,11 +223,14 @@ where
             resident,
             resident_active: active,
             materialize: Box::new(CudaLde::to_row_major_matrix),
+            materialize_spilled: Box::new(crate::p3_adapter::spill::SpilledMatrix::read_all),
             committed_matrices: committed,
+            spilled_matrices: (0..count).map(|_| OnceLock::new()).collect(),
             deferred_matrices: (0..count).map(|_| None).collect(),
             dimensions,
             retained_traces: retained,
-            tree,
+            spilled_traces: std::sync::Mutex::new(Vec::new()),
+            tree: super::mmcs::HybridMerkleTree::Device(tree),
         },
     )
 }

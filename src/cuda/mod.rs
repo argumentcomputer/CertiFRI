@@ -24,12 +24,15 @@ use std::sync::Arc;
 
 use crate::expr::{RowOffset, Source};
 use crate::graph::{ConstraintGraph, Node};
+use crate::p3_adapter::domain_blake3::Blake3Domain;
+use crate::p3_adapter::spill::{SpillPackWriter, SpillPanel, SpilledMatrix};
 use p3_dft::{Radix2DitParallel, TwoAdicSubgroupDft};
 use p3_field::{Field, PrimeCharacteristicRing, PrimeField64, TwoAdicField};
 use p3_goldilocks::Goldilocks;
-use p3_matrix::bitrev::{BitReversalPerm, BitReversedMatrixView};
+use p3_matrix::bitrev::{BitReversalPerm, BitReversedMatrixView, BitReversibleMatrix};
 use p3_matrix::dense::RowMajorMatrix;
 use p3_matrix::{Dimensions, Matrix};
+use p3_maybe_rayon::prelude::*;
 use p3_merkle_tree::PrunedMerklePaths;
 use p3_util::log2_strict_usize;
 
@@ -168,6 +171,28 @@ impl CudaDft {
         extended_height >= (1 << 15) && width <= 2
     }
 
+    /// Reports whether resident / streamed GPU `coset_lde` (`sppark`) supports
+    /// this shape (any positive width, power-of-two height, and extended height
+    /// within `sppark::max_log_domain()`).
+    #[must_use]
+    pub(crate) fn supports_cuda_coset_lde(height: usize, width: usize, added_bits: usize) -> bool {
+        if width == 0 || !height.is_power_of_two() {
+            return false;
+        }
+        let Ok(added_bits_u32) = u32::try_from(added_bits) else {
+            return false;
+        };
+        let Some(extended_height) = height.checked_shl(added_bits_u32) else {
+            return false;
+        };
+        extended_height >= 2
+            && (extended_height.trailing_zeros() as usize) <= sppark::max_log_domain()
+            && extended_height
+                .checked_mul(width)
+                .and_then(|n| n.checked_mul(size_of::<Goldilocks>()))
+                .is_some()
+    }
+
     /// Computes a coset LDE whose bit-reversed storage remains on the GPU.
     #[must_use]
     pub(crate) fn coset_lde_batch_resident(
@@ -233,6 +258,615 @@ impl CudaDft {
         let plan = self.lde_plan(height, 1, added_bits, shift);
         let status = unsafe { multi_stark_cuda_prepare_lde_constants(self.device_id, plan.raw()) };
         check_cuda(status, "prepare resident LDE constants");
+    }
+
+    /// Computes a resident bit-reversed LDE directly from shifted polynomial
+    /// coefficients (zero-padded forward NTT of `coeff_height << log_blowup`).
+    #[must_use]
+    pub(crate) fn shifted_coeffs_to_lde_resident(
+        &self,
+        shifted_coeffs: &RowMajorMatrix<Goldilocks>,
+        log_blowup: usize,
+    ) -> CudaLde {
+        let coeff_height = shifted_coeffs.height();
+        let width = shifted_coeffs.width();
+        let _span = tracing::info_span!(
+            "cuda/shifted_coeffs_lde",
+            device = self.device_id,
+            coeff_height,
+            width,
+            log_blowup
+        )
+        .entered();
+        Self::validate_dimensions(coeff_height, width);
+        assert!(
+            width > 0,
+            "shifted-coeffs CUDA LDE requires at least one column"
+        );
+        let lde_height = coeff_height
+            .checked_shl(u32::try_from(log_blowup).expect("LDE blowup exceeds u32"))
+            .expect("LDE height overflows usize");
+        Self::validate_dimensions(lde_height, width);
+        let plan = self.forward_plan(lde_height, width);
+        let mut handle = core::ptr::null_mut();
+        // SAFETY: `shifted_coeffs` is contiguous and live for the synchronous call.
+        let status = unsafe {
+            multi_stark_cuda_shifted_coeffs_to_lde(
+                self.device_id,
+                &mut handle,
+                shifted_coeffs.values.as_ptr().cast(),
+                coeff_height,
+                width,
+                log_blowup,
+                plan.raw(),
+            )
+        };
+        check_cuda(status, "resident shifted-coefficients LDE");
+        CudaLde {
+            device_id: self.device_id,
+            handle: NonNull::new(handle).expect("CUDA returned a null LDE handle"),
+            height: lde_height,
+            width,
+        }
+    }
+
+    /// Computes a bit-reversed coset LDE and spills it directly into `pack`:
+    /// - Fast path: computes the full LDE on GPU when it fits in free VRAM,
+    ///   optionally hashing leaves directly on GPU when `unique_leaf_hash` is
+    ///   provided and row width fits the device BLAKE3 kernel, then streams the
+    ///   LDE to `pack` in 64 MiB chunks (zero full-matrix host RAM allocation).
+    /// - Panel path: when a single matrix's LDE exceeds free VRAM (e.g., `2^28 × 50`
+    ///   = 100 GiB on a 96 GiB GPU), streams GPU column panels into a multi-panel
+    ///   [`SpilledMatrix`] without a second disk-transpose pass.
+    /// - CPU fallback: when even 1 column exceeds available VRAM (e.g., under a
+    ///   strict [`DeviceMemoryReservation`]) or exceeds `sppark`'s domain limit.
+    pub(crate) fn coset_lde_spilled(
+        &self,
+        matrix: &RowMajorMatrix<Goldilocks>,
+        added_bits: usize,
+        shift: Goldilocks,
+        pack: &mut SpillPackWriter,
+        unique_leaf_hash: Option<(Blake3Domain, Option<&[u8; 32]>)>,
+    ) -> (SpilledMatrix, Option<Vec<[u8; 32]>>) {
+        let height = matrix.height();
+        let width = matrix.width();
+        assert!(
+            height.is_power_of_two(),
+            "LDE height must be a power of two"
+        );
+        let lde_height = height
+            .checked_shl(u32::try_from(added_bits).expect("LDE blowup exceeds u32"))
+            .expect("LDE height overflows usize");
+        if width == 0 {
+            let empty = RowMajorMatrix::new(Vec::new(), 0);
+            return (pack.append_matrix(&empty), None);
+        }
+        let can_use_sppark = Self::supports_cuda_coset_lde(height, width, added_bits);
+        let reserve = minimum_free_bytes().saturating_add(128 << 20);
+        if can_use_sppark {
+            self.prepare_coset_lde_constants(height, added_bits, shift);
+            let plan = self.lde_plan(height, width, added_bits, shift);
+            let lde_bytes = lde_height
+                .saturating_mul(width)
+                .saturating_mul(size_of::<Goldilocks>());
+            let trace_bytes = height
+                .saturating_mul(width)
+                .saturating_mul(size_of::<Goldilocks>());
+            let full_needed = lde_bytes
+                .saturating_add(trace_bytes)
+                .saturating_add(plan.scratch_bytes())
+                .saturating_add(plan.constant_bytes())
+                .saturating_add(reserve);
+            let (free_bytes, _) = device_memory_info(self.device_id);
+            if full_needed <= free_bytes {
+                let lde = self.coset_lde_batch_resident(matrix, added_bits, shift);
+                // SAFETY: `coset_lde_batch_resident` is synchronous.
+                unsafe { lde.release_trace() };
+                let digests = unique_leaf_hash.and_then(|(domain, salt_seed)| {
+                    hash_single_resident_lde_if_admitted(&lde, domain, salt_seed)
+                });
+                let spilled = lde.spill_to_pack(pack);
+                drop(lde);
+                return (spilled, digests);
+            }
+            // Single matrix exceeds free VRAM: compute on GPU in column panels!
+            let one_col_plan = self.lde_plan(height, 1, added_bits, shift);
+            let col_bytes = lde_height
+                .saturating_add(height)
+                .saturating_mul(size_of::<Goldilocks>());
+            let panel_overhead = one_col_plan
+                .scratch_bytes()
+                .saturating_add(one_col_plan.constant_bytes())
+                .saturating_add(reserve);
+            if free_bytes > panel_overhead.saturating_add(col_bytes) {
+                let usable = free_bytes.saturating_sub(panel_overhead);
+                // Leave headroom for sppark's multi-column panel scratch (up to 4 GiB).
+                let max_cols_by_vram = (usable / col_bytes).clamp(1, width);
+                let mut panel_cols = max_cols_by_vram;
+                while panel_cols > 1 {
+                    let p_plan = self.lde_plan(height, panel_cols, added_bits, shift);
+                    let needed = panel_cols
+                        .saturating_mul(col_bytes)
+                        .saturating_add(p_plan.scratch_bytes())
+                        .saturating_add(p_plan.constant_bytes())
+                        .saturating_add(reserve);
+                    if needed <= free_bytes {
+                        break;
+                    }
+                    panel_cols /= 2;
+                }
+                let p_plan = self.lde_plan(height, panel_cols, added_bits, shift);
+                let needed = panel_cols
+                    .saturating_mul(col_bytes)
+                    .saturating_add(p_plan.scratch_bytes())
+                    .saturating_add(p_plan.constant_bytes())
+                    .saturating_add(reserve);
+                if needed <= free_bytes {
+                    if memory_diagnostics_enabled() {
+                        eprintln!(
+                            "[multi-stark/cuda] panel-streamed coset LDE: height={height}->{lde_height} width={width} panel_cols={panel_cols} free={free_bytes}"
+                        );
+                    }
+                    let mut panels = Vec::with_capacity(width.div_ceil(panel_cols));
+                    for col_start in (0..width).step_by(panel_cols) {
+                        let count = (width - col_start).min(panel_cols);
+                        let sub = extract_column_panel(matrix, col_start, count);
+                        let lde = self.coset_lde_batch_resident(&sub, added_bits, shift);
+                        // SAFETY: `coset_lde_batch_resident` is synchronous.
+                        unsafe { lde.release_trace() };
+                        panels.push(lde.spill_panel_to_pack(pack));
+                        drop(lde);
+                    }
+                    return (SpilledMatrix::from_panels(lde_height, panels), None);
+                }
+            }
+        }
+        // CPU fallback (small matrices, >2^28 domains, or fully reserved VRAM).
+        let cpu = Radix2DitParallel::<Goldilocks>::default();
+        let lde = cpu
+            .coset_lde_batch(matrix.clone(), added_bits, shift)
+            .bit_reverse_rows()
+            .to_row_major_matrix();
+        match unique_leaf_hash {
+            Some((domain, Some(salt_seed))) => {
+                let (spilled, digests) =
+                    pack.append_matrix_and_hash_salted(&lde, domain, salt_seed);
+                (spilled, Some(digests))
+            }
+            Some((domain, None)) => {
+                let (spilled, digests) = pack.append_matrix_and_hash(&lde, domain);
+                (spilled, Some(digests))
+            }
+            None => (pack.append_matrix(&lde), None),
+        }
+    }
+
+    /// Computes a bit-reversed LDE from shifted polynomial coefficients and
+    /// spills it directly into `pack`, using full GPU NTT, GPU column-panel
+    /// streaming, or CPU fallback depending on free VRAM.
+    pub(crate) fn shifted_coeffs_to_lde_spilled(
+        &self,
+        shifted_coeffs: &RowMajorMatrix<Goldilocks>,
+        log_blowup: usize,
+        pack: &mut SpillPackWriter,
+        unique_leaf_hash: Option<(Blake3Domain, Option<&[u8; 32]>)>,
+    ) -> (SpilledMatrix, Option<Vec<[u8; 32]>>) {
+        let coeff_height = shifted_coeffs.height();
+        let width = shifted_coeffs.width();
+        let lde_height = coeff_height
+            .checked_shl(u32::try_from(log_blowup).expect("LDE blowup exceeds u32"))
+            .expect("LDE height overflows usize");
+        if width == 0 {
+            let empty = RowMajorMatrix::new(Vec::new(), 0);
+            return (pack.append_matrix(&empty), None);
+        }
+        let log_lde = lde_height.trailing_zeros() as usize;
+        let can_use_sppark =
+            Self::uses_cuda_dft(lde_height, width) && log_lde <= sppark::max_log_domain();
+        let reserve = minimum_free_bytes().saturating_add(128 << 20);
+        if can_use_sppark {
+            let plan = self.forward_plan(lde_height, width);
+            let lde_bytes = lde_height
+                .saturating_mul(width)
+                .saturating_mul(size_of::<Goldilocks>());
+            let full_needed = lde_bytes
+                .saturating_add(plan.scratch_bytes())
+                .saturating_add(reserve);
+            let (free_bytes, _) = device_memory_info(self.device_id);
+            if full_needed <= free_bytes {
+                let lde = self.shifted_coeffs_to_lde_resident(shifted_coeffs, log_blowup);
+                let digests = unique_leaf_hash.and_then(|(domain, salt_seed)| {
+                    hash_single_resident_lde_if_admitted(&lde, domain, salt_seed)
+                });
+                let spilled = lde.spill_to_pack(pack);
+                drop(lde);
+                return (spilled, digests);
+            }
+            let one_col_plan = self.forward_plan(lde_height, 1);
+            let col_bytes = lde_height.saturating_mul(size_of::<Goldilocks>());
+            let panel_overhead = one_col_plan.scratch_bytes().saturating_add(reserve);
+            if free_bytes > panel_overhead.saturating_add(col_bytes) {
+                let usable = free_bytes.saturating_sub(panel_overhead);
+                let mut panel_cols = (usable / col_bytes).clamp(1, width);
+                while panel_cols > 1 {
+                    let p_plan = self.forward_plan(lde_height, panel_cols);
+                    let needed = panel_cols
+                        .saturating_mul(col_bytes)
+                        .saturating_add(p_plan.scratch_bytes())
+                        .saturating_add(reserve);
+                    if needed <= free_bytes {
+                        break;
+                    }
+                    panel_cols /= 2;
+                }
+                let p_plan = self.forward_plan(lde_height, panel_cols);
+                let needed = panel_cols
+                    .saturating_mul(col_bytes)
+                    .saturating_add(p_plan.scratch_bytes())
+                    .saturating_add(reserve);
+                if needed <= free_bytes {
+                    if memory_diagnostics_enabled() {
+                        eprintln!(
+                            "[multi-stark/cuda] panel-streamed shifted-coeff LDE: height={coeff_height}->{lde_height} width={width} panel_cols={panel_cols} free={free_bytes}"
+                        );
+                    }
+                    let mut panels = Vec::with_capacity(width.div_ceil(panel_cols));
+                    for col_start in (0..width).step_by(panel_cols) {
+                        let count = (width - col_start).min(panel_cols);
+                        let sub = extract_column_panel(shifted_coeffs, col_start, count);
+                        let lde = self.shifted_coeffs_to_lde_resident(&sub, log_blowup);
+                        panels.push(lde.spill_panel_to_pack(pack));
+                        drop(lde);
+                    }
+                    return (SpilledMatrix::from_panels(lde_height, panels), None);
+                }
+            }
+        }
+        let cpu = Radix2DitParallel::<Goldilocks>::default();
+        let mut padded = shifted_coeffs.clone();
+        padded.pad_to_height(lde_height, Goldilocks::ZERO);
+        let lde = cpu
+            .dft_batch(padded)
+            .bit_reverse_rows()
+            .to_row_major_matrix();
+        match unique_leaf_hash {
+            Some((domain, Some(salt_seed))) => {
+                let (spilled, digests) =
+                    pack.append_matrix_and_hash_salted(&lde, domain, salt_seed);
+                (spilled, Some(digests))
+            }
+            Some((domain, None)) => {
+                let (spilled, digests) = pack.append_matrix_and_hash(&lde, domain);
+                (spilled, Some(digests))
+            }
+            None => (pack.append_matrix(&lde), None),
+        }
+    }
+    /// Computes a bit-reversed coset LDE on GPU (1-shot or column-panel
+    /// streamed) and returns it in host RAM (`Tier 2`), falling back to CPU
+    /// only when even a 1-column GPU panel does not fit in free VRAM.
+    pub(crate) fn coset_lde_to_host(
+        &self,
+        matrix: &RowMajorMatrix<Goldilocks>,
+        added_bits: usize,
+        shift: Goldilocks,
+        unique_leaf_hash: Option<(Blake3Domain, Option<&[u8; 32]>)>,
+    ) -> (RowMajorMatrix<Goldilocks>, Option<Vec<[u8; 32]>>) {
+        let height = matrix.height();
+        let width = matrix.width();
+        assert!(
+            height.is_power_of_two(),
+            "LDE height must be a power of two"
+        );
+        let lde_height = height
+            .checked_shl(u32::try_from(added_bits).expect("LDE blowup exceeds u32"))
+            .expect("LDE height overflows usize");
+        if width == 0 {
+            return (RowMajorMatrix::new(Vec::new(), 0), None);
+        }
+        let can_use_sppark = Self::supports_cuda_coset_lde(height, width, added_bits);
+        let reserve = minimum_free_bytes().saturating_add(128 << 20);
+        if can_use_sppark {
+            self.prepare_coset_lde_constants(height, added_bits, shift);
+            let plan = self.lde_plan(height, width, added_bits, shift);
+            let lde_bytes = lde_height
+                .saturating_mul(width)
+                .saturating_mul(size_of::<Goldilocks>());
+            let trace_bytes = height
+                .saturating_mul(width)
+                .saturating_mul(size_of::<Goldilocks>());
+            let full_needed = lde_bytes
+                .saturating_add(trace_bytes)
+                .saturating_add(plan.scratch_bytes())
+                .saturating_add(plan.constant_bytes())
+                .saturating_add(reserve);
+            let (free_bytes, _) = device_memory_info(self.device_id);
+            if full_needed <= free_bytes {
+                let lde = self.coset_lde_batch_resident(matrix, added_bits, shift);
+                // SAFETY: `coset_lde_batch_resident` is synchronous.
+                unsafe { lde.release_trace() };
+                let digests = unique_leaf_hash.and_then(|(domain, salt_seed)| {
+                    hash_single_resident_lde_if_admitted(&lde, domain, salt_seed)
+                });
+                let host = lde.to_row_major_matrix();
+                drop(lde);
+                return (host, digests);
+            }
+            let one_col_plan = self.lde_plan(height, 1, added_bits, shift);
+            let col_bytes = lde_height
+                .saturating_add(height)
+                .saturating_mul(size_of::<Goldilocks>());
+            let panel_overhead = one_col_plan
+                .scratch_bytes()
+                .saturating_add(one_col_plan.constant_bytes())
+                .saturating_add(reserve);
+            if free_bytes > panel_overhead.saturating_add(col_bytes) {
+                let usable = free_bytes.saturating_sub(panel_overhead);
+                let mut panel_cols = (usable / col_bytes).clamp(1, width);
+                while panel_cols > 1 {
+                    let p_plan = self.lde_plan(height, panel_cols, added_bits, shift);
+                    let needed = panel_cols
+                        .saturating_mul(col_bytes)
+                        .saturating_add(p_plan.scratch_bytes())
+                        .saturating_add(p_plan.constant_bytes())
+                        .saturating_add(reserve);
+                    if needed <= free_bytes {
+                        break;
+                    }
+                    panel_cols /= 2;
+                }
+                let p_plan = self.lde_plan(height, panel_cols, added_bits, shift);
+                let needed = panel_cols
+                    .saturating_mul(col_bytes)
+                    .saturating_add(p_plan.scratch_bytes())
+                    .saturating_add(p_plan.constant_bytes())
+                    .saturating_add(reserve);
+                if needed <= free_bytes {
+                    if memory_diagnostics_enabled() {
+                        eprintln!(
+                            "[multi-stark/cuda] panel-streamed coset LDE -> host RAM: height={height}->{lde_height} width={width} panel_cols={panel_cols} free={free_bytes}"
+                        );
+                    }
+                    let mut out =
+                        RowMajorMatrix::new(Goldilocks::zero_vec(lde_height * width), width);
+                    for col_start in (0..width).step_by(panel_cols) {
+                        let count = (width - col_start).min(panel_cols);
+                        let sub = extract_column_panel(matrix, col_start, count);
+                        let lde = self.coset_lde_batch_resident(&sub, added_bits, shift);
+                        // SAFETY: `coset_lde_batch_resident` is synchronous.
+                        unsafe { lde.release_trace() };
+                        scatter_lde_panel(&mut out, &lde, col_start);
+                        drop(lde);
+                    }
+                    return (out, None);
+                }
+            }
+        }
+        let cpu = Radix2DitParallel::<Goldilocks>::default();
+        let mut lde = cpu
+            .coset_lde_batch(matrix.clone(), added_bits, shift)
+            .bit_reverse_rows()
+            .to_row_major_matrix();
+        lde.values.par_iter_mut().for_each(|v| {
+            *v = Goldilocks::from_u64(v.as_canonical_u64());
+        });
+        (lde, None)
+    }
+
+    /// Computes a bit-reversed LDE from shifted polynomial coefficients on GPU
+    /// (1-shot or column-panel streamed) and returns it in host RAM (`Tier 2`).
+    pub(crate) fn shifted_coeffs_to_lde_to_host(
+        &self,
+        shifted_coeffs: &RowMajorMatrix<Goldilocks>,
+        log_blowup: usize,
+        unique_leaf_hash: Option<(Blake3Domain, Option<&[u8; 32]>)>,
+    ) -> (RowMajorMatrix<Goldilocks>, Option<Vec<[u8; 32]>>) {
+        let coeff_height = shifted_coeffs.height();
+        let width = shifted_coeffs.width();
+        let lde_height = coeff_height
+            .checked_shl(u32::try_from(log_blowup).expect("LDE blowup exceeds u32"))
+            .expect("LDE height overflows usize");
+        if width == 0 {
+            return (RowMajorMatrix::new(Vec::new(), 0), None);
+        }
+        let log_lde = lde_height.trailing_zeros() as usize;
+        let can_use_sppark =
+            Self::uses_cuda_dft(lde_height, width) && log_lde <= sppark::max_log_domain();
+        let reserve = minimum_free_bytes().saturating_add(128 << 20);
+        if can_use_sppark {
+            let plan = self.forward_plan(lde_height, width);
+            let lde_bytes = lde_height
+                .saturating_mul(width)
+                .saturating_mul(size_of::<Goldilocks>());
+            let full_needed = lde_bytes
+                .saturating_add(plan.scratch_bytes())
+                .saturating_add(reserve);
+            let (free_bytes, _) = device_memory_info(self.device_id);
+            if full_needed <= free_bytes {
+                let lde = self.shifted_coeffs_to_lde_resident(shifted_coeffs, log_blowup);
+                let digests = unique_leaf_hash.and_then(|(domain, salt_seed)| {
+                    hash_single_resident_lde_if_admitted(&lde, domain, salt_seed)
+                });
+                let host = lde.to_row_major_matrix();
+                drop(lde);
+                return (host, digests);
+            }
+            let one_col_plan = self.forward_plan(lde_height, 1);
+            let col_bytes = lde_height.saturating_mul(size_of::<Goldilocks>());
+            let panel_overhead = one_col_plan.scratch_bytes().saturating_add(reserve);
+            if free_bytes > panel_overhead.saturating_add(col_bytes) {
+                let usable = free_bytes.saturating_sub(panel_overhead);
+                let mut panel_cols = (usable / col_bytes).clamp(1, width);
+                while panel_cols > 1 {
+                    let p_plan = self.forward_plan(lde_height, panel_cols);
+                    let needed = panel_cols
+                        .saturating_mul(col_bytes)
+                        .saturating_add(p_plan.scratch_bytes())
+                        .saturating_add(reserve);
+                    if needed <= free_bytes {
+                        break;
+                    }
+                    panel_cols /= 2;
+                }
+                let p_plan = self.forward_plan(lde_height, panel_cols);
+                let needed = panel_cols
+                    .saturating_mul(col_bytes)
+                    .saturating_add(p_plan.scratch_bytes())
+                    .saturating_add(reserve);
+                if needed <= free_bytes {
+                    if memory_diagnostics_enabled() {
+                        eprintln!(
+                            "[multi-stark/cuda] panel-streamed shifted-coeff LDE -> host RAM: height={coeff_height}->{lde_height} width={width} panel_cols={panel_cols} free={free_bytes}"
+                        );
+                    }
+                    let mut out =
+                        RowMajorMatrix::new(Goldilocks::zero_vec(lde_height * width), width);
+                    for col_start in (0..width).step_by(panel_cols) {
+                        let count = (width - col_start).min(panel_cols);
+                        let sub = extract_column_panel(shifted_coeffs, col_start, count);
+                        let lde = self.shifted_coeffs_to_lde_resident(&sub, log_blowup);
+                        scatter_lde_panel(&mut out, &lde, col_start);
+                        drop(lde);
+                    }
+                    return (out, None);
+                }
+            }
+        }
+        let cpu = Radix2DitParallel::<Goldilocks>::default();
+        let mut padded = shifted_coeffs.clone();
+        padded.pad_to_height(lde_height, Goldilocks::ZERO);
+        let mut lde = cpu
+            .dft_batch(padded)
+            .bit_reverse_rows()
+            .to_row_major_matrix();
+        lde.values.par_iter_mut().for_each(|v| {
+            *v = Goldilocks::from_u64(v.as_canonical_u64());
+        });
+        (lde, None)
+    }
+}
+
+/// Streams a resident column-panel `CudaLde` directly into columns
+/// `col_start..col_start + lde.width()` of `dst` in bounded 128 MiB row chunks
+/// without allocating a full temporary host copy of the panel.
+pub(crate) fn scatter_lde_panel(
+    dst: &mut RowMajorMatrix<Goldilocks>,
+    lde: &CudaLde,
+    col_start: usize,
+) {
+    const CHUNK_BYTES: usize = 128 << 20;
+    let height = dst.height();
+    let total_width = dst.width();
+    let count = lde.width();
+    assert_eq!(lde.height(), height);
+    assert!(col_start + count <= total_width);
+    if count == 0 || height == 0 {
+        return;
+    }
+    let row_bytes = count.saturating_mul(size_of::<u64>()).max(size_of::<u64>());
+    let chunk_rows = (CHUNK_BYTES / row_bytes).clamp(1, height);
+    let mut chunk_buf = vec![0u64; chunk_rows * count];
+    for row_start in (0..height).step_by(chunk_rows) {
+        let n_rows = (height - row_start).min(chunk_rows);
+        let slice = &mut chunk_buf[..n_rows * count];
+        lde.copy_rows_to_host(row_start, n_rows, slice);
+        let dst_slice =
+            &mut dst.values[row_start * total_width..(row_start + n_rows) * total_width];
+        if n_rows >= 1024 {
+            dst_slice
+                .par_chunks_exact_mut(total_width)
+                .zip(slice.par_chunks_exact(count))
+                .for_each(|(out_row, in_row)| {
+                    for (slot, &raw) in out_row[col_start..col_start + count].iter_mut().zip(in_row)
+                    {
+                        *slot = Goldilocks::from_u64(Goldilocks::new(raw).as_canonical_u64());
+                    }
+                });
+        } else {
+            for (out_row, in_row) in dst_slice
+                .chunks_exact_mut(total_width)
+                .zip(slice.chunks_exact(count))
+            {
+                for (slot, &raw) in out_row[col_start..col_start + count].iter_mut().zip(in_row) {
+                    *slot = Goldilocks::from_u64(Goldilocks::new(raw).as_canonical_u64());
+                }
+            }
+        }
+    }
+}
+
+pub(crate) fn extract_column_panel(
+    matrix: &RowMajorMatrix<Goldilocks>,
+    col_start: usize,
+    count: usize,
+) -> RowMajorMatrix<Goldilocks> {
+    let height = matrix.height();
+    let width = matrix.width();
+    let mut values = Goldilocks::zero_vec(height * count);
+    if height >= 1024 {
+        values
+            .par_chunks_exact_mut(count)
+            .zip(matrix.values.par_chunks_exact(width))
+            .for_each(|(dst, src)| {
+                dst.copy_from_slice(&src[col_start..col_start + count]);
+            });
+    } else {
+        for (dst, src) in values
+            .chunks_exact_mut(count)
+            .zip(matrix.values.chunks_exact(width))
+        {
+            dst.copy_from_slice(&src[col_start..col_start + count]);
+        }
+    }
+    RowMajorMatrix::new(values, count)
+}
+
+pub(crate) fn hash_single_resident_lde_if_admitted(
+    lde: &CudaLde,
+    domain: Blake3Domain,
+    salt_seed: Option<&[u8; 32]>,
+) -> Option<Vec<[u8; 32]>> {
+    let row_bytes = lde.width().saturating_mul(size_of::<Goldilocks>());
+    let max_row_bytes = match domain {
+        Blake3Domain::ZkMerkleLeaf => hiding_mmcs::MAX_DEVICE_LEAF_ROW_BYTES_ZK,
+        Blake3Domain::Plain | Blake3Domain::MerkleLeaf => mmcs::MAX_DEVICE_LEAF_ROW_BYTES,
+        _ => return None,
+    };
+    if row_bytes > max_row_bytes {
+        return None;
+    }
+    let digest_bytes = lde.height().saturating_mul(32);
+    let (free_bytes, _) = device_memory_info(lde.device_id);
+    if digest_bytes.saturating_add(minimum_free_bytes()) > free_bytes {
+        return None;
+    }
+    let resident_refs = [Some(lde)];
+    let host_refs: [Option<&RowMajorMatrix<Goldilocks>>; 1] = [None];
+    match domain {
+        Blake3Domain::Plain => Some(CudaMixedMerkleTree::hash_hybrid_height_group_with_domain(
+            lde.device_id,
+            &resident_refs,
+            &host_refs,
+            false,
+        )),
+        Blake3Domain::MerkleLeaf => {
+            Some(CudaMixedMerkleTree::hash_hybrid_height_group_with_domain(
+                lde.device_id,
+                &resident_refs,
+                &host_refs,
+                true,
+            ))
+        }
+        Blake3Domain::ZkMerkleLeaf => {
+            let seed = salt_seed?;
+            Some(CudaMixedMerkleTree::hash_hybrid_height_group_v6zk(
+                lde.device_id,
+                &resident_refs,
+                &host_refs,
+                seed,
+            ))
+        }
+        _ => None,
     }
 }
 
@@ -605,6 +1239,100 @@ impl CudaLde {
             )
         };
         RowMajorMatrix::new(values, self.width)
+    }
+
+    /// Copies contiguous rows `[start_row .. start_row + num_rows)` from this
+    /// resident LDE into `output` (`output.len() == num_rows * self.width`).
+    pub(crate) fn copy_rows_to_host(&self, start_row: usize, num_rows: usize, output: &mut [u64]) {
+        assert!(
+            start_row.saturating_add(num_rows) <= self.height,
+            "resident LDE row range {start_row}..{} exceeds height {}",
+            start_row.saturating_add(num_rows),
+            self.height
+        );
+        assert_eq!(
+            output.len(),
+            num_rows
+                .checked_mul(self.width)
+                .expect("resident LDE copy length overflow")
+        );
+        if output.is_empty() {
+            return;
+        }
+        // SAFETY: `output` has exact element length `num_rows * self.width` and
+        // remains live for this synchronous CUDA copy.
+        let status = unsafe {
+            multi_stark_cuda_lde_copy_rows_to_host(
+                self.device_id,
+                self.handle.as_ptr(),
+                output.as_mut_ptr(),
+                start_row,
+                num_rows,
+            )
+        };
+        check_cuda(status, "resident LDE chunked host copy");
+    }
+
+    /// Streams this resident LDE from GPU VRAM into a single [`SpillPanel`] in
+    /// double-buffered 128 MiB chunks, overlapping GPU→host transfers with
+    /// canonicalization and NVMe writes.
+    pub(crate) fn spill_panel_to_pack(&self, pack: &mut SpillPackWriter) -> SpillPanel {
+        const CUDA_SPILL_CHUNK_BYTES: usize = 128 << 20;
+        let row_bytes = self
+            .width
+            .saturating_mul(size_of::<u64>())
+            .max(size_of::<u64>());
+        let chunk_rows = (CUDA_SPILL_CHUNK_BYTES / row_bytes).clamp(1, self.height.max(1));
+        let width = self.width;
+        let height = self.height;
+        pack.append_streamed_panel(height, width, |sink| {
+            let mut cur_buf = vec![0u64; chunk_rows * width];
+            let mut next_buf = vec![0u64; chunk_rows * width];
+            let first_rows = height.min(chunk_rows);
+            if first_rows == 0 {
+                return;
+            }
+            self.copy_rows_to_host(0, first_rows, &mut cur_buf[..first_rows * width]);
+            let mut cur_rows = first_rows;
+            let mut next_start = first_rows;
+            while cur_rows > 0 {
+                let cur_elems = cur_rows * width;
+                let upcoming_rows = height.saturating_sub(next_start).min(chunk_rows);
+                std::thread::scope(|s| {
+                    let write_handle = s.spawn(|| {
+                        let slice = &mut cur_buf[..cur_elems];
+                        if cur_elems >= 4096 {
+                            slice.par_iter_mut().for_each(|v| {
+                                *v = Goldilocks::new(*v).as_canonical_u64();
+                            });
+                        } else {
+                            for v in slice.iter_mut() {
+                                *v = Goldilocks::new(*v).as_canonical_u64();
+                            }
+                        }
+                        sink.write_canonical_u64s(slice);
+                    });
+                    if upcoming_rows > 0 {
+                        self.copy_rows_to_host(
+                            next_start,
+                            upcoming_rows,
+                            &mut next_buf[..upcoming_rows * width],
+                        );
+                    }
+                    write_handle.join().expect("spill writer thread panicked");
+                });
+                core::mem::swap(&mut cur_buf, &mut next_buf);
+                cur_rows = upcoming_rows;
+                next_start = next_start.saturating_add(upcoming_rows);
+            }
+        })
+    }
+
+    /// Streams this resident LDE from GPU VRAM directly into `pack` in bounded
+    /// 64 MiB chunks without allocating the full matrix in host RAM.
+    pub(crate) fn spill_to_pack(&self, pack: &mut SpillPackWriter) -> SpilledMatrix {
+        let panel = self.spill_panel_to_pack(pack);
+        SpilledMatrix::from_panels(self.height, vec![panel])
     }
 
     /// Copies one sampled row from the resident bit-reversed LDE.
@@ -1389,6 +2117,9 @@ fn quotient_lde_sources(
                     matrix.height(),
                     matrix.width(),
                 ),
+                Some(mmcs::CudaMatrixSource::Spilled(_)) => {
+                    panic!("spilled quotient sources must use quotient_eval_blocks")
+                }
                 None => (core::ptr::null(), core::ptr::null(), 0, 0),
             }
         };
@@ -1571,6 +2302,301 @@ fn quotient_lde_sources(
         handle: NonNull::new(handle).expect("CUDA returned a null quotient LDE"),
         height: lde_height,
         width: ext_degree * quotient_degree,
+    }
+}
+
+struct QuotientBlockLoaderState<'a> {
+    prep: Option<mmcs::CudaMatrixSource<'a>>,
+    main: mmcs::CudaMatrixSource<'a>,
+    stage2: mmcs::CudaMatrixSource<'a>,
+    block_rows: usize,
+    prep_buf: Vec<u64>,
+    main_buf: Vec<u64>,
+    stage2_buf: Vec<u64>,
+}
+
+unsafe extern "C" fn quotient_block_loader_cb(
+    ctx: *mut c_void,
+    block_index: usize,
+    prep_out: *mut *const u64,
+    main_out: *mut *const u64,
+    stage2_out: *mut *const u64,
+) -> i32 {
+    let state = unsafe { &mut *ctx.cast::<QuotientBlockLoaderState<'_>>() };
+    let start_row = block_index * state.block_rows;
+    let load_one = |src: Option<mmcs::CudaMatrixSource<'_>>, buf: &mut Vec<u64>| -> *const u64 {
+        match src {
+            None | Some(mmcs::CudaMatrixSource::Resident(_)) => core::ptr::null(),
+            Some(mmcs::CudaMatrixSource::Host(mat)) => {
+                let offset = start_row * mat.width();
+                unsafe { mat.values.as_ptr().add(offset).cast::<u64>() }
+            }
+            Some(mmcs::CudaMatrixSource::Spilled(spilled)) => {
+                let elems = state.block_rows * spilled.width();
+                if buf.len() != elems {
+                    buf.resize(elems, 0);
+                }
+                spilled.read_u64_rows_into(start_row, state.block_rows, buf);
+                buf.as_ptr()
+            }
+        }
+    };
+    unsafe {
+        *prep_out = load_one(state.prep, &mut state.prep_buf);
+        *main_out = load_one(Some(state.main), &mut state.main_buf);
+        *stage2_out = load_one(Some(state.stage2), &mut state.stage2_buf);
+    }
+    0
+}
+
+/// Evaluates the constraint quotient on GPU streaming coset blocks of size
+/// `quotient_size / next_step` from any combination of resident, host, and
+/// disk-spilled input matrices.
+///
+/// When `forward_transform` is `true`, runs the GPU forward NTT on the
+/// `quotient_size × ext_degree` buffer and returns a resident [`CudaLde`]
+/// ready for [`quotient_slice_panel_lde`]. When `false`, downloads the raw
+/// quotient evaluations to host (`RowMajorMatrix<Goldilocks>` of shape
+/// `quotient_size × ext_degree`, used by `v6-zk` telescoping slicing).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn quotient_eval_blocks(
+    dft: &CudaDft,
+    graph: &ConstraintGraph<Goldilocks>,
+    preprocessed: Option<mmcs::CudaMatrixSource<'_>>,
+    main: mmcs::CudaMatrixSource<'_>,
+    stage2: mmcs::CudaMatrixSource<'_>,
+    publics: &[Goldilocks],
+    selectors: CudaCosetSelectors,
+    alpha: &[Goldilocks],
+    delta: &[Goldilocks],
+    ext_w: Goldilocks,
+    ext_degree: usize,
+    quotient_size: usize,
+    next_step: usize,
+    group_size: usize,
+    max_staging_bytes: usize,
+    forward_transform: bool,
+) -> (Option<CudaLde>, Option<RowMajorMatrix<Goldilocks>>) {
+    let _span = tracing::info_span!(
+        "cuda/quotient_eval_blocks",
+        device = dft.device_id,
+        quotient_size,
+        next_step,
+        forward_transform
+    )
+    .entered();
+    assert!(quotient_graph_supported(graph));
+    assert!(ext_degree == 2 || ext_degree == 3);
+    assert!((1..=8).contains(&group_size));
+    assert!(publics.len() >= 2 * ext_degree);
+    assert_eq!(delta.len(), ext_degree);
+    assert!(next_step.is_power_of_two() && next_step <= quotient_size);
+    let (nodes, slots, slot_count) = encode_quotient_nodes(graph);
+    let roots: Vec<_> = graph.zeros.iter().map(|root| slots[root.index()]).collect();
+    let mut args = Vec::new();
+    let lookups: Vec<_> = graph
+        .lookups
+        .iter()
+        .map(|lookup| {
+            let arg_start = checked_u32(args.len(), "lookup argument offset");
+            args.extend(lookup.args.iter().map(|arg| slots[arg.index()]));
+            CudaConstraintLookup {
+                multiplicity: slots[lookup.multiplicity.index()],
+                arg_start,
+                arg_count: checked_u32(lookup.args.len(), "lookup argument count"),
+                emit_after: 0,
+                output: 0,
+            }
+        })
+        .collect();
+    let constraint_count = alpha.len() / ext_degree;
+    let source_meta = |src: Option<mmcs::CudaMatrixSource<'_>>| -> (*const c_void, usize, bool) {
+        match src {
+            None => (core::ptr::null(), 0, false),
+            Some(mmcs::CudaMatrixSource::Resident(lde)) => (lde.raw_handle(), lde.width(), false),
+            Some(mmcs::CudaMatrixSource::Host(mat)) => (core::ptr::null(), mat.width(), true),
+            Some(mmcs::CudaMatrixSource::Spilled(sp)) => (core::ptr::null(), sp.width(), true),
+        }
+    };
+    let (prep_handle, prep_width, prep_cb) = source_meta(preprocessed);
+    let (main_handle, main_width, main_cb) = source_meta(Some(main));
+    let (stage2_handle, stage2_width, stage2_cb) = source_meta(Some(stage2));
+    let mut loader_state = QuotientBlockLoaderState {
+        prep: preprocessed,
+        main,
+        stage2,
+        block_rows: quotient_size / next_step,
+        prep_buf: Vec::new(),
+        main_buf: Vec::new(),
+        stage2_buf: Vec::new(),
+    };
+    let quotient_plan = forward_transform.then(|| dft.forward_plan(quotient_size, ext_degree));
+    let plan_ptr = quotient_plan
+        .as_ref()
+        .map_or(core::ptr::null(), |p| p.raw() as *const RawPlan);
+    let mut transformed_handle = core::ptr::null_mut();
+    let mut host_values = if forward_transform {
+        Vec::new()
+    } else {
+        Goldilocks::zero_vec(quotient_size * ext_degree)
+    };
+    let host_ptr = if forward_transform {
+        core::ptr::null_mut()
+    } else {
+        host_values.as_mut_ptr().cast::<u64>()
+    };
+    let status = match ext_degree {
+        2 => unsafe {
+            multi_stark_cuda_quotient_eval_blocks(
+                dft.device_id,
+                &mut transformed_handle,
+                host_ptr,
+                nodes.as_ptr().cast(),
+                nodes.len(),
+                slot_count,
+                roots.as_ptr(),
+                roots.len(),
+                lookups.as_ptr().cast(),
+                lookups.len(),
+                args.as_ptr(),
+                args.len(),
+                group_size,
+                prep_handle,
+                prep_width,
+                prep_cb,
+                main_handle,
+                main_width,
+                main_cb,
+                stage2_handle,
+                stage2_width,
+                stage2_cb,
+                (&mut loader_state as *mut QuotientBlockLoaderState<'_>).cast(),
+                quotient_block_loader_cb,
+                publics.as_ptr().cast(),
+                publics.len(),
+                raw_u64(selectors.coset_shift),
+                raw_u64(selectors.coset_generator),
+                raw_u64(selectors.trace_last),
+                raw_u64(selectors.vanishing_start),
+                raw_u64(selectors.vanishing_step),
+                alpha.as_ptr().cast(),
+                constraint_count,
+                delta.as_ptr().cast(),
+                raw_u64(ext_w),
+                quotient_size,
+                next_step,
+                max_staging_bytes,
+                plan_ptr,
+            )
+        },
+        3 => unsafe {
+            multi_stark_cuda_quotient_eval_blocks_ext3(
+                dft.device_id,
+                &mut transformed_handle,
+                host_ptr,
+                nodes.as_ptr().cast(),
+                nodes.len(),
+                slot_count,
+                roots.as_ptr(),
+                roots.len(),
+                lookups.as_ptr().cast(),
+                lookups.len(),
+                args.as_ptr(),
+                args.len(),
+                group_size,
+                prep_handle,
+                prep_width,
+                prep_cb,
+                main_handle,
+                main_width,
+                main_cb,
+                stage2_handle,
+                stage2_width,
+                stage2_cb,
+                (&mut loader_state as *mut QuotientBlockLoaderState<'_>).cast(),
+                quotient_block_loader_cb,
+                publics.as_ptr().cast(),
+                publics.len(),
+                raw_u64(selectors.coset_shift),
+                raw_u64(selectors.coset_generator),
+                raw_u64(selectors.trace_last),
+                raw_u64(selectors.vanishing_start),
+                raw_u64(selectors.vanishing_step),
+                alpha.as_ptr().cast(),
+                constraint_count,
+                delta.as_ptr().cast(),
+                quotient_size,
+                next_step,
+                max_staging_bytes,
+                plan_ptr,
+            )
+        },
+        _ => unreachable!(),
+    };
+    check_cuda(status, "CUDA block-streamed quotient evaluation");
+    if forward_transform {
+        (
+            Some(CudaLde {
+                device_id: dft.device_id,
+                handle: NonNull::new(transformed_handle)
+                    .expect("CUDA returned a null transformed quotient"),
+                height: quotient_size,
+                width: ext_degree,
+            }),
+            None,
+        )
+    } else {
+        (None, Some(RowMajorMatrix::new(host_values, ext_degree)))
+    }
+}
+
+/// Extracts quotient slice panel `[chunk_start .. chunk_start + chunk_count)`
+/// from a forward-transformed GPU quotient buffer and runs its forward NTT to
+/// `trace_height << log_blowup` rows.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn quotient_slice_panel_lde(
+    dft: &CudaDft,
+    transformed_quotient: &CudaLde,
+    quotient_degree: usize,
+    trace_height: usize,
+    chunk_start: usize,
+    chunk_count: usize,
+    log_blowup: usize,
+) -> CudaLde {
+    let ext_degree = transformed_quotient.width();
+    let quotient_size = transformed_quotient.height();
+    assert_eq!(quotient_size, trace_height * quotient_degree);
+    let lde_height = trace_height << log_blowup;
+    let panel_width = chunk_count * ext_degree;
+    let height_inverse = Goldilocks::ONE.div_2exp_u64(log2_strict_usize(quotient_size) as u64);
+    let weight_step = Goldilocks::GENERATOR.exp_u64(trace_height as u64).inverse();
+    let weights: Vec<Goldilocks> = weight_step
+        .powers()
+        .take(quotient_degree)
+        .map(|weight| weight * height_inverse)
+        .collect();
+    let panel_lde_plan = dft.forward_plan(lde_height, panel_width);
+    let mut handle = core::ptr::null_mut();
+    let status = unsafe {
+        multi_stark_cuda_quotient_slice_panel_lde(
+            dft.device_id,
+            &mut handle,
+            transformed_quotient.raw_handle(),
+            weights.as_ptr().cast(),
+            quotient_degree,
+            trace_height,
+            chunk_start,
+            chunk_count,
+            log_blowup,
+            panel_lde_plan.raw(),
+        )
+    };
+    check_cuda(status, "CUDA quotient slice panel LDE");
+    CudaLde {
+        device_id: dft.device_id,
+        handle: NonNull::new(handle).expect("CUDA returned a null quotient panel LDE"),
+        height: lde_height,
+        width: panel_width,
     }
 }
 
@@ -2087,6 +3113,221 @@ impl CudaFriWorkspace {
             _ => panic!("FRI workspace extension degree mismatch"),
         };
         check_cuda(status, "batched FRI reduction")
+    }
+
+    /// Streams rows `0..polynomial_height` of a spilled matrix in bounded
+    /// 64 MiB chunks into GPU memory and computes exact barycentric OOD
+    /// interpolations at every point in `inv_offsets`/`scales`.
+    pub(crate) fn interpolate_spilled(
+        &mut self,
+        spilled: &SpilledMatrix,
+        polynomial_height: usize,
+        inv_offsets: &[usize],
+        scales_flat: &[Goldilocks],
+        ext_w: Goldilocks,
+    ) -> Vec<Goldilocks> {
+        let num_points = inv_offsets.len();
+        let width = spilled.width();
+        assert_eq!(scales_flat.len(), num_points * self.ext_degree);
+        if num_points == 0 || width == 0 {
+            return Vec::new();
+        }
+        let output_count = num_points * width;
+        let status = unsafe {
+            multi_stark_cuda_fri_chunk_interp_begin(
+                self.device_id,
+                self.handle.as_ptr(),
+                output_count,
+            )
+        };
+        check_cuda(status, "chunked FRI interpolation begin");
+
+        const FRI_STREAM_CHUNK_BYTES: usize = 128 << 20;
+        let row_bytes = spilled.row_bytes().max(size_of::<u64>());
+        let chunk_rows = (FRI_STREAM_CHUNK_BYTES / row_bytes).clamp(1, polynomial_height.max(1));
+        let mut cur_buf = vec![0u64; chunk_rows * width];
+        let mut next_buf = vec![0u64; chunk_rows * width];
+        let first_rows = polynomial_height.min(chunk_rows);
+        spilled.read_u64_rows_into(0, first_rows, &mut cur_buf[..first_rows * width]);
+        let mut cur_start = 0usize;
+        let mut cur_rows = first_rows;
+        while cur_rows > 0 {
+            let next_start = cur_start + cur_rows;
+            let next_rows = polynomial_height.saturating_sub(next_start).min(chunk_rows);
+            let cur_slice = &cur_buf[..cur_rows * width];
+            let status = std::thread::scope(|s| {
+                let prefetch = (next_rows > 0).then(|| {
+                    let next_slice = &mut next_buf[..next_rows * width];
+                    s.spawn(move || {
+                        spilled.read_u64_rows_into(next_start, next_rows, next_slice);
+                    })
+                });
+                let st = match self.ext_degree {
+                    2 => unsafe {
+                        multi_stark_cuda_fri_chunk_interp_add(
+                            self.device_id,
+                            self.handle.as_ptr(),
+                            cur_slice.as_ptr(),
+                            width,
+                            cur_start,
+                            cur_rows,
+                            inv_offsets.as_ptr(),
+                            num_points,
+                        )
+                    },
+                    3 => unsafe {
+                        multi_stark_cuda_fri_chunk_interp_add_ext3(
+                            self.device_id,
+                            self.handle.as_ptr(),
+                            cur_slice.as_ptr(),
+                            width,
+                            cur_start,
+                            cur_rows,
+                            inv_offsets.as_ptr(),
+                            num_points,
+                        )
+                    },
+                    _ => unreachable!(),
+                };
+                if let Some(h) = prefetch {
+                    h.join()
+                        .expect("spilled FRI interpolation prefetch panicked");
+                }
+                st
+            });
+            check_cuda(status, "chunked FRI interpolation add");
+            core::mem::swap(&mut cur_buf, &mut next_buf);
+            cur_start = next_start;
+            cur_rows = next_rows;
+        }
+
+        let mut output = vec![Goldilocks::ZERO; output_count * self.ext_degree];
+        let status = match self.ext_degree {
+            2 => unsafe {
+                multi_stark_cuda_fri_chunk_interp_finish(
+                    self.device_id,
+                    self.handle.as_ptr(),
+                    output.as_mut_ptr().cast(),
+                    width,
+                    scales_flat.as_ptr().cast(),
+                    num_points,
+                    raw_u64(ext_w),
+                )
+            },
+            3 => unsafe {
+                multi_stark_cuda_fri_chunk_interp_finish_ext3(
+                    self.device_id,
+                    self.handle.as_ptr(),
+                    output.as_mut_ptr().cast(),
+                    width,
+                    scales_flat.as_ptr().cast(),
+                    num_points,
+                )
+            },
+            _ => unreachable!(),
+        };
+        check_cuda(status, "chunked FRI interpolation finish");
+        output
+    }
+
+    /// Streams rows `0..spilled.height()` of a spilled matrix in bounded
+    /// 64 MiB chunks into GPU memory and accumulates reduced FRI openings into
+    /// `target` for every point in `inv_offsets`/`reduced_ys_flat`/`alpha_offsets_flat`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn reduce_spilled(
+        &mut self,
+        target: &mut CudaReducedOpening,
+        spilled: &SpilledMatrix,
+        inv_offsets: &[usize],
+        reduced_ys_flat: &[Goldilocks],
+        alpha_offsets_flat: &[Goldilocks],
+        col_weights_flat: &[Goldilocks],
+        ext_w: Goldilocks,
+    ) {
+        let num_points = inv_offsets.len();
+        let width = spilled.width();
+        let height = spilled.height();
+        assert_eq!(target.ext_degree, self.ext_degree);
+        assert_eq!(target.height, height);
+        assert_eq!(reduced_ys_flat.len(), num_points * self.ext_degree);
+        assert_eq!(alpha_offsets_flat.len(), num_points * self.ext_degree);
+        assert_eq!(col_weights_flat.len() % self.ext_degree, 0);
+        if num_points == 0 || width == 0 {
+            return;
+        }
+        const FRI_STREAM_CHUNK_BYTES: usize = 128 << 20;
+        let alpha_count = col_weights_flat.len() / self.ext_degree;
+        let row_bytes = spilled.row_bytes().max(size_of::<u64>());
+        let chunk_rows = (FRI_STREAM_CHUNK_BYTES / row_bytes).clamp(1, height.max(1));
+        let mut cur_buf = vec![0u64; chunk_rows * width];
+        let mut next_buf = vec![0u64; chunk_rows * width];
+        let first_rows = height.min(chunk_rows);
+        spilled.read_u64_rows_into(0, first_rows, &mut cur_buf[..first_rows * width]);
+        let mut cur_start = 0usize;
+        let mut cur_rows = first_rows;
+        let mut upload_alpha = true;
+        while cur_rows > 0 {
+            let next_start = cur_start + cur_rows;
+            let next_rows = height.saturating_sub(next_start).min(chunk_rows);
+            let cur_slice = &cur_buf[..cur_rows * width];
+            let status = std::thread::scope(|s| {
+                let prefetch = (next_rows > 0).then(|| {
+                    let next_slice = &mut next_buf[..next_rows * width];
+                    s.spawn(move || {
+                        spilled.read_u64_rows_into(next_start, next_rows, next_slice);
+                    })
+                });
+                let st = match self.ext_degree {
+                    2 => unsafe {
+                        multi_stark_cuda_fri_reduce_chunk(
+                            self.device_id,
+                            self.handle.as_ptr(),
+                            target.handle.as_ptr(),
+                            cur_slice.as_ptr(),
+                            width,
+                            cur_start,
+                            cur_rows,
+                            inv_offsets.as_ptr(),
+                            reduced_ys_flat.as_ptr().cast(),
+                            alpha_offsets_flat.as_ptr().cast(),
+                            num_points,
+                            col_weights_flat.as_ptr().cast(),
+                            alpha_count,
+                            upload_alpha,
+                            raw_u64(ext_w),
+                        )
+                    },
+                    3 => unsafe {
+                        multi_stark_cuda_fri_reduce_chunk_ext3(
+                            self.device_id,
+                            self.handle.as_ptr(),
+                            target.handle.as_ptr(),
+                            cur_slice.as_ptr(),
+                            width,
+                            cur_start,
+                            cur_rows,
+                            inv_offsets.as_ptr(),
+                            reduced_ys_flat.as_ptr().cast(),
+                            alpha_offsets_flat.as_ptr().cast(),
+                            num_points,
+                            col_weights_flat.as_ptr().cast(),
+                            alpha_count,
+                            upload_alpha,
+                        )
+                    },
+                    _ => unreachable!(),
+                };
+                if let Some(h) = prefetch {
+                    h.join().expect("spilled FRI reduction prefetch panicked");
+                }
+                st
+            });
+            check_cuda(status, "chunked FRI reduction");
+            upload_alpha = false;
+            core::mem::swap(&mut cur_buf, &mut next_buf);
+            cur_start = next_start;
+            cur_rows = next_rows;
+        }
     }
 }
 impl Drop for CudaFriWorkspace {
@@ -2957,6 +4198,77 @@ pub(crate) fn minimum_free_bytes() -> usize {
         .unwrap_or(0)
 }
 
+/// Returns `(keep_budget, reserve)` for keeping LDEs resident in VRAM (`Tier 1`)
+/// when disk spilling is configured.
+///
+/// Uses up to `free - reserve - scratch_floor` (~75% of VRAM on 96 GiB GPUs,
+/// keeping a `min(20 GiB, total / 5)` working scratchpad for NTTs, quotient
+/// evaluation, and FRI) so large proofs maximize HBM residency instead of
+/// dumping entire rounds to NVMe. Under tight [`DeviceMemoryReservation`]
+/// (`free_avail < 4 GiB`), scales down to `free_avail / 4` so reservation tests
+/// deterministically exercise disk spilling.
+pub(crate) fn resident_keep_budget(device_id: i32) -> (usize, usize) {
+    let (free_bytes, total_device_bytes) = device_memory_info(device_id);
+    let reserve = minimum_free_bytes().saturating_add(128 << 20);
+    let free_avail = free_bytes.saturating_sub(reserve);
+    let scratch_floor = (total_device_bytes / 5).clamp(2usize << 30, 20usize << 30);
+    let keep_budget = if free_avail >= (4usize << 30) {
+        free_avail.saturating_sub(scratch_floor)
+    } else {
+        free_avail / 4
+    };
+    (keep_budget, reserve)
+}
+
+/// Parses Linux `/proc/meminfo` for `(MemAvailable, MemTotal)` in bytes.
+fn host_memory_info() -> Option<(usize, usize)> {
+    let contents = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let mut avail_kib = None;
+    let mut total_kib = None;
+    for line in contents.lines() {
+        if let Some(rest) = line.strip_prefix("MemAvailable:") {
+            avail_kib = rest
+                .split_whitespace()
+                .next()
+                .and_then(|v| v.parse::<usize>().ok());
+        } else if let Some(rest) = line.strip_prefix("MemTotal:") {
+            total_kib = rest
+                .split_whitespace()
+                .next()
+                .and_then(|v| v.parse::<usize>().ok());
+        }
+        if avail_kib.is_some() && total_kib.is_some() {
+            break;
+        }
+    }
+    Some((
+        avail_kib?.saturating_mul(1024),
+        total_kib?.saturating_mul(1024),
+    ))
+}
+
+/// Returns `true` if `needed_bytes` can safely be placed in `Tier 2` Host RAM
+/// before spilling to `Tier 3` NVMe disk.
+///
+/// Automatically bypassed when a [`DeviceMemoryReservation`] is active (so
+/// VRAM-pressure tests directly exercise NVMe spilling) or when
+/// `MULTI_STARK_CUDA_HOST_SPILL=0` is set. Keeps at least `max(32 GiB, RAM/4)`
+/// available host memory at all times to guarantee zero host OOM.
+pub(crate) fn host_spill_headroom(device_id: i32, needed_bytes: usize) -> bool {
+    if reserved_device_bytes(device_id) > 0 {
+        return false;
+    }
+    if std::env::var("MULTI_STARK_CUDA_HOST_SPILL").ok().as_deref() == Some("0") {
+        return false;
+    }
+    let Some((avail, total)) = host_memory_info() else {
+        return false;
+    };
+    let safety_floor = (total / 3).max(64usize << 30);
+    let usable = avail.saturating_sub(safety_floor);
+    needed_bytes <= usable && needed_bytes <= total / 2
+}
+
 pub(crate) fn memory_diagnostics_enabled() -> bool {
     std::env::var_os("MULTI_STARK_CUDA_MEMORY_LOG").is_some()
 }
@@ -3561,7 +4873,6 @@ impl CudaMixedMerkleTree {
 
     /// Hashes a single hybrid height group under Protocol `v6-zk` (`ZkMerkleLeaf`)
     /// with on-the-fly BLAKE3-CTR leaf salts derived from `salt_seed`.
-    #[cfg(test)]
     #[must_use]
     pub(crate) fn hash_hybrid_height_group_v6zk(
         device_id: i32,
@@ -4036,6 +5347,16 @@ unsafe extern "C" {
         plan: *const RawPlan,
     ) -> i32;
 
+    fn multi_stark_cuda_shifted_coeffs_to_lde(
+        device_id: i32,
+        handle: *mut *mut c_void,
+        shifted_coeffs: *const u64,
+        coeff_height: usize,
+        width: usize,
+        log_blowup: usize,
+        lde_plan: *const RawPlan,
+    ) -> i32;
+
     fn multi_stark_cuda_prepare_lde_constants(device_id: i32, plan: *const RawPlan) -> i32;
     fn multi_stark_cuda_lde_create_from_host(
         device_id: i32,
@@ -4055,6 +5376,13 @@ unsafe extern "C" {
         device_id: i32,
         handle: *const c_void,
         output: *mut u64,
+    ) -> i32;
+    fn multi_stark_cuda_lde_copy_rows_to_host(
+        device_id: i32,
+        handle: *const c_void,
+        output: *mut u64,
+        start_row: usize,
+        num_rows: usize,
     ) -> i32;
     fn multi_stark_cuda_lde_release_trace(device_id: i32, handle: *mut c_void) -> i32;
     fn multi_stark_cuda_lde_release_values(device_id: i32, handle: *mut c_void) -> i32;
@@ -4564,7 +5892,6 @@ unsafe extern "C" {
         host_digest_group_count: usize,
         salt_seed: *const u8,
     ) -> i32;
-    #[cfg(test)]
     fn multi_stark_cuda_hash_hybrid_height_group_v6zk(
         device_id: i32,
         host_digests: *mut u8,
@@ -4575,6 +5902,186 @@ unsafe extern "C" {
         matrix_count: usize,
         height: usize,
         salt_seed: *const u8,
+    ) -> i32;
+    fn multi_stark_cuda_quotient_eval_blocks(
+        device_id: i32,
+        transformed_handle: *mut *mut c_void,
+        host_values_output: *mut u64,
+        nodes: *const c_void,
+        node_count: usize,
+        slot_count: usize,
+        roots: *const u32,
+        root_count: usize,
+        lookups: *const c_void,
+        lookup_count: usize,
+        lookup_args: *const u32,
+        lookup_arg_count: usize,
+        group_size: usize,
+        preprocessed_handle: *const c_void,
+        preprocessed_width: usize,
+        preprocessed_callback: bool,
+        main_handle: *const c_void,
+        main_width: usize,
+        main_callback: bool,
+        stage2_handle: *const c_void,
+        stage2_width: usize,
+        stage2_callback: bool,
+        loader_ctx: *mut c_void,
+        loader: unsafe extern "C" fn(
+            *mut c_void,
+            usize,
+            *mut *const u64,
+            *mut *const u64,
+            *mut *const u64,
+        ) -> i32,
+        publics: *const u64,
+        public_count: usize,
+        coset_shift: u64,
+        coset_generator: u64,
+        trace_last: u64,
+        vanishing_start: u64,
+        vanishing_step: u64,
+        alpha: *const u64,
+        constraint_count: usize,
+        delta: *const u64,
+        ext_w: u64,
+        quotient_size: usize,
+        next_step: usize,
+        max_staging_bytes: usize,
+        quotient_plan: *const RawPlan,
+    ) -> i32;
+    fn multi_stark_cuda_quotient_eval_blocks_ext3(
+        device_id: i32,
+        transformed_handle: *mut *mut c_void,
+        host_values_output: *mut u64,
+        nodes: *const c_void,
+        node_count: usize,
+        slot_count: usize,
+        roots: *const u32,
+        root_count: usize,
+        lookups: *const c_void,
+        lookup_count: usize,
+        lookup_args: *const u32,
+        lookup_arg_count: usize,
+        group_size: usize,
+        preprocessed_handle: *const c_void,
+        preprocessed_width: usize,
+        preprocessed_callback: bool,
+        main_handle: *const c_void,
+        main_width: usize,
+        main_callback: bool,
+        stage2_handle: *const c_void,
+        stage2_width: usize,
+        stage2_callback: bool,
+        loader_ctx: *mut c_void,
+        loader: unsafe extern "C" fn(
+            *mut c_void,
+            usize,
+            *mut *const u64,
+            *mut *const u64,
+            *mut *const u64,
+        ) -> i32,
+        publics: *const u64,
+        public_count: usize,
+        coset_shift: u64,
+        coset_generator: u64,
+        trace_last: u64,
+        vanishing_start: u64,
+        vanishing_step: u64,
+        alpha: *const u64,
+        constraint_count: usize,
+        delta: *const u64,
+        quotient_size: usize,
+        next_step: usize,
+        max_staging_bytes: usize,
+        quotient_plan: *const RawPlan,
+    ) -> i32;
+    fn multi_stark_cuda_quotient_slice_panel_lde(
+        device_id: i32,
+        output_handle: *mut *mut c_void,
+        transformed_handle: *const c_void,
+        slice_weights: *const u64,
+        quotient_degree: usize,
+        trace_height: usize,
+        chunk_start: usize,
+        chunk_count: usize,
+        log_blowup: usize,
+        panel_lde_plan: *const RawPlan,
+    ) -> i32;
+    fn multi_stark_cuda_fri_chunk_interp_begin(
+        device_id: i32,
+        handle: *mut c_void,
+        output_count: usize,
+    ) -> i32;
+    fn multi_stark_cuda_fri_chunk_interp_add(
+        device_id: i32,
+        handle: *mut c_void,
+        host_chunk: *const u64,
+        width: usize,
+        row_start: usize,
+        row_count: usize,
+        inv_offsets: *const usize,
+        num_points: usize,
+    ) -> i32;
+    fn multi_stark_cuda_fri_chunk_interp_add_ext3(
+        device_id: i32,
+        handle: *mut c_void,
+        host_chunk: *const u64,
+        width: usize,
+        row_start: usize,
+        row_count: usize,
+        inv_offsets: *const usize,
+        num_points: usize,
+    ) -> i32;
+    fn multi_stark_cuda_fri_chunk_interp_finish(
+        device_id: i32,
+        handle: *mut c_void,
+        host_out: *mut u64,
+        width: usize,
+        scales: *const u64,
+        num_points: usize,
+        ext_w: u64,
+    ) -> i32;
+    fn multi_stark_cuda_fri_chunk_interp_finish_ext3(
+        device_id: i32,
+        handle: *mut c_void,
+        host_out: *mut u64,
+        width: usize,
+        scales: *const u64,
+        num_points: usize,
+    ) -> i32;
+    fn multi_stark_cuda_fri_reduce_chunk(
+        device_id: i32,
+        handle: *mut c_void,
+        reduced_handle: *mut c_void,
+        host_chunk: *const u64,
+        width: usize,
+        row_start: usize,
+        row_count: usize,
+        inv_offsets: *const usize,
+        reduced_ys: *const u64,
+        alpha_offsets: *const u64,
+        num_points: usize,
+        alpha: *const u64,
+        alpha_count: usize,
+        upload_alpha: bool,
+        ext_w: u64,
+    ) -> i32;
+    fn multi_stark_cuda_fri_reduce_chunk_ext3(
+        device_id: i32,
+        handle: *mut c_void,
+        reduced_handle: *mut c_void,
+        host_chunk: *const u64,
+        width: usize,
+        row_start: usize,
+        row_count: usize,
+        inv_offsets: *const usize,
+        reduced_ys: *const u64,
+        alpha_offsets: *const u64,
+        num_points: usize,
+        alpha: *const u64,
+        alpha_count: usize,
+        upload_alpha: bool,
     ) -> i32;
     fn multi_stark_cuda_fri_merkle_create_v6zk(
         device_id: i32,
@@ -4846,6 +6353,7 @@ mod tests {
     mod fri_arity;
     mod lookup_graph;
     mod quotient;
+    mod spill_streaming;
     mod witness;
 
     #[test]

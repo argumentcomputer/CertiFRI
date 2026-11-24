@@ -334,6 +334,321 @@ struct CudaQuotientJob<'a> {
 }
 
 #[cfg(feature = "cuda")]
+fn cuda_spilled_quotient_commit<EF>(
+    dft: &CudaDft,
+    mmcs: &Mmcs,
+    log_blowup: usize,
+    inputs: &[CudaQuotientJob<'_>],
+    alpha: EF,
+) -> Option<(Commitment, ProverData)>
+where
+    EF: TwoAdicField + ExtensionField<Val> + crate::traits::ExtensionOf<Val>,
+{
+    use crate::cuda::mmcs::CudaCommitMmcs;
+    use crate::p3_adapter::spill::{SpillPackWriter, SpilledMatrix};
+
+    let spill_dir = mmcs.spill_dir()?;
+    let device_id = mmcs.cuda_device_id();
+    let leaf_domain = mmcs.leaf_domain();
+    let (ext_degree, ext_w) = cuda_ext_params::<EF>();
+    let (keep_budget, reserve) = crate::cuda::resident_keep_budget(device_id);
+
+    let mut height_counts = std::collections::HashMap::<usize, usize>::new();
+    for input in inputs {
+        let trace_height = input.quotient_domain.size() / input.circuit.quotient_degree();
+        let lde_height = trace_height << log_blowup;
+        *height_counts.entry(lde_height).or_insert(0) += 1;
+    }
+
+    let mut pack: Option<SpillPackWriter> = None;
+    let mut resident: Vec<Option<crate::cuda::CudaLde>> = (0..inputs.len()).map(|_| None).collect();
+    let mut host_matrices: Vec<Option<RowMajorMatrix<Val>>> =
+        (0..inputs.len()).map(|_| None).collect();
+    let mut spilled: Vec<Option<SpilledMatrix>> = (0..inputs.len()).map(|_| None).collect();
+    let mut prehashed: Vec<Option<Vec<[u8; 32]>>> = (0..inputs.len()).map(|_| None).collect();
+    let mut resident_bytes = 0usize;
+    let mut tier1_count = 0usize;
+    let mut tier2_count = 0usize;
+    let mut tier3_count = 0usize;
+
+    for (index, input) in inputs.iter().enumerate() {
+        let job_started = std::time::Instant::now();
+        let quotient_size = input.quotient_domain.size();
+        let quotient_degree = input.circuit.quotient_degree();
+        let trace_height = quotient_size / quotient_degree;
+        let lde_height = trace_height
+            .checked_shl(u32::try_from(log_blowup).expect("LDE blowup exceeds u32"))
+            .expect("quotient LDE height overflow");
+        let is_unique = height_counts.get(&lde_height).copied() == Some(1);
+        let quotient_buf = quotient_size
+            .saturating_mul(ext_degree)
+            .saturating_mul(size_of::<Val>());
+        let selectors_buf = quotient_size.saturating_mul(4 * size_of::<Val>());
+        let quotient_plan = dft.forward_plan(quotient_size, ext_degree);
+        let mut staging_cap = 256usize << 20;
+        let eval_needed = |cap: usize| {
+            quotient_buf
+                .saturating_add(selectors_buf.max(quotient_plan.scratch_bytes()))
+                .saturating_add(cap.saturating_mul(2))
+                .saturating_add(reserve)
+        };
+        let target = eval_needed(staging_cap);
+        mmcs.ensure_device_headroom(input.stage_1.0, target, Some(input.stage_1.1), "quotient");
+        mmcs.ensure_device_headroom(input.stage_2.0, target, Some(input.stage_2.1), "quotient");
+        if let Some((data, matrix)) = input.preprocessed {
+            mmcs.ensure_device_headroom(data, target, Some(matrix), "quotient");
+        }
+        if crate::cuda::device_memory_info(device_id).0 < target {
+            mmcs.ensure_device_headroom(input.stage_1.0, target, None, "quotient");
+            mmcs.ensure_device_headroom(input.stage_2.0, target, None, "quotient");
+            if let Some((data, _)) = input.preprocessed {
+                mmcs.ensure_device_headroom(data, target, None, "quotient");
+            }
+        }
+        let free_now = crate::cuda::device_memory_info(device_id).0;
+        if free_now < eval_needed(staging_cap) {
+            staging_cap = 32usize << 20;
+            if free_now < eval_needed(staging_cap) {
+                return None;
+            }
+        }
+
+        let selectors = cuda_coset_selectors(input.trace_domain, input.quotient_domain);
+        let mut powers = Vec::with_capacity(input.constraint_count);
+        let mut power = <EF as PrimeCharacteristicRing>::ONE;
+        for _ in 0..input.constraint_count {
+            powers.push(power);
+            power *= alpha;
+        }
+        powers.reverse();
+        let mut alpha_flat = Vec::with_capacity(ext_degree * input.constraint_count);
+        for coordinate in 0..ext_degree {
+            alpha_flat.extend(powers.iter().map(|value| {
+                <EF as BasedVectorSpace<Val>>::as_basis_coefficients_slice(value)[coordinate]
+            }));
+        }
+        let n = Val::from_usize(trace_height);
+        let generator = Val::two_adic_generator(trace_height.ilog2() as usize);
+        let normalization = (n * generator).inverse();
+        let delta: Vec<Val> = (0..ext_degree)
+            .map(|c| {
+                (input.lookup_publics[3 * ext_degree + c]
+                    - input.lookup_publics[2 * ext_degree + c])
+                    * normalization
+            })
+            .collect();
+        let next_step = quotient_size / trace_height;
+
+        let transformed = mmcs.with_matrix_source(input.stage_1.0, input.stage_1.1, |main| {
+            mmcs.with_matrix_source(input.stage_2.0, input.stage_2.1, |stage2| {
+                let run = |prep: Option<crate::cuda::mmcs::CudaMatrixSource<'_>>| {
+                    crate::cuda::quotient_eval_blocks(
+                        dft,
+                        &input.circuit.graph,
+                        prep,
+                        main,
+                        stage2,
+                        input.lookup_publics,
+                        selectors,
+                        &alpha_flat,
+                        &delta,
+                        ext_w,
+                        ext_degree,
+                        quotient_size,
+                        next_step,
+                        input.circuit.lookup_group_size,
+                        staging_cap,
+                        true,
+                    )
+                    .0
+                    .expect("forward_transform=true returns transformed CudaLde")
+                };
+                match input.preprocessed {
+                    Some((data, idx)) => mmcs.with_matrix_source(data, idx, |p| run(Some(p))),
+                    None => run(None),
+                }
+            })
+        });
+
+        let full_width = quotient_degree * ext_degree;
+        let full_lde_bytes = lde_height
+            .saturating_mul(full_width)
+            .saturating_mul(size_of::<Val>());
+        let full_lde_plan = dft.forward_plan(lde_height, full_width);
+        let full_lde_needed = full_lde_bytes
+            .saturating_add(full_lde_plan.scratch_bytes())
+            .saturating_add(reserve);
+        let free_after = crate::cuda::device_memory_info(device_id).0;
+        let projected_resident = resident_bytes.saturating_add(full_lde_bytes);
+
+        let placed_tier: &str;
+        if projected_resident <= keep_budget
+            && full_lde_needed.saturating_add(lde_height.saturating_mul(96)) <= free_after
+        {
+            let lde = crate::cuda::quotient_slice_panel_lde(
+                dft,
+                &transformed,
+                quotient_degree,
+                trace_height,
+                0,
+                quotient_degree,
+                log_blowup,
+            );
+            drop(transformed);
+            resident_bytes = projected_resident;
+            resident[index] = Some(lde);
+            tier1_count += 1;
+            placed_tier = "vram";
+        } else {
+            let free_for_panel = crate::cuda::device_memory_info(device_id).0;
+            let mut panel_chunks = 0usize;
+            for c in (1..=quotient_degree).rev() {
+                let pw = c * ext_degree;
+                let pbytes = lde_height
+                    .saturating_mul(pw)
+                    .saturating_mul(size_of::<Val>());
+                let pplan = dft.forward_plan(lde_height, pw);
+                if pbytes
+                    .saturating_add(pplan.scratch_bytes())
+                    .saturating_add(reserve)
+                    <= free_for_panel
+                {
+                    panel_chunks = c;
+                    break;
+                }
+            }
+            if panel_chunks == 0 {
+                drop(transformed);
+                return None;
+            }
+            let use_host = crate::cuda::host_spill_headroom(device_id, full_lde_bytes);
+            if use_host {
+                if panel_chunks == quotient_degree {
+                    let panel_lde = crate::cuda::quotient_slice_panel_lde(
+                        dft,
+                        &transformed,
+                        quotient_degree,
+                        trace_height,
+                        0,
+                        quotient_degree,
+                        log_blowup,
+                    );
+                    drop(transformed);
+                    if is_unique {
+                        prehashed[index] = crate::cuda::hash_single_resident_lde_if_admitted(
+                            &panel_lde,
+                            leaf_domain,
+                            None,
+                        );
+                    }
+                    host_matrices[index] = Some(panel_lde.to_row_major_matrix());
+                    drop(panel_lde);
+                } else {
+                    let mut out =
+                        RowMajorMatrix::new(Val::zero_vec(lde_height * full_width), full_width);
+                    let mut chunk_start = 0usize;
+                    while chunk_start < quotient_degree {
+                        let cc = (quotient_degree - chunk_start).min(panel_chunks);
+                        let panel_lde = crate::cuda::quotient_slice_panel_lde(
+                            dft,
+                            &transformed,
+                            quotient_degree,
+                            trace_height,
+                            chunk_start,
+                            cc,
+                            log_blowup,
+                        );
+                        crate::cuda::scatter_lde_panel(
+                            &mut out,
+                            &panel_lde,
+                            chunk_start * ext_degree,
+                        );
+                        drop(panel_lde);
+                        chunk_start += cc;
+                    }
+                    drop(transformed);
+                    host_matrices[index] = Some(out);
+                }
+                tier2_count += 1;
+                placed_tier = "host";
+            } else {
+                let writer = pack.get_or_insert_with(|| SpillPackWriter::create(spill_dir));
+                if panel_chunks == quotient_degree {
+                    let panel_lde = crate::cuda::quotient_slice_panel_lde(
+                        dft,
+                        &transformed,
+                        quotient_degree,
+                        trace_height,
+                        0,
+                        quotient_degree,
+                        log_blowup,
+                    );
+                    drop(transformed);
+                    if is_unique {
+                        prehashed[index] = crate::cuda::hash_single_resident_lde_if_admitted(
+                            &panel_lde,
+                            leaf_domain,
+                            None,
+                        );
+                    }
+                    spilled[index] = Some(panel_lde.spill_to_pack(writer));
+                    drop(panel_lde);
+                } else {
+                    let mut panels = Vec::new();
+                    let mut chunk_start = 0usize;
+                    while chunk_start < quotient_degree {
+                        let cc = (quotient_degree - chunk_start).min(panel_chunks);
+                        let panel_lde = crate::cuda::quotient_slice_panel_lde(
+                            dft,
+                            &transformed,
+                            quotient_degree,
+                            trace_height,
+                            chunk_start,
+                            cc,
+                            log_blowup,
+                        );
+                        panels.push(panel_lde.spill_panel_to_pack(writer));
+                        drop(panel_lde);
+                        chunk_start += cc;
+                    }
+                    drop(transformed);
+                    spilled[index] = Some(SpilledMatrix::from_panels(lde_height, panels));
+                }
+                tier3_count += 1;
+                placed_tier = "nvme";
+            }
+        }
+        if crate::cuda::memory_diagnostics_enabled() {
+            eprintln!(
+                "[multi-stark/cuda] spilled quotient job {index} complete: {:.3}s (tier={placed_tier})",
+                job_started.elapsed().as_secs_f64()
+            );
+        }
+    }
+
+    if let Some(writer) = &mut pack {
+        writer.flush();
+    }
+    let merkle_started = std::time::Instant::now();
+    let count = inputs.len();
+    let out = mmcs.commit_cuda_mixed_spilled(
+        resident,
+        host_matrices,
+        spilled,
+        prehashed,
+        (0..count).map(|_| None).collect(),
+        Vec::new(),
+    );
+    if crate::cuda::memory_diagnostics_enabled() {
+        eprintln!(
+            "[multi-stark/cuda] quotient commit: mats={count} tier1_vram={tier1_count} tier2_host={tier2_count} tier3_nvme={tier3_count} merkle={:.3}s",
+            merkle_started.elapsed().as_secs_f64()
+        );
+    }
+    Some(out)
+}
+
+#[cfg(feature = "cuda")]
 fn cuda_accelerated_quotient_commit<EF>(
     dft: &CudaDft,
     mmcs: &Mmcs,
@@ -352,8 +667,37 @@ where
     {
         return None;
     }
+    let any_spilled_source = inputs.iter().any(|input| {
+        mmcs.spilled_matrices(input.stage_1.0)[input.stage_1.1].is_some()
+            || mmcs.spilled_matrices(input.stage_2.0)[input.stage_2.1].is_some()
+            || input
+                .preprocessed
+                .is_some_and(|(d, idx)| mmcs.spilled_matrices(d)[idx].is_some())
+    });
+    if any_spilled_source {
+        return cuda_spilled_quotient_commit(dft, mmcs, log_blowup, inputs, alpha);
+    }
     let (ext_degree, ext_w) = cuda_ext_params::<EF>();
     let (_, total_device_bytes) = crate::cuda::device_memory_info(mmcs.cuda_device_id());
+    if mmcs.spill_dir().is_some() {
+        let total_output: usize = inputs
+            .iter()
+            .map(|input| {
+                let quotient_degree = input.circuit.quotient_degree();
+                let trace_height = input.quotient_domain.size() / quotient_degree;
+                let lde_height = trace_height
+                    .checked_shl(log_blowup as u32)
+                    .unwrap_or(usize::MAX);
+                lde_height
+                    .saturating_mul(quotient_degree * ext_degree)
+                    .saturating_mul(size_of::<Val>())
+            })
+            .sum();
+        let (keep_budget, _) = crate::cuda::resident_keep_budget(mmcs.cuda_device_id());
+        if total_output > keep_budget {
+            return cuda_spilled_quotient_commit(dft, mmcs, log_blowup, inputs, alpha);
+        }
+    }
     let matrix_width = |data: &ProverData, index: usize| {
         let dimensions = mmcs.matrix_dimensions(data);
         dimensions
@@ -477,6 +821,10 @@ where
             );
         }
         if free_bytes < target {
+            if mmcs.spill_dir().is_some() {
+                drop(ldes);
+                return cuda_spilled_quotient_commit(dft, mmcs, log_blowup, inputs, alpha);
+            }
             return None;
         }
         let lde = {
@@ -564,6 +912,10 @@ where
         mmcs.ensure_device_headroom(data, tree_headroom, None, "quotient_tree");
     }
     if crate::cuda::device_memory_info(mmcs.cuda_device_id()).0 < tree_headroom {
+        if mmcs.spill_dir().is_some() {
+            drop(ldes);
+            return cuda_spilled_quotient_commit(dft, mmcs, log_blowup, inputs, alpha);
+        }
         return None;
     }
     Some(
@@ -584,6 +936,241 @@ struct CudaLookupJob<'a> {
 }
 
 #[cfg(feature = "cuda")]
+fn cuda_spilled_lookup_commit<EF>(
+    dft: &CudaDft,
+    mmcs: &Mmcs,
+    log_blowup: usize,
+    inputs: &[CudaLookupJob<'_>],
+    lookup_challenge: EF,
+    fingerprint_challenge: EF,
+    mut accumulator: EF,
+) -> Option<(Commitment, ProverData, Vec<EF>)>
+where
+    EF: TwoAdicField + ExtensionField<Val> + crate::traits::ExtensionOf<Val>,
+{
+    use crate::cuda::mmcs::CudaCommitMmcs;
+    use crate::lookup::{InMemoryChunk, OwnedWindowChunk, TraceRowChunk, stage_2_trace_chunked};
+    use crate::p3_adapter::spill::{SpillPackWriter, SpilledMatrix};
+    use crate::traits::flatten_to_base;
+    use p3_matrix::Matrix as _;
+
+    enum CpuRowChunk<'a> {
+        InMemory(InMemoryChunk<'a, Val>),
+        Spilled(OwnedWindowChunk<Val>),
+    }
+
+    impl TraceRowChunk<Val> for CpuRowChunk<'_> {
+        #[inline]
+        fn row_pair(&self, local_row: usize) -> (&[Val], &[Val]) {
+            match self {
+                Self::InMemory(chunk) => chunk.row_pair(local_row),
+                Self::Spilled(chunk) => chunk.row_pair(local_row),
+            }
+        }
+    }
+
+    enum TraceBacking<'a> {
+        Borrowed(&'a RowMajorMatrix<Val>),
+        Owned(RowMajorMatrix<Val>),
+        Spilled(SpilledMatrix),
+    }
+
+    impl TraceBacking<'_> {
+        fn load_chunk(&self, start: usize, len: usize) -> CpuRowChunk<'_> {
+            match self {
+                Self::Borrowed(mat) => CpuRowChunk::InMemory(InMemoryChunk::new(mat, start)),
+                Self::Owned(mat) => CpuRowChunk::InMemory(InMemoryChunk::new(mat, start)),
+                Self::Spilled(spilled) => CpuRowChunk::Spilled(OwnedWindowChunk::new(
+                    spilled.read_window_with_wrap(start, len),
+                )),
+            }
+        }
+    }
+
+    let started = std::time::Instant::now();
+    let spill_dir = mmcs.spill_dir()?;
+    let device_id = mmcs.cuda_device_id();
+    let leaf_domain = mmcs.leaf_domain();
+    let (_, total_device_bytes) = crate::cuda::device_memory_info(device_id);
+    let (keep_budget, reserve) = crate::cuda::resident_keep_budget(device_id);
+
+    let mut height_counts = std::collections::HashMap::<usize, usize>::new();
+    for input in inputs {
+        let lde_height = input.lookup_values.height() << log_blowup;
+        *height_counts.entry(lde_height).or_insert(0) += 1;
+    }
+
+    let mut pack: Option<SpillPackWriter> = None;
+    let mut resident: Vec<Option<crate::cuda::CudaLde>> = Vec::with_capacity(inputs.len());
+    let mut host_matrices: Vec<Option<RowMajorMatrix<Val>>> = Vec::with_capacity(inputs.len());
+    let mut spilled: Vec<Option<SpilledMatrix>> = Vec::with_capacity(inputs.len());
+    let mut prehashed: Vec<Option<Vec<[u8; 32]>>> = Vec::with_capacity(inputs.len());
+    let mut intermediates = Vec::with_capacity(inputs.len());
+    let mut resident_bytes = 0usize;
+    let mut tier1_count = 0usize;
+    let mut tier2_count = 0usize;
+    let mut tier3_count = 0usize;
+    let mut trace_build_s = 0.0f64;
+
+    for input in inputs.iter() {
+        let trace_started = std::time::Instant::now();
+        let circuit = input.circuit;
+        let height = input.lookup_values.height();
+        let (stage_2_ext, delta) = if input.lookup_values.is_materialized() {
+            input.lookup_values.stage_2_trace(
+                circuit.lookup_group_size,
+                lookup_challenge,
+                &fingerprint_challenge,
+            )
+        } else if circuit.graph.lookups.is_empty() {
+            (
+                RowMajorMatrix::new(vec![<EF as PrimeCharacteristicRing>::ZERO; height], 1),
+                <EF as PrimeCharacteristicRing>::ZERO,
+            )
+        } else {
+            let (s1_data, s1_idx) = input.stage_1;
+            let main_backing = if let Some(sp) = s1_data.spilled_original_trace(s1_idx) {
+                TraceBacking::Spilled(sp)
+            } else {
+                TraceBacking::Owned(mmcs.committed_trace(s1_data, s1_idx, log_blowup))
+            };
+            let prep_backing = if circuit.graph.lookup_prefix_uses_preprocessed() {
+                if let Some(pp) = circuit.preprocessed.as_ref() {
+                    Some(TraceBacking::Borrowed(pp))
+                } else if let Some((prep_data, prep_idx)) = input.preprocessed {
+                    if let Some(sp) = prep_data.spilled_original_trace(prep_idx) {
+                        Some(TraceBacking::Spilled(sp))
+                    } else {
+                        Some(TraceBacking::Owned(
+                            mmcs.committed_trace(prep_data, prep_idx, log_blowup),
+                        ))
+                    }
+                } else {
+                    panic!(
+                        "circuit lookup expressions read preprocessed columns, but no preprocessed trace is available"
+                    );
+                }
+            } else {
+                None
+            };
+            stage_2_trace_chunked(
+                circuit,
+                height,
+                lookup_challenge,
+                &fingerprint_challenge,
+                |start, len| main_backing.load_chunk(start, len),
+                prep_backing
+                    .as_ref()
+                    .map(|prep| move |start, len| prep.load_chunk(start, len)),
+            )
+        };
+        trace_build_s += trace_started.elapsed().as_secs_f64();
+
+        accumulator += delta;
+        intermediates.push(accumulator);
+
+        let stage_2_base = flatten_to_base::<Val, EF>(stage_2_ext);
+        let width = stage_2_base.width();
+        let lde_height = stage_2_base
+            .height()
+            .checked_shl(u32::try_from(log_blowup).expect("LDE blowup exceeds u32"))
+            .expect("stage-2 LDE height overflow");
+        let is_unique = height_counts.get(&lde_height).copied() == Some(1);
+        let lde_bytes = lde_height
+            .saturating_mul(width)
+            .saturating_mul(size_of::<Val>());
+        let trace_bytes = stage_2_base
+            .height()
+            .saturating_mul(width)
+            .saturating_mul(size_of::<Val>());
+        let can_use_cuda =
+            CudaDft::supports_cuda_coset_lde(stage_2_base.height(), width, log_blowup);
+        let projected_resident = resident_bytes.saturating_add(lde_bytes);
+
+        let mut keep_resident = can_use_cuda && projected_resident <= keep_budget;
+        if keep_resident {
+            let plan = dft.lde_plan(stage_2_base.height(), width, log_blowup, Val::GENERATOR);
+            let needed = lde_bytes
+                .saturating_add(trace_bytes)
+                .saturating_add(plan.scratch_bytes())
+                .saturating_add(plan.constant_bytes())
+                .saturating_add(lde_height.saturating_mul(96))
+                .saturating_add(reserve);
+            mmcs.ensure_device_headroom(input.stage_1.0, needed, None, "lookup");
+            if needed > crate::cuda::device_memory_info(device_id).0 {
+                keep_resident = false;
+            }
+        }
+
+        if keep_resident {
+            let lde = dft.coset_lde_batch_resident(&stage_2_base, log_blowup, Val::GENERATOR);
+            // SAFETY: `coset_lde_batch_resident` completed synchronously.
+            unsafe { lde.release_trace() };
+            resident_bytes = projected_resident;
+            resident.push(Some(lde));
+            host_matrices.push(None);
+            spilled.push(None);
+            prehashed.push(None);
+            tier1_count += 1;
+        } else if crate::cuda::host_spill_headroom(device_id, lde_bytes) {
+            let plan_hint = lde_bytes
+                .min(total_device_bytes / 2)
+                .saturating_add(reserve);
+            mmcs.ensure_device_headroom(input.stage_1.0, plan_hint, None, "lookup");
+            let leaf_spec = is_unique.then_some((leaf_domain, None));
+            let (host_mat, digests) =
+                dft.coset_lde_to_host(&stage_2_base, log_blowup, Val::GENERATOR, leaf_spec);
+            resident.push(None);
+            host_matrices.push(Some(host_mat));
+            spilled.push(None);
+            prehashed.push(digests);
+            tier2_count += 1;
+        } else {
+            let plan_hint = lde_bytes
+                .min(total_device_bytes / 2)
+                .saturating_add(reserve);
+            mmcs.ensure_device_headroom(input.stage_1.0, plan_hint, None, "lookup");
+            let writer = pack.get_or_insert_with(|| SpillPackWriter::create(spill_dir));
+            let leaf_spec = is_unique.then_some((leaf_domain, None));
+            let (sp, digests) =
+                dft.coset_lde_spilled(&stage_2_base, log_blowup, Val::GENERATOR, writer, leaf_spec);
+            resident.push(None);
+            host_matrices.push(None);
+            spilled.push(Some(sp));
+            prehashed.push(digests);
+            tier3_count += 1;
+        }
+    }
+
+    if let Some(first) = inputs.first() {
+        first.stage_1.0.release_original_traces();
+    }
+    if let Some(writer) = &mut pack {
+        writer.flush();
+    }
+    let merkle_started = std::time::Instant::now();
+    let count = inputs.len();
+    let (commitment, data) = mmcs.commit_cuda_mixed_spilled(
+        resident,
+        host_matrices,
+        spilled,
+        prehashed,
+        (0..count).map(|_| None).collect(),
+        Vec::new(),
+    );
+    if crate::cuda::memory_diagnostics_enabled() {
+        eprintln!(
+            "[multi-stark/cuda] stage2 commit: mats={count} tier1_vram={tier1_count} tier2_host={tier2_count} tier3_nvme={tier3_count} trace={trace_build_s:.3}s total_lde={:.3}s merkle={:.3}s",
+            started.elapsed().as_secs_f64()
+                - merkle_started.elapsed().as_secs_f64()
+                - trace_build_s,
+            merkle_started.elapsed().as_secs_f64(),
+        );
+    }
+    Some((commitment, data, intermediates))
+}
+
+#[cfg(feature = "cuda")]
 fn cuda_accelerated_lookup_commit<EF>(
     dft: &CudaDft,
     mmcs: &Mmcs,
@@ -598,7 +1185,58 @@ where
 {
     use crate::cuda::mmcs::CudaCommitMmcs;
 
+    let any_spilled_or_nonresident_streaming = inputs.iter().any(|input| {
+        mmcs.spilled_matrices(input.stage_1.0)[input.stage_1.1].is_some()
+            || input
+                .preprocessed
+                .is_some_and(|(d, idx)| mmcs.spilled_matrices(d)[idx].is_some())
+            || (!input.lookup_values.is_materialized()
+                && (!input.stage_1.0.has_resident_with_trace(input.stage_1.1)
+                    || input
+                        .preprocessed
+                        .is_some_and(|(d, idx)| d.resident_with_host_trace(idx).is_none())))
+    });
+    if any_spilled_or_nonresident_streaming {
+        return cuda_spilled_lookup_commit(
+            dft,
+            mmcs,
+            log_blowup,
+            inputs,
+            lookup_challenge,
+            fingerprint_challenge,
+            accumulator,
+        );
+    }
     let (ext_degree, ext_w) = cuda_ext_params::<EF>();
+    if mmcs.spill_dir().is_some() {
+        let (keep_budget, _) = crate::cuda::resident_keep_budget(mmcs.cuda_device_id());
+        let total_output: usize = inputs
+            .iter()
+            .map(|input| {
+                let (height, num_lookups, _, _, _) = input.lookup_values.cuda_parts();
+                let group_size = input.circuit.lookup_group_size.max(1);
+                let groups = num_lookups.div_ceil(group_size).max(1);
+                let extended_height = height
+                    .checked_shl(u32::try_from(log_blowup).expect("LDE blowup exceeds u32"))
+                    .unwrap_or(usize::MAX);
+                extended_height
+                    .saturating_mul(ext_degree)
+                    .saturating_mul(groups)
+                    .saturating_mul(size_of::<Val>())
+            })
+            .sum();
+        if total_output > keep_budget {
+            return cuda_spilled_lookup_commit(
+                dft,
+                mmcs,
+                log_blowup,
+                inputs,
+                lookup_challenge,
+                fingerprint_challenge,
+                accumulator,
+            );
+        }
+    }
     let mut lookup_jobs = inputs
         .iter()
         .enumerate()
@@ -827,6 +1465,18 @@ where
         let mut graph_path = admits_graph();
         let (mut temporary_bytes, mut target) = target_for(graph_path);
         if target > total_device_bytes {
+            if mmcs.spill_dir().is_some() {
+                drop(results);
+                return cuda_spilled_lookup_commit(
+                    dft,
+                    mmcs,
+                    log_blowup,
+                    inputs,
+                    lookup_challenge,
+                    fingerprint_challenge,
+                    accumulator,
+                );
+            }
             return None;
         }
         let mut free_bytes =
@@ -840,6 +1490,18 @@ where
             }
         }
         if free_bytes < target {
+            if mmcs.spill_dir().is_some() {
+                drop(results);
+                return cuda_spilled_lookup_commit(
+                    dft,
+                    mmcs,
+                    log_blowup,
+                    inputs,
+                    lookup_challenge,
+                    fingerprint_challenge,
+                    accumulator,
+                );
+            }
             return None;
         }
         if crate::cuda::memory_diagnostics_enabled() {
@@ -891,8 +1553,23 @@ where
         let free_bytes =
             mmcs.ensure_device_headroom(input.stage_1.0, tree_headroom, None, "lookup_tree");
         if free_bytes < tree_headroom {
+            if mmcs.spill_dir().is_some() {
+                drop(results);
+                return cuda_spilled_lookup_commit(
+                    dft,
+                    mmcs,
+                    log_blowup,
+                    inputs,
+                    lookup_challenge,
+                    fingerprint_challenge,
+                    accumulator,
+                );
+            }
             return None;
         }
+    }
+    if let Some(first) = inputs.first() {
+        first.stage_1.0.release_original_traces();
     }
     let mut ldes = Vec::with_capacity(results.len());
     let mut intermediates = Vec::with_capacity(inputs.len());
@@ -978,43 +1655,27 @@ impl GoldilocksBlake3Config {
         self.fri_parameters
     }
 
-    /// Enables disk-backed spilling of committed LDE matrices on the CPU
-    /// prover, writing temporary spill files into `dir`.
+    /// Enables disk-backed spilling of committed LDE matrices on both CPU and
+    /// CUDA provers, writing temporary spill files into `dir`.
     ///
     /// On Unix, spill files are unlinked immediately upon creation so their
     /// disk space is reclaimed automatically on drop, panic, or abnormal
     /// termination. Proofs produced with disk spilling enabled are
     /// byte-identical to proofs produced in memory.
-    ///
-    /// On CUDA builds this is a no-op (CUDA manages its own device offload).
-    #[cfg_attr(feature = "cuda", allow(unused_mut))]
     pub fn with_disk_spill(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
-        #[cfg(not(feature = "cuda"))]
         self.pcs.inner_mut().set_spill_dir(Some(dir.into()));
-        #[cfg(feature = "cuda")]
-        let _ = dir.into();
         self
     }
 
-    /// Disables disk spilling (forces in-memory LDE storage on CPU).
-    #[cfg_attr(feature = "cuda", allow(unused_mut))]
+    /// Disables disk spilling (forces in-memory / VRAM-only LDE storage).
     pub fn without_disk_spill(mut self) -> Self {
-        #[cfg(not(feature = "cuda"))]
         self.pcs.inner_mut().set_spill_dir(None);
         self
     }
 
-    /// Returns the configured disk-spill directory, if disk spilling is
-    /// enabled on the CPU backend.
+    /// Returns the configured disk-spill directory, if disk spilling is enabled.
     pub fn spill_dir(&self) -> Option<&std::path::Path> {
-        #[cfg(not(feature = "cuda"))]
-        {
-            self.pcs.spill_dir()
-        }
-        #[cfg(feature = "cuda")]
-        {
-            None
-        }
+        self.pcs.spill_dir()
     }
 
     pub fn new(commitment_parameters: CommitmentParameters, fri_parameters: FriParameters) -> Self {
@@ -1026,8 +1687,8 @@ impl GoldilocksBlake3Config {
     /// `cuda` feature only device 0 exists. Configurations on distinct
     /// devices prove concurrently in one process.
     ///
-    /// On CPU builds, setting `MULTI_STARK_SPILL_DIR` to a non-empty path
-    /// enables disk-backed LDE spilling by default; call
+    /// Setting `MULTI_STARK_SPILL_DIR` to a non-empty path enables disk-backed
+    /// LDE spilling by default on both CPU and CUDA builds; call
     /// [`Self::with_disk_spill`] or [`Self::without_disk_spill`] to override.
     pub fn with_device(
         commitment_parameters: CommitmentParameters,
@@ -1047,7 +1708,7 @@ impl GoldilocksBlake3Config {
             );
         }
         #[cfg(feature = "cuda")]
-        let (pcs, _dft) = new_pcs(
+        let (mut pcs, _dft) = new_pcs(
             commitment_parameters,
             fri_parameters,
             device_id.unwrap_or_else(crate::cuda::configured_device),
@@ -1060,7 +1721,6 @@ impl GoldilocksBlake3Config {
             );
             new_pcs(commitment_parameters, fri_parameters)
         };
-        #[cfg(not(feature = "cuda"))]
         if let Some(dir) = std::env::var_os("MULTI_STARK_SPILL_DIR")
             && !dir.is_empty()
         {
@@ -1193,7 +1853,60 @@ impl ProofConfig for GoldilocksBlake3Config {
             crate::witness::TraceSource<Val>,
         )>,
     ) -> (crate::config::Com<Self>, crate::config::PcsData<Self>) {
+        if self.spill_dir().is_some() {
+            let mut materialized = evaluations
+                .into_iter()
+                .map(|(domain, trace)| (domain, trace.materialize(), false));
+            return self
+                .pcs
+                .commit_streaming_with_originals(&mut materialized)
+                .expect("commit_main requires at least one trace");
+        }
         crate::cuda::witness::commit::<ExtVal, Challenger>(&self.pcs, evaluations)
+    }
+
+    #[cfg(feature = "cuda")]
+    fn commit_preprocessed(
+        &self,
+        evaluations: &mut dyn Iterator<
+            Item = (crate::config::Domain<Self>, RowMajorMatrix<Val>, bool),
+        >,
+    ) -> Option<(crate::config::Com<Self>, crate::config::PcsData<Self>)> {
+        if self.spill_dir().is_some() {
+            return self.pcs.commit_streaming_with_originals(evaluations);
+        }
+        let evals: Vec<_> = evaluations.map(|(d, m, _)| (d, m)).collect();
+        if evals.is_empty() {
+            None
+        } else {
+            Some(<InnerPcs as PcsTrait<ExtVal, Challenger>>::commit(
+                &self.pcs, evals,
+            ))
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    fn commit_main_streaming(
+        &self,
+        evaluations: &mut dyn Iterator<
+            Item = (
+                crate::config::Domain<Self>,
+                crate::witness::TraceSource<Val>,
+                bool,
+            ),
+        >,
+    ) -> Option<(crate::config::Com<Self>, crate::config::PcsData<Self>)> {
+        if self.spill_dir().is_some() {
+            let mut materialized = evaluations
+                .map(|(domain, trace, retain_1x)| (domain, trace.materialize(), retain_1x));
+            return self.pcs.commit_streaming_with_originals(&mut materialized);
+        }
+        let evals: Vec<_> = evaluations.map(|(d, t, _)| (d, t)).collect();
+        if evals.is_empty() {
+            None
+        } else {
+            Some(self.commit_main(evals))
+        }
     }
 
     #[cfg(not(feature = "cuda"))]
@@ -1639,6 +2352,30 @@ impl CudaPcsDft<Val> for CudaDft {
     ) -> Option<RowMajorMatrix<Val>> {
         self.try_auxiliary_coset_lde(matrix, added_bits, shift)
     }
+
+    fn coset_lde_spilled(
+        &self,
+        matrix: &RowMajorMatrix<Val>,
+        added_bits: usize,
+        shift: Val,
+        pack: &mut crate::p3_adapter::spill::SpillPackWriter,
+        unique_leaf_hash: Option<(Blake3Domain, Option<&[u8; 32]>)>,
+    ) -> (
+        crate::p3_adapter::spill::SpilledMatrix,
+        Option<Vec<[u8; 32]>>,
+    ) {
+        self.coset_lde_spilled(matrix, added_bits, shift, pack, unique_leaf_hash)
+    }
+
+    fn coset_lde_to_host(
+        &self,
+        matrix: &RowMajorMatrix<Val>,
+        added_bits: usize,
+        shift: Val,
+        unique_leaf_hash: Option<(Blake3Domain, Option<&[u8; 32]>)>,
+    ) -> (RowMajorMatrix<Val>, Option<Vec<[u8; 32]>>) {
+        self.coset_lde_to_host(matrix, added_bits, shift, unique_leaf_hash)
+    }
 }
 
 type Dft = Radix2DitParallel<Val>;
@@ -1913,10 +2650,15 @@ where
                 mmcs: ext_mmcs,
             };
             let pcs_dft = CudaDft::new(dev);
-            DomainMappedPcs::new(
+            let mut inner =
                 crate::cuda::pcs::CudaTwoAdicFriPcs::new(pcs_dft, val_mmcs, inner_parameters)
-                    .with_batching(fri_batching),
-            )
+                    .with_batching(fri_batching);
+            if let Some(dir) = std::env::var_os("MULTI_STARK_SPILL_DIR")
+                && !dir.is_empty()
+            {
+                inner.set_spill_dir(Some(std::path::PathBuf::from(dir)));
+            }
+            DomainMappedPcs::new(inner)
         };
 
         let challenger_seed =
@@ -1973,37 +2715,25 @@ where
         }
     }
 
-    /// Enables disk-backed spilling of committed LDE matrices on the CPU prover.
-    #[cfg_attr(feature = "cuda", allow(unused_mut))]
+    /// Enables disk-backed spilling of committed LDE matrices on both CPU and
+    /// CUDA provers.
     pub fn with_disk_spill(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
-        #[cfg(not(feature = "cuda"))]
         self.pcs
             .inner_mut()
             .inner_mut()
             .set_spill_dir(Some(dir.into()));
-        #[cfg(feature = "cuda")]
-        let _ = dir.into();
         self
     }
 
-    /// Disables disk spilling (forces in-memory LDE storage on CPU).
-    #[cfg_attr(feature = "cuda", allow(unused_mut))]
+    /// Disables disk spilling (forces in-memory / VRAM-only LDE storage).
     pub fn without_disk_spill(mut self) -> Self {
-        #[cfg(not(feature = "cuda"))]
         self.pcs.inner_mut().inner_mut().set_spill_dir(None);
         self
     }
 
-    /// Returns the configured disk-spill directory, if enabled on the CPU backend.
+    /// Returns the configured disk-spill directory, if enabled.
     pub fn spill_dir(&self) -> Option<&std::path::Path> {
-        #[cfg(not(feature = "cuda"))]
-        {
-            self.pcs.spill_dir()
-        }
-        #[cfg(feature = "cuda")]
-        {
-            None
-        }
+        self.pcs.spill_dir()
     }
 }
 
@@ -2395,11 +3125,72 @@ where
             crate::witness::TraceSource<Val>,
         )>,
     ) -> (crate::config::Com<Self>, crate::config::PcsData<Self>) {
+        if self.spill_dir().is_some() {
+            let mut inner_evals = evaluations
+                .into_iter()
+                .map(|(domain, source)| (domain.into_inner(), source.materialize(), false));
+            return self
+                .pcs
+                .inner()
+                .commit_streaming_with_originals(&mut inner_evals)
+                .expect("commit_main requires at least one trace");
+        }
         let inner_evals = evaluations
             .into_iter()
             .map(|(domain, source)| (domain.into_inner(), source))
             .collect();
         crate::cuda::witness::commit::<EF, DomainChallenger<EF>>(self.pcs.inner(), inner_evals)
+    }
+
+    #[cfg(feature = "cuda")]
+    fn commit_preprocessed(
+        &self,
+        evaluations: &mut dyn Iterator<
+            Item = (crate::config::Domain<Self>, RowMajorMatrix<Val>, bool),
+        >,
+    ) -> Option<(crate::config::Com<Self>, crate::config::PcsData<Self>)> {
+        if self.spill_dir().is_some() {
+            let mut inner_evals =
+                evaluations.map(|(domain, mat, retain_1x)| (domain.into_inner(), mat, retain_1x));
+            return self
+                .pcs
+                .inner()
+                .commit_streaming_with_originals(&mut inner_evals);
+        }
+        let evals: Vec<_> = evaluations.map(|(d, m, _)| (d, m)).collect();
+        if evals.is_empty() {
+            None
+        } else {
+            Some(<V6InnerPcs<EF> as PcsTrait<EF, DomainChallenger<EF>>>::commit(&self.pcs, evals))
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    fn commit_main_streaming(
+        &self,
+        evaluations: &mut dyn Iterator<
+            Item = (
+                crate::config::Domain<Self>,
+                crate::witness::TraceSource<Val>,
+                bool,
+            ),
+        >,
+    ) -> Option<(crate::config::Com<Self>, crate::config::PcsData<Self>)> {
+        if self.spill_dir().is_some() {
+            let mut inner_evals = evaluations.map(|(domain, trace, retain_1x)| {
+                (domain.into_inner(), trace.materialize(), retain_1x)
+            });
+            return self
+                .pcs
+                .inner()
+                .commit_streaming_with_originals(&mut inner_evals);
+        }
+        let evals: Vec<_> = evaluations.map(|(d, t, _)| (d, t)).collect();
+        if evals.is_empty() {
+            None
+        } else {
+            Some(self.commit_main(evals))
+        }
     }
 
     #[cfg(feature = "cuda")]
@@ -2725,14 +3516,18 @@ where
                 mmcs: ext_mmcs,
             };
             let pcs_dft = CudaDft::new(dev);
-            DomainMappedPcs::new(
-                crate::cuda::hiding_pcs::HidingCudaTwoAdicFriPcs::new(
-                    pcs_dft,
-                    val_mmcs,
-                    inner_parameters,
-                )
-                .with_batching(fri_batching),
+            let mut inner = crate::cuda::hiding_pcs::HidingCudaTwoAdicFriPcs::new(
+                pcs_dft,
+                val_mmcs,
+                inner_parameters,
             )
+            .with_batching(fri_batching);
+            if let Some(dir) = std::env::var_os("MULTI_STARK_SPILL_DIR")
+                && !dir.is_empty()
+            {
+                inner.set_spill_dir(Some(std::path::PathBuf::from(dir)));
+            }
+            DomainMappedPcs::new(inner)
         };
 
         let challenger_seed = build_v6_zk_challenger_seed::<EF>(
@@ -2820,37 +3615,25 @@ where
         }
     }
 
-    /// Enables disk-backed spilling of committed LDE matrices on the CPU prover.
-    #[cfg_attr(feature = "cuda", allow(unused_mut))]
+    /// Enables disk-backed spilling of committed LDE matrices on both CPU and
+    /// CUDA provers.
     pub fn with_disk_spill(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
-        #[cfg(not(feature = "cuda"))]
         self.pcs
             .inner_mut()
             .inner_mut()
             .set_spill_dir(Some(dir.into()));
-        #[cfg(feature = "cuda")]
-        let _ = dir.into();
         self
     }
 
-    /// Disables disk spilling (forces in-memory LDE storage on CPU).
-    #[cfg_attr(feature = "cuda", allow(unused_mut))]
+    /// Disables disk spilling (forces in-memory / VRAM-only LDE storage).
     pub fn without_disk_spill(mut self) -> Self {
-        #[cfg(not(feature = "cuda"))]
         self.pcs.inner_mut().inner_mut().set_spill_dir(None);
         self
     }
 
-    /// Returns the configured disk-spill directory, if enabled on the CPU backend.
+    /// Returns the configured disk-spill directory, if enabled.
     pub fn spill_dir(&self) -> Option<&std::path::Path> {
-        #[cfg(not(feature = "cuda"))]
-        {
-            self.pcs.spill_dir()
-        }
-        #[cfg(feature = "cuda")]
-        {
-            None
-        }
+        self.pcs.spill_dir()
     }
 }
 
@@ -2919,7 +3702,6 @@ where
             == Some(commit.num_roots())
     }
 
-    #[cfg(feature = "cuda")]
     fn committed_trace(
         &self,
         data: &crate::config::PcsData<Self>,
@@ -2927,24 +3709,7 @@ where
         degree: usize,
     ) -> Option<RowMajorMatrix<Val>> {
         use crate::traits::Pcs as _;
-        use p3_matrix::Matrix;
-        let trace_domain = self.pcs.natural_domain_for_degree(degree);
-        let trace = self
-            .pcs
-            .get_evaluations_on_domain(data, index, trace_domain)
-            .to_row_major_matrix();
-        assert_eq!(trace.height(), degree);
-        Some(trace)
-    }
-
-    #[cfg(not(feature = "cuda"))]
-    fn committed_trace(
-        &self,
-        data: &crate::config::PcsData<Self>,
-        index: usize,
-        degree: usize,
-    ) -> Option<RowMajorMatrix<Val>> {
-        use crate::traits::Pcs as _;
+        use p3_matrix::Matrix as _;
         if let Some(spilled) = data.spilled_original_trace(index) {
             let trace = spilled.read_all();
             assert_eq!(trace.height(), degree);
@@ -2963,7 +3728,6 @@ where
         Some(trace)
     }
 
-    #[cfg(not(feature = "cuda"))]
     fn commit_preprocessed(
         &self,
         evaluations: &mut dyn Iterator<
@@ -2975,24 +3739,6 @@ where
         self.pcs.commit_preprocessed_streaming(&mut inner_evals)
     }
 
-    #[cfg(feature = "cuda")]
-    fn commit_preprocessed(
-        &self,
-        evaluations: &mut dyn Iterator<
-            Item = (crate::config::Domain<Self>, RowMajorMatrix<Val>, bool),
-        >,
-    ) -> Option<(crate::config::Com<Self>, crate::config::PcsData<Self>)> {
-        let evals: Vec<_> = evaluations
-            .map(|(domain, mat, _)| (domain.into_inner(), mat))
-            .collect();
-        if evals.is_empty() {
-            None
-        } else {
-            Some(self.pcs.inner().commit_preprocessed(evals))
-        }
-    }
-
-    #[cfg(not(feature = "cuda"))]
     fn commit_main_streaming(
         &self,
         evaluations: &mut dyn Iterator<
@@ -3019,6 +3765,81 @@ where
         use p3_matrix::Matrix as _;
 
         let dft = Dft::default();
+        #[cfg(feature = "cuda")]
+        if let Some(spill_dir) = self.spill_dir() {
+            use crate::p3_adapter::spill::{SpillPackWriter, SpilledMatrix};
+            use crate::p3_adapter::zk::random_seed;
+            let inner = self.pcs.inner();
+            let cuda_dft = &inner.dft;
+            let mmcs = &inner.mmcs;
+            let salt_seed = random_seed();
+            let leaf_domain = mmcs.leaf_domain();
+            let mut height_counts = std::collections::HashMap::<usize, usize>::new();
+            let mut max_ext_height = 0usize;
+            for (quotient_domain, _, quotient_degree) in &quotients {
+                let ext_height = quotient_domain.size() / *quotient_degree;
+                max_ext_height = max_ext_height.max(ext_height);
+                *height_counts
+                    .entry(ext_height << self.log_blowup)
+                    .or_insert(0) += 1;
+            }
+            assert!(
+                max_ext_height > 0,
+                "commit_quotient_zk requires at least one quotient matrix"
+            );
+            *height_counts
+                .entry(max_ext_height << self.log_blowup)
+                .or_insert(0) += 1;
+            let mut pack = SpillPackWriter::create(spill_dir);
+            let mut spilled: Vec<Option<SpilledMatrix>> = Vec::with_capacity(quotients.len() + 1);
+            let mut prehashed: Vec<Option<Vec<[u8; 32]>>> = Vec::with_capacity(quotients.len() + 1);
+            for (quotient_domain, evaluations, quotient_degree) in quotients {
+                let sliced = shifted_quotient_slices_zk(
+                    &dft,
+                    evaluations,
+                    EvaluationDomain::first_point(&quotient_domain),
+                    quotient_degree,
+                );
+                let lde_height = sliced.height() << self.log_blowup;
+                let leaf_spec = (height_counts.get(&lde_height).copied() == Some(1))
+                    .then_some((leaf_domain, Some(&salt_seed)));
+                let (sp, digests) = cuda_dft.shifted_coeffs_to_lde_spilled(
+                    &sliced,
+                    self.log_blowup,
+                    &mut pack,
+                    leaf_spec,
+                );
+                spilled.push(Some(sp));
+                prehashed.push(digests);
+            }
+            let r_shifted = RowMajorMatrix::new(
+                csprng_field_vec(max_ext_height * self.randomizer_width),
+                self.randomizer_width,
+            );
+            let r_lde_height = max_ext_height << self.log_blowup;
+            let r_leaf_spec = (height_counts.get(&r_lde_height).copied() == Some(1))
+                .then_some((leaf_domain, Some(&salt_seed)));
+            let (r_sp, r_digests) = cuda_dft.shifted_coeffs_to_lde_spilled(
+                &r_shifted,
+                self.log_blowup,
+                &mut pack,
+                r_leaf_spec,
+            );
+            spilled.push(Some(r_sp));
+            prehashed.push(r_digests);
+            pack.flush();
+            let count = spilled.len();
+            return mmcs.commit_cuda_mixed_spilled_with_seed(
+                (0..count).map(|_| None).collect(),
+                (0..count).map(|_| None).collect(),
+                spilled,
+                prehashed,
+                Vec::new(),
+                Vec::new(),
+                salt_seed,
+            );
+        }
+
         let mut ldes: Vec<RowMajorMatrix<Val>> = Vec::with_capacity(quotients.len() + 1);
         let mut max_ext_height = 0usize;
         for (quotient_domain, evaluations, quotient_degree) in quotients {
@@ -3403,6 +4224,630 @@ where
             self.pcs
                 .commit_spilled_ldes_prehashed(spilled_ldes, None, prehashed, salt_seed),
         )
+    }
+
+    #[cfg(feature = "cuda")]
+    fn accelerated_lookup_commit(
+        &self,
+        inputs: &[crate::config::LookupCommitInput<'_, Self>],
+        lookup_challenge: EF,
+        fingerprint_challenge: EF,
+        mut accumulator: EF,
+    ) -> Option<crate::config::AcceleratedLookupCommitment<Self>> {
+        use crate::lookup::{
+            InMemoryChunk, OwnedWindowChunk, TraceRowChunk, apply_first_row_delta_shift,
+            stage_2_trace_chunked,
+        };
+        use crate::p3_adapter::spill::{SpillPackWriter, SpilledMatrix};
+        use crate::p3_adapter::zk::{csprng_field_vec, interleave_random_rows, random_seed};
+        use crate::traits::flatten_to_base;
+        use p3_matrix::Matrix as _;
+
+        enum CpuRowChunk<'a> {
+            InMemory(InMemoryChunk<'a, Val>),
+            Spilled(OwnedWindowChunk<Val>),
+        }
+
+        impl TraceRowChunk<Val> for CpuRowChunk<'_> {
+            #[inline]
+            fn row_pair(&self, local_row: usize) -> (&[Val], &[Val]) {
+                match self {
+                    Self::InMemory(chunk) => chunk.row_pair(local_row),
+                    Self::Spilled(chunk) => chunk.row_pair(local_row),
+                }
+            }
+        }
+
+        enum TraceBacking<'a> {
+            Borrowed(&'a RowMajorMatrix<Val>),
+            Owned(RowMajorMatrix<Val>),
+            Spilled(SpilledMatrix),
+        }
+
+        impl TraceBacking<'_> {
+            fn load_chunk(&self, start: usize, len: usize) -> CpuRowChunk<'_> {
+                match self {
+                    Self::Borrowed(mat) => CpuRowChunk::InMemory(InMemoryChunk::new(mat, start)),
+                    Self::Owned(mat) => CpuRowChunk::InMemory(InMemoryChunk::new(mat, start)),
+                    Self::Spilled(spilled) => CpuRowChunk::Spilled(OwnedWindowChunk::new(
+                        spilled.read_window_with_wrap(start, len),
+                    )),
+                }
+            }
+        }
+
+        let spill_dir = self.spill_dir();
+        let any_unmaterialized = inputs
+            .iter()
+            .any(|input| !input.lookup_values.is_materialized());
+        if spill_dir.is_none() && !any_unmaterialized {
+            return None;
+        }
+
+        let inner = self.pcs.inner();
+        let cuda_dft = &inner.dft;
+        let mmcs = &inner.mmcs;
+        let device_id = mmcs.device_id();
+        let leaf_domain = mmcs.leaf_domain();
+        let (_, total_device_bytes) = crate::cuda::device_memory_info(device_id);
+        let (keep_budget, reserve) = crate::cuda::resident_keep_budget(device_id);
+
+        let num_active = inputs.len();
+        let use_acc_mask = num_active > 1;
+        let ext_d = EF::D;
+        let mu_base = if use_acc_mask {
+            csprng_field_vec((num_active - 1) * ext_d)
+        } else {
+            Vec::new()
+        };
+        let min_height = inputs
+            .iter()
+            .map(|input| input.lookup_values.height())
+            .min()
+            .unwrap_or(0);
+
+        let salt_seed = random_seed();
+        let total_mats = num_active + usize::from(use_acc_mask);
+        let mut height_counts = std::collections::HashMap::<usize, usize>::new();
+        for input in inputs {
+            let lde_height = input.lookup_values.height() << (self.log_blowup + 1);
+            *height_counts.entry(lde_height).or_insert(0) += 1;
+        }
+        if use_acc_mask {
+            let mask_lde_height = min_height << (self.log_blowup + 1);
+            *height_counts.entry(mask_lde_height).or_insert(0) += 1;
+        }
+
+        let mut pack: Option<SpillPackWriter> = None;
+        let mut resident: Vec<Option<crate::cuda::CudaLde>> = Vec::with_capacity(total_mats);
+        let mut host_matrices: Vec<Option<RowMajorMatrix<Val>>> = Vec::with_capacity(total_mats);
+        let mut spilled: Vec<Option<SpilledMatrix>> = Vec::with_capacity(total_mats);
+        let mut prehashed: Vec<Option<Vec<[u8; 32]>>> = Vec::with_capacity(total_mats);
+        let mut intermediates = Vec::with_capacity(num_active);
+        let mut resident_bytes = 0usize;
+        let log_blowup = self.log_blowup;
+        let stage_1_ref = inputs.first().map(|i| i.stage_1.0);
+
+        let mut push_blinded_mat = |mat: &RowMajorMatrix<Val>| {
+            let blinded = interleave_random_rows(mat);
+            let h = blinded.height();
+            let w = blinded.width();
+            let lde_height = h
+                .checked_shl(u32::try_from(log_blowup).expect("LDE blowup exceeds u32"))
+                .expect("v6-zk stage-2 LDE height overflow");
+            let is_unique = height_counts.get(&lde_height).copied() == Some(1);
+            let lde_bytes = lde_height
+                .saturating_mul(w)
+                .saturating_mul(size_of::<Val>());
+            let trace_bytes = h.saturating_mul(w).saturating_mul(size_of::<Val>());
+            let can_use_cuda = CudaDft::supports_cuda_coset_lde(h, w, log_blowup);
+            let projected_resident = resident_bytes.saturating_add(lde_bytes);
+
+            let mut keep_resident = can_use_cuda && projected_resident <= keep_budget;
+            if keep_resident {
+                let plan = cuda_dft.lde_plan(h, w, log_blowup, Val::GENERATOR);
+                let needed = lde_bytes
+                    .saturating_add(trace_bytes)
+                    .saturating_add(plan.scratch_bytes())
+                    .saturating_add(plan.constant_bytes())
+                    .saturating_add(lde_height.saturating_mul(96))
+                    .saturating_add(reserve);
+                if let Some(s1) = stage_1_ref {
+                    mmcs.ensure_device_headroom_batch(&[s1], needed, "lookup");
+                }
+                if needed > crate::cuda::device_memory_info(device_id).0 {
+                    keep_resident = false;
+                }
+            }
+
+            if keep_resident {
+                let lde = cuda_dft.coset_lde_batch_resident(&blinded, log_blowup, Val::GENERATOR);
+                // SAFETY: `coset_lde_batch_resident` completed synchronously.
+                unsafe { lde.release_trace() };
+                resident_bytes = projected_resident;
+                resident.push(Some(lde));
+                host_matrices.push(None);
+                spilled.push(None);
+                prehashed.push(None);
+            } else if crate::cuda::host_spill_headroom(device_id, lde_bytes) {
+                if let Some(s1) = stage_1_ref {
+                    let hint = lde_bytes
+                        .min(total_device_bytes / 2)
+                        .saturating_add(reserve);
+                    mmcs.ensure_device_headroom_batch(&[s1], hint, "lookup");
+                }
+                let leaf_spec = is_unique.then_some((leaf_domain, Some(&salt_seed)));
+                let (host_mat, digests) =
+                    cuda_dft.coset_lde_to_host(&blinded, log_blowup, Val::GENERATOR, leaf_spec);
+                resident.push(None);
+                host_matrices.push(Some(host_mat));
+                spilled.push(None);
+                prehashed.push(digests);
+            } else if let Some(dir) = spill_dir {
+                if let Some(s1) = stage_1_ref {
+                    let hint = lde_bytes
+                        .min(total_device_bytes / 2)
+                        .saturating_add(reserve);
+                    mmcs.ensure_device_headroom_batch(&[s1], hint, "lookup");
+                }
+                let writer = pack.get_or_insert_with(|| SpillPackWriter::create(dir));
+                let leaf_spec = is_unique.then_some((leaf_domain, Some(&salt_seed)));
+                let (sp, digests) = cuda_dft.coset_lde_spilled(
+                    &blinded,
+                    log_blowup,
+                    Val::GENERATOR,
+                    writer,
+                    leaf_spec,
+                );
+                resident.push(None);
+                host_matrices.push(None);
+                spilled.push(Some(sp));
+                prehashed.push(digests);
+            } else {
+                use p3_dft::TwoAdicSubgroupDft as _;
+                use p3_matrix::bitrev::BitReversibleMatrix as _;
+                let cpu = Dft::default();
+                let mut lde = cpu
+                    .coset_lde_batch(blinded, log_blowup, Val::GENERATOR)
+                    .bit_reverse_rows()
+                    .to_row_major_matrix();
+                lde.values.par_iter_mut().for_each(|v| {
+                    *v = Val::from_u64(v.as_canonical_u64());
+                });
+                resident.push(None);
+                host_matrices.push(Some(lde));
+                spilled.push(None);
+                prehashed.push(None);
+            }
+        };
+
+        for (pos, input) in inputs.iter().enumerate() {
+            let circuit = input.circuit;
+            let height = input.lookup_values.height();
+            let (mut stage_2_ext, delta) = if input.lookup_values.is_materialized() {
+                input.lookup_values.stage_2_trace(
+                    circuit.lookup_group_size,
+                    lookup_challenge,
+                    &fingerprint_challenge,
+                )
+            } else if circuit.graph.lookups.is_empty() {
+                (
+                    RowMajorMatrix::new(vec![<EF as PrimeCharacteristicRing>::ZERO; height], 1),
+                    <EF as PrimeCharacteristicRing>::ZERO,
+                )
+            } else {
+                let (s1_data, s1_idx) = input.stage_1;
+                let main_backing = if let Some(sp) = s1_data.spilled_original_trace(s1_idx) {
+                    TraceBacking::Spilled(sp)
+                } else if let Some(owned) = s1_data.clone_in_memory_original_trace(s1_idx) {
+                    TraceBacking::Owned(owned)
+                } else {
+                    TraceBacking::Owned(
+                        self.committed_trace(s1_data, s1_idx, height)
+                            .expect("GoldilocksV6ZkConfig always rebuilds committed traces"),
+                    )
+                };
+                let prep_backing = if circuit.graph.lookup_prefix_uses_preprocessed() {
+                    if let Some(pp) = circuit.preprocessed.as_ref() {
+                        Some(TraceBacking::Borrowed(pp))
+                    } else if let Some((prep_data, prep_idx)) = input.preprocessed {
+                        if let Some(sp) = prep_data.spilled_original_trace(prep_idx) {
+                            Some(TraceBacking::Spilled(sp))
+                        } else if let Some(owned) =
+                            prep_data.clone_in_memory_original_trace(prep_idx)
+                        {
+                            Some(TraceBacking::Owned(owned))
+                        } else {
+                            Some(TraceBacking::Owned(
+                                self.committed_trace(prep_data, prep_idx, height).expect(
+                                    "GoldilocksV6ZkConfig always rebuilds committed traces",
+                                ),
+                            ))
+                        }
+                    } else {
+                        panic!(
+                            "circuit lookup expressions read preprocessed columns, but no preprocessed trace is available"
+                        );
+                    }
+                } else {
+                    None
+                };
+
+                stage_2_trace_chunked(
+                    circuit,
+                    height,
+                    lookup_challenge,
+                    &fingerprint_challenge,
+                    |start, len| main_backing.load_chunk(start, len),
+                    prep_backing
+                        .as_ref()
+                        .map(|prep| move |start, len| prep.load_chunk(start, len)),
+                )
+            };
+
+            accumulator += delta;
+            if use_acc_mask {
+                apply_first_row_delta_shift(&mut stage_2_ext, delta);
+                if pos + 1 < num_active {
+                    let mu =
+                        EF::from_basis_coefficients_slice(&mu_base[pos * ext_d..(pos + 1) * ext_d])
+                            .expect("mask basis slice");
+                    intermediates.push(accumulator + mu);
+                } else {
+                    intermediates.push(accumulator);
+                }
+            } else {
+                intermediates.push(accumulator);
+            }
+
+            let stage_2_base = flatten_to_base::<Val, EF>(stage_2_ext);
+            push_blinded_mat(&stage_2_base);
+        }
+
+        if use_acc_mask {
+            let mask_cols = (num_active - 1) * ext_d;
+            let mut mask_values = Vec::with_capacity(min_height * mask_cols);
+            mask_values.extend_from_slice(&mu_base);
+            if min_height > 1 {
+                mask_values.extend(csprng_field_vec((min_height - 1) * mask_cols));
+            }
+            let mask_mat = RowMajorMatrix::new(mask_values, mask_cols);
+            push_blinded_mat(&mask_mat);
+        }
+
+        if let Some(first) = inputs.first() {
+            first.stage_1.0.release_original_traces();
+        }
+        if let Some(writer) = &mut pack {
+            writer.flush();
+        }
+        let (commitment, data) = mmcs.commit_cuda_mixed_spilled_with_seed(
+            resident,
+            host_matrices,
+            spilled,
+            prehashed,
+            Vec::new(),
+            Vec::new(),
+            salt_seed,
+        );
+        Some((commitment, data, intermediates))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn accelerated_quotient_commit(
+        &self,
+        inputs: &[crate::config::QuotientCommitInput<'_, Self>],
+        alpha: EF,
+    ) -> Option<(crate::config::Com<Self>, crate::config::PcsData<Self>)> {
+        use crate::p3_adapter::pcs::lde_from_shifted_coefficients;
+        use crate::p3_adapter::spill::{SpillPackWriter, SpilledMatrix};
+        use crate::p3_adapter::zk::{csprng_field_vec, random_seed, shifted_quotient_slices_zk};
+        use crate::traits::{EvaluationDomain, Pcs as _, flatten_to_base};
+        use p3_matrix::Matrix as _;
+
+        let spill_dir = self.spill_dir();
+        let can_gpu_eval_any = inputs.iter().any(|input| {
+            input.zk_boundary_mask.is_none()
+                && crate::cuda::quotient_graph_supported(&input.circuit.graph)
+        });
+        if spill_dir.is_none() && !can_gpu_eval_any {
+            return None;
+        }
+
+        let inner = self.pcs.inner();
+        let cuda_dft = &inner.dft;
+        let mmcs = &inner.mmcs;
+        let device_id = mmcs.device_id();
+        let leaf_domain = mmcs.leaf_domain();
+        let cpu_dft = self.pcs.quotient_dft();
+        let log_blowup = self.log_blowup;
+        let (ext_degree, ext_w) = cuda_ext_params::<EF>();
+        let (_, total_device_bytes) = crate::cuda::device_memory_info(device_id);
+        let (keep_budget, reserve) = crate::cuda::resident_keep_budget(device_id);
+
+        let salt_seed = random_seed();
+        let mut height_counts = std::collections::HashMap::<usize, usize>::new();
+        let mut max_ext_height = 0usize;
+        for input in inputs {
+            let q_zk = input.circuit.quotient_degree_for(true);
+            let ext_height = input.quotient_domain.size() / q_zk;
+            max_ext_height = max_ext_height.max(ext_height);
+            *height_counts.entry(ext_height << log_blowup).or_insert(0) += 1;
+        }
+        *height_counts
+            .entry(max_ext_height << log_blowup)
+            .or_insert(0) += 1;
+
+        let total_mats = inputs.len() + 1;
+        let mut pack: Option<SpillPackWriter> = None;
+        let mut resident: Vec<Option<crate::cuda::CudaLde>> = Vec::with_capacity(total_mats);
+        let mut host_matrices: Vec<Option<RowMajorMatrix<Val>>> = Vec::with_capacity(total_mats);
+        let mut spilled: Vec<Option<SpilledMatrix>> = Vec::with_capacity(total_mats);
+        let mut prehashed: Vec<Option<Vec<[u8; 32]>>> = Vec::with_capacity(total_mats);
+        let mut resident_bytes = 0usize;
+
+        let evict_inputs_for =
+            |target: usize, input: &crate::config::QuotientCommitInput<'_, Self>| {
+                let mut datas = vec![input.stage_1.0, input.stage_2.0];
+                if let Some((prep_data, _)) = input.preprocessed {
+                    datas.push(prep_data);
+                }
+                mmcs.ensure_device_headroom_batch(&datas, target, "quotient_zk");
+            };
+
+        let mut push_shifted_coeffs =
+            |sliced: RowMajorMatrix<Val>, evict_datas: &[&crate::config::PcsData<Self>]| {
+                let h = sliced.height();
+                let w = sliced.width();
+                let lde_height = h
+                    .checked_shl(u32::try_from(log_blowup).expect("LDE blowup exceeds u32"))
+                    .expect("v6-zk quotient LDE height overflow");
+                let is_unique = height_counts.get(&lde_height).copied() == Some(1);
+                let lde_bytes = lde_height
+                    .saturating_mul(w)
+                    .saturating_mul(size_of::<Val>());
+                let can_use_cuda = lde_height.is_power_of_two()
+                    && w > 0
+                    && (lde_height.trailing_zeros() as usize)
+                        <= crate::cuda::sppark::max_log_domain();
+                let projected_resident = resident_bytes.saturating_add(lde_bytes);
+
+                let mut keep_resident = can_use_cuda && projected_resident <= keep_budget;
+                if keep_resident {
+                    let plan = cuda_dft.forward_plan(lde_height, w);
+                    let needed = lde_bytes
+                        .saturating_add(plan.scratch_bytes())
+                        .saturating_add(lde_height.saturating_mul(96))
+                        .saturating_add(reserve);
+                    mmcs.ensure_device_headroom_batch(evict_datas, needed, "quotient_zk_lde");
+                    if needed > crate::cuda::device_memory_info(device_id).0 {
+                        keep_resident = false;
+                    }
+                }
+
+                if keep_resident {
+                    let lde = cuda_dft.shifted_coeffs_to_lde_resident(&sliced, log_blowup);
+                    resident_bytes = projected_resident;
+                    resident.push(Some(lde));
+                    host_matrices.push(None);
+                    spilled.push(None);
+                    prehashed.push(None);
+                } else if crate::cuda::host_spill_headroom(device_id, lde_bytes) {
+                    let hint = lde_bytes
+                        .min(total_device_bytes / 2)
+                        .saturating_add(reserve);
+                    mmcs.ensure_device_headroom_batch(evict_datas, hint, "quotient_zk_lde");
+                    let leaf_spec = is_unique.then_some((leaf_domain, Some(&salt_seed)));
+                    let (host_mat, digests) =
+                        cuda_dft.shifted_coeffs_to_lde_to_host(&sliced, log_blowup, leaf_spec);
+                    resident.push(None);
+                    host_matrices.push(Some(host_mat));
+                    spilled.push(None);
+                    prehashed.push(digests);
+                } else if let Some(dir) = spill_dir {
+                    let hint = lde_bytes
+                        .min(total_device_bytes / 2)
+                        .saturating_add(reserve);
+                    mmcs.ensure_device_headroom_batch(evict_datas, hint, "quotient_zk_lde");
+                    let writer = pack.get_or_insert_with(|| SpillPackWriter::create(dir));
+                    let leaf_spec = is_unique.then_some((leaf_domain, Some(&salt_seed)));
+                    let (sp, digests) = cuda_dft
+                        .shifted_coeffs_to_lde_spilled(&sliced, log_blowup, writer, leaf_spec);
+                    resident.push(None);
+                    host_matrices.push(None);
+                    spilled.push(Some(sp));
+                    prehashed.push(digests);
+                } else {
+                    let lde = lde_from_shifted_coefficients(cpu_dft, sliced, log_blowup);
+                    resident.push(None);
+                    host_matrices.push(Some(lde));
+                    spilled.push(None);
+                    prehashed.push(None);
+                }
+            };
+
+        for input in inputs {
+            let circuit = input.circuit;
+            let q_zk = circuit.quotient_degree_for(true);
+            let quotient_size = input.quotient_domain.size();
+            let trace_height = input.trace_domain.size();
+
+            let mut gpu_q_flat: Option<RowMajorMatrix<Val>> = None;
+            if input.zk_boundary_mask.is_none()
+                && crate::cuda::quotient_graph_supported(&circuit.graph)
+            {
+                let quotient_buf = quotient_size
+                    .saturating_mul(ext_degree)
+                    .saturating_mul(size_of::<Val>());
+                let selectors_buf = quotient_size.saturating_mul(4 * size_of::<Val>());
+                let mut staging_cap = 256usize << 20;
+                let eval_needed = |cap: usize| {
+                    quotient_buf
+                        .saturating_add(selectors_buf)
+                        .saturating_add(cap.saturating_mul(2))
+                        .saturating_add(reserve)
+                };
+                evict_inputs_for(eval_needed(staging_cap), input);
+                let free_now = crate::cuda::device_memory_info(device_id).0;
+                let admitted = if free_now >= eval_needed(staging_cap) {
+                    true
+                } else {
+                    staging_cap = 32usize << 20;
+                    free_now >= eval_needed(staging_cap)
+                };
+                if admitted {
+                    let selectors = cuda_coset_selectors(
+                        input.trace_domain.into_inner(),
+                        input.quotient_domain.into_inner(),
+                    );
+                    let mut powers = Vec::with_capacity(input.constraint_count);
+                    let mut power = <EF as PrimeCharacteristicRing>::ONE;
+                    for _ in 0..input.constraint_count {
+                        powers.push(power);
+                        power *= alpha;
+                    }
+                    powers.reverse();
+                    let mut alpha_flat = Vec::with_capacity(ext_degree * input.constraint_count);
+                    for coordinate in 0..ext_degree {
+                        alpha_flat.extend(powers.iter().map(|value| {
+                            <EF as BasedVectorSpace<Val>>::as_basis_coefficients_slice(value)
+                                [coordinate]
+                        }));
+                    }
+                    let n = Val::from_usize(trace_height);
+                    let generator = Val::two_adic_generator(trace_height.ilog2() as usize);
+                    let normalization = (n * generator).inverse();
+                    let delta: Vec<Val> = (0..ext_degree)
+                        .map(|c| {
+                            (input.lookup_publics[3 * ext_degree + c]
+                                - input.lookup_publics[2 * ext_degree + c])
+                                * normalization
+                        })
+                        .collect();
+                    let next_step = quotient_size / trace_height;
+                    gpu_q_flat =
+                        mmcs.with_matrix_source(input.stage_1.0, input.stage_1.1, |main| {
+                            mmcs.with_matrix_source(input.stage_2.0, input.stage_2.1, |stage2| {
+                                let run =
+                                    |prep: Option<crate::cuda::mmcs::CudaMatrixSource<'_>>| {
+                                        crate::cuda::quotient_eval_blocks(
+                                            cuda_dft,
+                                            &circuit.graph,
+                                            prep,
+                                            main,
+                                            stage2,
+                                            &input.lookup_publics,
+                                            selectors,
+                                            &alpha_flat,
+                                            &delta,
+                                            ext_w,
+                                            ext_degree,
+                                            quotient_size,
+                                            next_step,
+                                            circuit.lookup_group_size,
+                                            staging_cap,
+                                            false,
+                                        )
+                                        .1
+                                    };
+                                match input.preprocessed {
+                                    Some((data, idx)) => {
+                                        mmcs.with_matrix_source(data, idx, |p| run(Some(p)))
+                                    }
+                                    None => run(None),
+                                }
+                            })
+                        });
+                }
+            }
+
+            let quotient_flat = gpu_q_flat.unwrap_or_else(|| {
+                let preprocessed_evals = input.preprocessed.map(|(data, idx)| {
+                    self.pcs
+                        .get_evaluations_on_domain(data, idx, input.quotient_domain)
+                });
+                let stage_1_evals = self.pcs.get_evaluations_on_domain(
+                    input.stage_1.0,
+                    input.stage_1.1,
+                    input.quotient_domain,
+                );
+                let stage_2_evals = self.pcs.get_evaluations_on_domain(
+                    input.stage_2.0,
+                    input.stage_2.1,
+                    input.quotient_domain,
+                );
+                let mask_evals_owned = input.zk_boundary_mask.map(|mask| {
+                    (
+                        self.pcs.get_evaluations_on_domain(
+                            mask.data,
+                            mask.matrix_index,
+                            input.quotient_domain,
+                        ),
+                        mask.active_pos,
+                        mask.num_active,
+                    )
+                });
+                let mask_ref = mask_evals_owned
+                    .as_ref()
+                    .map(|(evals, active_pos, num_active)| (evals, *active_pos, *num_active));
+                let q_vals = crate::prover::quotient_values::<Self>(
+                    circuit,
+                    &input.lookup_publics,
+                    input.trace_domain,
+                    input.quotient_domain,
+                    &preprocessed_evals,
+                    &stage_1_evals,
+                    &stage_2_evals,
+                    mask_ref,
+                    alpha,
+                    input.constraint_count,
+                );
+                drop(mask_evals_owned);
+                drop(preprocessed_evals);
+                drop(stage_1_evals);
+                drop(stage_2_evals);
+                flatten_to_base::<Val, EF>(RowMajorMatrix::new_col(q_vals))
+            });
+
+            let sliced = shifted_quotient_slices_zk(
+                cpu_dft,
+                quotient_flat,
+                EvaluationDomain::first_point(&input.quotient_domain),
+                q_zk,
+            );
+            let mut evict_datas = vec![input.stage_1.0, input.stage_2.0];
+            if let Some((prep_data, _)) = input.preprocessed {
+                evict_datas.push(prep_data);
+            }
+            push_shifted_coeffs(sliced, &evict_datas);
+        }
+
+        let r_shifted = RowMajorMatrix::new(
+            csprng_field_vec(max_ext_height * self.randomizer_width),
+            self.randomizer_width,
+        );
+        let mut r_evict = Vec::new();
+        if let Some(first) = inputs.first() {
+            r_evict.push(first.stage_1.0);
+            r_evict.push(first.stage_2.0);
+            if let Some((prep_data, _)) = first.preprocessed {
+                r_evict.push(prep_data);
+            }
+        }
+        push_shifted_coeffs(r_shifted, &r_evict);
+
+        if let Some(writer) = &mut pack {
+            writer.flush();
+        }
+        Some(mmcs.commit_cuda_mixed_spilled_with_seed(
+            resident,
+            host_matrices,
+            spilled,
+            prehashed,
+            Vec::new(),
+            Vec::new(),
+            salt_seed,
+        ))
     }
 
     fn canonicalize_proof(proof: &mut crate::prover::Proof<Self>) {

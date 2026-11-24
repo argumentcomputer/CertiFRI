@@ -244,6 +244,7 @@ struct SpilledHidingMerkleTree {
     original_traces: Mutex<Vec<Option<SpilledMatrix>>>,
 }
 
+#[cfg_attr(feature = "cuda", allow(dead_code))]
 impl SpilledHidingMerkleTree {
     fn build_with_prehashed(
         matrices: Vec<SpilledMatrix>,
@@ -569,6 +570,7 @@ fn compress_and_inject_streaming_salted(
 /// Prover data for [`HidingSpillableMmcs`].
 pub struct HidingSpillableMmcsData<M>(HidingSpillableMmcsDataInner<M>);
 
+#[cfg_attr(feature = "cuda", allow(dead_code))]
 enum HidingSpillableMmcsDataInner<M> {
     InMemory {
         tree: FastInMemoryHidingMerkleTree<M>,
@@ -581,6 +583,7 @@ enum HidingSpillableMmcsDataInner<M> {
     },
 }
 
+#[cfg_attr(feature = "cuda", allow(dead_code))]
 impl<M> HidingSpillableMmcsData<M> {
     pub const fn is_spilled(&self) -> bool {
         matches!(self.0, HidingSpillableMmcsDataInner::Spilled { .. })
@@ -894,6 +897,7 @@ pub struct HidingSpillableTwoAdicFriPcs<Dft, FriMmcs> {
     batching: FriBatching,
 }
 
+#[cfg_attr(feature = "cuda", allow(dead_code))]
 impl<Dft, FriMmcs> HidingSpillableTwoAdicFriPcs<Dft, FriMmcs> {
     pub const fn new(dft: Dft, mmcs: HidingSpillableMmcs, fri: FriParameters<FriMmcs>) -> Self {
         Self {

@@ -929,9 +929,9 @@ struct ExtOps;
 template <>
 struct ExtOps<Ext2> {
     static constexpr size_t D = 2;
-    __device__ __forceinline__ static Ext2 zero() { return {0, 0}; }
-    __device__ __forceinline__ static Ext2 one() { return {1, 0}; }
-    __device__ __forceinline__ static Ext2 from_base(uint64_t x) { return {x, 0}; }
+    __device__ __host__ __forceinline__ static Ext2 zero() { return {0, 0}; }
+    __device__ __host__ __forceinline__ static Ext2 one() { return {1, 0}; }
+    __device__ __host__ __forceinline__ static Ext2 from_base(uint64_t x) { return {x, 0}; }
     __device__ __host__ __forceinline__ static Ext2 load(const uint64_t* p) {
         return {p[0], p[1]};
     }
@@ -1003,9 +1003,9 @@ struct ExtOps<Ext2> {
 template <>
 struct ExtOps<Ext3> {
     static constexpr size_t D = 3;
-    __device__ __forceinline__ static Ext3 zero() { return {0, 0, 0}; }
-    __device__ __forceinline__ static Ext3 one() { return {1, 0, 0}; }
-    __device__ __forceinline__ static Ext3 from_base(uint64_t x) { return {x, 0, 0}; }
+    __device__ __host__ __forceinline__ static Ext3 zero() { return {0, 0, 0}; }
+    __device__ __host__ __forceinline__ static Ext3 one() { return {1, 0, 0}; }
+    __device__ __host__ __forceinline__ static Ext3 from_base(uint64_t x) { return {x, 0, 0}; }
     __device__ __host__ __forceinline__ static Ext3 load(const uint64_t* p) {
         return {p[0], p[1], p[2]};
     }
@@ -1104,10 +1104,12 @@ struct ResidentFriWorkspace {
     // of its size; the workspace does not own it.
     uint64_t* inv_denoms=nullptr; const uint64_t* coset=nullptr; uint64_t* output=nullptr;
     uint64_t* alpha=nullptr; uint64_t* interpolation_partials=nullptr;
+    uint64_t* chunk_buf=nullptr;
     size_t inv_count=0; size_t coset_count=0;
     size_t output_capacity=0; size_t alpha_capacity=0,partial_capacity=0;
+    size_t chunk_capacity=0;
     size_t ext_degree=2;
-    ~ResidentFriWorkspace(){if(inv_denoms)cudaFree(inv_denoms);if(output)cudaFree(output);if(alpha)cudaFree(alpha);if(interpolation_partials)cudaFree(interpolation_partials);}
+    ~ResidentFriWorkspace(){if(inv_denoms)cudaFree(inv_denoms);if(output)cudaFree(output);if(alpha)cudaFree(alpha);if(interpolation_partials)cudaFree(interpolation_partials);if(chunk_buf)cudaFree(chunk_buf);}
 };
 
 struct InterpolationTask {
@@ -1256,6 +1258,126 @@ __global__ void accumulate_reduced_opening_t(Ext* output,const ResidentLde* lde,
         }
         const Ext term=Ops::mul(alpha_offset,Ops::mul(Ops::sub(reduced_y,compressed),inv_denoms[row],ext_w),ext_w);
         output[row]=Ops::add(output[row],term);
+    }
+}
+
+template <typename Ext>
+__global__ void interpolate_chunk_tile_t(
+    const uint64_t* chunk_values, const uint64_t* coset,
+    const Ext* inv0, const Ext* inv1,
+    Ext* partial0, Ext* partial1,
+    size_t width, size_t row_start, size_t row_count) {
+    using Ops = ExtOps<Ext>;
+    __shared__ Ext sums0[INTERPOLATION_LANES][INTERPOLATION_COLUMNS];
+    __shared__ Ext sums1[INTERPOLATION_LANES][INTERPOLATION_COLUMNS];
+    __shared__ Ext weights0[INTERPOLATION_ROWS];
+    __shared__ Ext weights1[INTERPOLATION_ROWS];
+    const size_t row_tile = static_cast<size_t>(blockIdx.x);
+    const size_t local_begin = row_tile * INTERPOLATION_ROWS;
+    const size_t local_end = local_begin + INTERPOLATION_ROWS < row_count
+                                 ? local_begin + INTERPOLATION_ROWS
+                                 : row_count;
+    const size_t column = static_cast<size_t>(blockIdx.y) * INTERPOLATION_COLUMNS + threadIdx.x;
+    const size_t linear_thread = threadIdx.y * INTERPOLATION_COLUMNS + threadIdx.x;
+    for (size_t offset = linear_thread; local_begin + offset < local_end;
+         offset += INTERPOLATION_COLUMNS * INTERPOLATION_LANES) {
+        const size_t global_row = row_start + local_begin + offset;
+        const uint64_t x = coset[global_row];
+        weights0[offset] = Ops::canonical_scale(inv0[global_row], x);
+        if (inv1) weights1[offset] = Ops::canonical_scale(inv1[global_row], x);
+    }
+    __syncthreads();
+    Ext sum0 = Ops::zero(), sum1 = Ops::zero();
+    if (column < width) {
+        for (size_t local = local_begin + threadIdx.y; local < local_end;
+             local += INTERPOLATION_LANES) {
+            const uint64_t value = chunk_values[local * width + column];
+            sum0 = Ops::canonical_fmadd_base(sum0, weights0[local - local_begin], value);
+            if (inv1) sum1 = Ops::canonical_fmadd_base(sum1, weights1[local - local_begin], value);
+        }
+    }
+    sums0[threadIdx.y][threadIdx.x] = sum0;
+    sums1[threadIdx.y][threadIdx.x] = sum1;
+    __syncthreads();
+    for (unsigned int stride = INTERPOLATION_LANES / 2; stride; stride >>= 1) {
+        if (threadIdx.y < stride) {
+            sums0[threadIdx.y][threadIdx.x] = Ops::canonical_add_ext(
+                sums0[threadIdx.y][threadIdx.x], sums0[threadIdx.y + stride][threadIdx.x]);
+            if (inv1)
+                sums1[threadIdx.y][threadIdx.x] = Ops::canonical_add_ext(
+                    sums1[threadIdx.y][threadIdx.x], sums1[threadIdx.y + stride][threadIdx.x]);
+        }
+        __syncthreads();
+    }
+    if (threadIdx.y == 0 && column < width) {
+        const size_t at = row_tile * width + column;
+        partial0[at] = sums0[0][threadIdx.x];
+        if (inv1) partial1[at] = sums1[0][threadIdx.x];
+    }
+}
+
+template <typename Ext>
+__global__ void accumulate_chunk_interp_partials_t(
+    Ext* output, const Ext* partials, size_t partial_rows, size_t width) {
+    using Ops = ExtOps<Ext>;
+    const size_t column = static_cast<size_t>(blockIdx.x);
+    if (column >= width) return;
+    extern __shared__ uint64_t shared_raw[];
+    Ext* sums = reinterpret_cast<Ext*>(shared_raw);
+    Ext sum = Ops::zero();
+    for (size_t row = threadIdx.x; row < partial_rows; row += blockDim.x) {
+        sum = Ops::canonical_add_ext(sum, partials[row * width + column]);
+    }
+    sums[threadIdx.x] = sum;
+    __syncthreads();
+    for (unsigned int stride = blockDim.x / 2; stride; stride >>= 1) {
+        if (threadIdx.x < stride) {
+            sums[threadIdx.x] = Ops::canonical_add_ext(sums[threadIdx.x], sums[threadIdx.x + stride]);
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) {
+        output[column] = Ops::canonical_add_ext(output[column], sums[0]);
+    }
+}
+
+template <typename Ext>
+__global__ void scale_chunk_interp_outputs_t(
+    Ext* output, size_t width, Ext scale, uint64_t ext_w) {
+    using Ops = ExtOps<Ext>;
+    const size_t col = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (col < width) {
+        output[col] = Ops::canonical_mul_ext(output[col], scale, ext_w);
+    }
+}
+
+template <typename Ext>
+__global__ void accumulate_reduced_opening_chunk_t(
+    Ext* output, const uint64_t* chunk_values, size_t width,
+    const Ext* inv_denoms_base, const Ext* alpha_powers,
+    size_t row_start, size_t row_count,
+    size_t inv0, Ext y0, Ext off0,
+    bool has_second, size_t inv1, Ext y1, Ext off1,
+    uint64_t ext_w) {
+    using Ops = ExtOps<Ext>;
+    for (size_t local = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         local < row_count; local += static_cast<size_t>(gridDim.x) * blockDim.x) {
+        const size_t row = row_start + local;
+        Ext compressed = Ops::zero();
+        const uint64_t* row_ptr = chunk_values + local * width;
+        for (size_t column = 0; column < width; ++column) {
+            compressed = Ops::fmadd_base(compressed, alpha_powers[column], row_ptr[column]);
+        }
+        Ext acc = output[row];
+        const Ext term0 = Ops::mul(
+            off0, Ops::mul(Ops::sub(y0, compressed), inv_denoms_base[inv0 + row], ext_w), ext_w);
+        acc = Ops::add(acc, term0);
+        if (has_second) {
+            const Ext term1 = Ops::mul(
+                off1, Ops::mul(Ops::sub(y1, compressed), inv_denoms_base[inv1 + row], ext_w), ext_w);
+            acc = Ops::add(acc, term1);
+        }
+        output[row] = acc;
     }
 }
 
@@ -1653,6 +1775,7 @@ struct QuotientPackTask {
     const QuotientHostSource* sources;
     size_t source_count;
     size_t storage_start;
+    size_t block_base;
     size_t begin;
     size_t end;
     size_t quotient_size;
@@ -1678,12 +1801,14 @@ static void* pack_quotient_rows(void* opaque) {
         const size_t row=reverse_low_bits_host(storage_row,task.log_size);
         const size_t next_storage=reverse_low_bits_host(
             (row+task.next_step)&(task.quotient_size-1),task.log_size);
+        const size_t local_storage=storage_row-task.block_base;
+        const size_t local_next=next_storage-task.block_base;
         for(size_t i=0;i<task.source_count;++i){const auto& source=task.sources[i];
             const size_t row_stride=source.width*(source.needs_next?2:1);
             uint64_t* out=task.destination+source.offset+local*row_stride;
-            std::memcpy(out,source.values+storage_row*source.width,source.width*sizeof(uint64_t));
+            std::memcpy(out,source.values+local_storage*source.width,source.width*sizeof(uint64_t));
             if(source.needs_next)
-                std::memcpy(out+source.width,source.values+next_storage*source.width,source.width*sizeof(uint64_t));
+                std::memcpy(out+source.width,source.values+local_next*source.width,source.width*sizeof(uint64_t));
         }
     }
     return nullptr;
@@ -1855,6 +1980,29 @@ __global__ void gather_shifted_quotient_slices(
         const size_t column = index - row * width;
         const size_t chunk = column / extension_degree;
         const size_t coordinate = column - chunk * extension_degree;
+        const size_t coefficient = chunk * trace_height + row;
+        const size_t negated = (quotient_height - coefficient) & (quotient_height - 1);
+        const size_t source = reverse_low_bits(negated, log_height);
+        output[index] = goldilocks_mul(
+            transformed[source * extension_degree + coordinate], weights[chunk]);
+    }
+}
+
+__global__ void gather_shifted_quotient_slices_panel(
+    uint64_t* output, const uint64_t* transformed, const uint64_t* weights,
+    size_t quotient_height, size_t trace_height, size_t chunk_start,
+    size_t chunk_count, size_t extension_degree) {
+    const size_t width = chunk_count * extension_degree;
+    const size_t elements = trace_height * width;
+    const unsigned int log_height = static_cast<unsigned int>(__ffsll(quotient_height) - 1);
+    const size_t grid_stride = static_cast<size_t>(blockDim.x) * gridDim.x;
+    for (size_t index = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         index < elements; index += grid_stride) {
+        const size_t row = index / width;
+        const size_t column = index - row * width;
+        const size_t local_chunk = column / extension_degree;
+        const size_t chunk = chunk_start + local_chunk;
+        const size_t coordinate = column - local_chunk * extension_degree;
         const size_t coefficient = chunk * trace_height + row;
         const size_t negated = (quotient_height - coefficient) & (quotient_height - 1);
         const size_t source = reverse_low_bits(negated, log_height);
@@ -2573,6 +2721,68 @@ extern "C" int multi_stark_cuda_coset_lde_create(
         plan, nullptr, nullptr);
 }
 
+extern "C" int multi_stark_cuda_shifted_coeffs_to_lde(
+    int device_id, void** handle, const uint64_t* shifted_coeffs,
+    size_t coeff_height, size_t width, size_t log_blowup,
+    const MultiStarkNttPlan* lde_plan) {
+    if (handle == nullptr || shifted_coeffs == nullptr || lde_plan == nullptr ||
+        !is_power_of_two(coeff_height) || width == 0 ||
+        log_blowup >= sizeof(size_t) * 8 ||
+        coeff_height > (SIZE_MAX >> log_blowup)) {
+        return static_cast<int>(cudaErrorInvalidValue);
+    }
+    *handle = nullptr;
+    const size_t lde_height = coeff_height << log_blowup;
+    if (!product_fits(lde_height, width)) {
+        return static_cast<int>(cudaErrorInvalidValue);
+    }
+    cudaError_t status = cudaSetDevice(device_id);
+    if (status != cudaSuccess) {
+        return static_cast<int>(status);
+    }
+    ResidentLde* lde = nullptr;
+    status = create_resident_lde(&lde);
+    if (status != cudaSuccess) return static_cast<int>(status);
+    lde->height = lde_height;
+    lde->width = width;
+    const size_t coeff_elements = coeff_height * width;
+    const size_t lde_elements = lde_height * width;
+    const size_t coeff_bytes = coeff_elements * sizeof(uint64_t);
+    const size_t tail_bytes = (lde_elements - coeff_elements) * sizeof(uint64_t);
+    status = cudaMalloc(reinterpret_cast<void**>(&lde->values),
+                        lde_elements * sizeof(uint64_t));
+    if (status == cudaSuccess && tail_bytes != 0) {
+        status = cudaMemsetAsync(lde->values + coeff_elements, 0, tail_bytes,
+                                 cudaStreamPerThread);
+    }
+    if (status == cudaSuccess) {
+        if (coeff_bytes >= (size_t(8) << 20)) {
+            status = staged_upload(lde->values, shifted_coeffs, coeff_bytes);
+        } else {
+            status = cudaMemcpyAsync(lde->values, shifted_coeffs, coeff_bytes,
+                                     cudaMemcpyHostToDevice, cudaStreamPerThread);
+        }
+    }
+    if (status == cudaSuccess) {
+        canonicalize_goldilocks<<<blocks_for(coeff_elements), THREADS, 0,
+                                  cudaStreamPerThread>>>(
+            lde->values, coeff_elements);
+        status = cudaGetLastError();
+    }
+    if (status == cudaSuccess) {
+        status = forward_in_place(device_id, lde->values, lde_height, width, lde_plan);
+    }
+    if (status == cudaSuccess) {
+        status = cudaStreamSynchronize(cudaStreamPerThread);
+    }
+    if (status != cudaSuccess) {
+        destroy_resident_lde(lde);
+        return static_cast<int>(status);
+    }
+    *handle = lde;
+    return static_cast<int>(cudaSuccess);
+}
+
 // Context ownership transfers only on success. Its lifetime covers trace
 // release and LDE eviction because lookup recovery still needs original rows.
 extern "C" int multi_stark_cuda_coset_lde_generate(
@@ -2679,6 +2889,38 @@ extern "C" int multi_stark_cuda_lde_copy_to_host(int device_id,
     status = cudaMemcpy(output, lde->values,
                         bytes,
                         cudaMemcpyDeviceToHost);
+    return static_cast<int>(status);
+}
+
+extern "C" int multi_stark_cuda_lde_copy_rows_to_host(int device_id,
+                                                       const void* handle,
+                                                       uint64_t* output,
+                                                       size_t start_row,
+                                                       size_t num_rows) {
+    if (handle == nullptr || (output == nullptr && num_rows != 0)) {
+        return static_cast<int>(cudaErrorInvalidValue);
+    }
+    const ResidentLde* lde = static_cast<const ResidentLde*>(handle);
+    if (start_row > lde->height || num_rows > lde->height - start_row) {
+        return static_cast<int>(cudaErrorInvalidValue);
+    }
+    if (num_rows == 0 || lde->width == 0) {
+        return static_cast<int>(cudaSuccess);
+    }
+    cudaError_t status = cudaSetDevice(device_id);
+    if (status != cudaSuccess) {
+        return static_cast<int>(status);
+    }
+    const uint64_t* src = lde->values + start_row * lde->width;
+    const size_t bytes = num_rows * lde->width * sizeof(uint64_t);
+    if (bytes >= (size_t(8) << 20)) {
+        return static_cast<int>(staged_download(output, src, bytes));
+    }
+    status = cudaMemcpyAsync(output, src, bytes, cudaMemcpyDeviceToHost,
+                             cudaStreamPerThread);
+    if (status == cudaSuccess) {
+        status = cudaStreamSynchronize(cudaStreamPerThread);
+    }
     return static_cast<int>(status);
 }
 
@@ -3219,7 +3461,7 @@ int quotient_lde_mixed_impl(
         QuotientPackTask tasks[64];
         bool launched[64]={};
         for(size_t worker=0;worker<workers;++worker){
-            tasks[worker]={destination,host_sources,host_source_count,storage_start,
+            tasks[worker]={destination,host_sources,host_source_count,storage_start,0,
                 count*worker/workers,count*(worker+1)/workers,quotient_size,next_step,log_size};
             if(pthread_create(&threads[worker],nullptr,pack_quotient_rows,&tasks[worker])==0)
                 launched[worker]=true;
@@ -3433,6 +3675,445 @@ extern "C" int multi_stark_cuda_quotient_lde_mixed_ext3(
         vanishing_step, alpha, constraint_count, delta, 0, quotient_size,
         next_step, quotient_degree, log_blowup, quotient_plan, lde_plan,
         slice_weights);
+}
+
+typedef int (*QuotientBlockLoader)(
+    void* context, size_t block_index,
+    const uint64_t** prep_block, const uint64_t** main_block,
+    const uint64_t** stage2_block);
+
+namespace {
+template <typename Ext>
+int quotient_eval_blocks_impl(
+    int device_id, void** transformed_handle, uint64_t* host_values_output,
+    const void* nodes, size_t node_count, size_t slot_count,
+    const uint32_t* roots, size_t root_count,
+    const void* lookups, size_t lookup_count, const uint32_t* lookup_args,
+    size_t lookup_arg_count, size_t group_size,
+    const void* preprocessed_handle, size_t preprocessed_width, bool preprocessed_callback,
+    const void* main_handle, size_t main_width, bool main_callback,
+    const void* stage2_handle, size_t stage2_width, bool stage2_callback,
+    void* loader_ctx, QuotientBlockLoader loader,
+    const uint64_t* publics, size_t public_count,
+    uint64_t coset_shift, uint64_t coset_generator, uint64_t trace_last,
+    uint64_t vanishing_start, uint64_t vanishing_step, const uint64_t* alpha,
+    size_t constraint_count, const uint64_t* delta, uint64_t ext_w,
+    size_t quotient_size, size_t next_step, size_t max_staging_bytes,
+    const MultiStarkNttPlan* quotient_plan) {
+    constexpr size_t D = ExtOps<Ext>::D;
+    const bool want_transformed = (quotient_plan != nullptr);
+    if ((want_transformed && transformed_handle == nullptr) ||
+        (!want_transformed && host_values_output == nullptr) ||
+        nodes == nullptr || roots == nullptr || publics == nullptr ||
+        alpha == nullptr || delta == nullptr || node_count == 0 ||
+        slot_count == 0 || group_size == 0 || !is_power_of_two(quotient_size) ||
+        !is_power_of_two(next_step) || next_step > quotient_size ||
+        main_width == 0 || stage2_width == 0 ||
+        ((main_handle != nullptr) == main_callback) ||
+        ((stage2_handle != nullptr) == stage2_callback) ||
+        (preprocessed_handle != nullptr && preprocessed_callback) ||
+        (preprocessed_callback && preprocessed_width == 0) ||
+        ((preprocessed_callback || main_callback || stage2_callback) && loader == nullptr) ||
+        (lookup_count != 0 && (lookups == nullptr || lookup_args == nullptr))) {
+        return static_cast<int>(cudaErrorInvalidValue);
+    }
+    if (want_transformed) *transformed_handle = nullptr;
+
+    const auto* prep_resident = static_cast<const ResidentLde*>(preprocessed_handle);
+    const auto* main_resident = static_cast<const ResidentLde*>(main_handle);
+    const auto* stage2_resident = static_cast<const ResidentLde*>(stage2_handle);
+    if ((prep_resident && prep_resident->height < quotient_size) ||
+        (main_resident && main_resident->height < quotient_size) ||
+        (stage2_resident && stage2_resident->height < quotient_size)) {
+        return static_cast<int>(cudaErrorInvalidValue);
+    }
+
+    cudaError_t status = cudaSetDevice(device_id);
+    auto align8 = [](size_t n) { return (n + 7) & ~size_t(7); };
+    size_t bytes = 0;
+    auto reserve = [&](size_t n) { size_t at = bytes; bytes += align8(n); return at; };
+    const size_t on = reserve(node_count * sizeof(ConstraintNode));
+    const size_t oroot = reserve(root_count * sizeof(uint32_t));
+    const size_t ol = reserve(lookup_count * sizeof(ConstraintLookup));
+    const size_t oa = reserve(lookup_arg_count * sizeof(uint32_t));
+    const size_t op = reserve(public_count * sizeof(uint64_t));
+    const size_t os = reserve(4 * quotient_size * sizeof(uint64_t));
+    const size_t oalpha = reserve(D * constraint_count * sizeof(uint64_t));
+    const size_t od = reserve(D * sizeof(uint64_t));
+    uint8_t* allocation = nullptr;
+    uint64_t* quotient = nullptr;
+    if (status == cudaSuccess) status = cudaMalloc(reinterpret_cast<void**>(&allocation), bytes);
+    if (status == cudaSuccess) status = cudaMalloc(reinterpret_cast<void**>(&quotient), D * quotient_size * sizeof(uint64_t));
+    auto cp = [&](size_t at, const void* src, size_t n) {
+        if (status == cudaSuccess && n != 0)
+            status = cudaMemcpy(allocation + at, src, n, cudaMemcpyHostToDevice);
+    };
+    cp(on, nodes, node_count * sizeof(ConstraintNode));
+    cp(oroot, roots, root_count * sizeof(uint32_t));
+    cp(ol, lookups, lookup_count * sizeof(ConstraintLookup));
+    cp(oa, lookup_args, lookup_arg_count * sizeof(uint32_t));
+    cp(op, publics, public_count * sizeof(uint64_t));
+    cp(oalpha, alpha, D * constraint_count * sizeof(uint64_t));
+    cp(od, delta, D * sizeof(uint64_t));
+    auto* dn = reinterpret_cast<ConstraintNode*>(allocation + on);
+    auto* dr = reinterpret_cast<uint32_t*>(allocation + oroot);
+    auto* dl = reinterpret_cast<ConstraintLookup*>(allocation + ol);
+    auto* da = reinterpret_cast<uint32_t*>(allocation + oa);
+    auto* dp = reinterpret_cast<uint64_t*>(allocation + op);
+    auto* ds = reinterpret_cast<uint64_t*>(allocation + os);
+    auto* dal = reinterpret_cast<uint64_t*>(allocation + oalpha);
+    auto* dd = reinterpret_cast<uint64_t*>(allocation + od);
+    if (status == cudaSuccess) {
+        status = generate_coset_selectors(ds, quotient_size, next_step,
+            coset_shift, coset_generator, trace_last, vanishing_start, vanishing_step);
+    }
+
+    size_t budget = 0;
+    if (status == cudaSuccess) status = quotient_shared_memory_budget(device_id, &budget);
+    size_t tile = budget / (slot_count * sizeof(uint64_t));
+    const bool global = tile < 28;
+    if (global) tile = 128;
+    else if (tile > 32) tile = 32;
+    const size_t block_cap = global ? 256 : 1024;
+    const size_t dynamic_shared = global ? 0 : slot_count * tile * sizeof(uint64_t);
+    if (status == cudaSuccess && dynamic_shared > 48 * 1024)
+        status = configure_quotient_shared_memory_t<Ext>(device_id, dynamic_shared);
+
+    const bool any_callback = preprocessed_callback || main_callback || stage2_callback;
+    if (!any_callback) {
+        uint64_t* scratch = nullptr;
+        size_t blocks = (quotient_size + tile - 1) / tile;
+        if (blocks > block_cap) blocks = block_cap;
+        if (status == cudaSuccess && global)
+            status = cudaMalloc(reinterpret_cast<void**>(&scratch), blocks * slot_count * tile * sizeof(uint64_t));
+        if (status == cudaSuccess) {
+            evaluate_quotient_t<Ext><<<static_cast<unsigned int>(blocks), static_cast<unsigned int>(tile), dynamic_shared>>>(
+                quotient, dn, node_count, slot_count, dr, root_count, dl, lookup_count, da, group_size,
+                {prep_resident ? prep_resident->values : nullptr, prep_resident ? prep_resident->width : 0, false, false},
+                {main_resident->values, main_resident->width, false, false},
+                {stage2_resident->values, stage2_resident->width, false, false},
+                dp, ds, dal, dd, ext_w, quotient_size, next_step, scratch, 0, quotient_size, false);
+            status = cudaGetLastError();
+        }
+        if (status == cudaSuccess) status = cudaStreamSynchronize(0);
+        if (scratch) cudaFree(scratch);
+    } else {
+        bool needs_next[3] = {false, false, true};
+        const auto* host_nodes = static_cast<const ConstraintNode*>(nodes);
+        for (size_t i = 0; i < node_count; ++i)
+            if (host_nodes[i].op == 1 && (host_nodes[i].aux & 1U))
+                needs_next[host_nodes[i].aux / 2] = true;
+
+        QuotientHostSource host_sources[3];
+        size_t host_source_count = 0;
+        size_t staged_row_width = 0;
+        int prep_src_idx = -1, main_src_idx = -1, stage2_src_idx = -1;
+        auto add_cb = [&](bool enabled, size_t w, bool nn, int* out_idx) {
+            if (enabled) {
+                *out_idx = static_cast<int>(host_source_count);
+                host_sources[host_source_count++] = {nullptr, w, 0, nn};
+                staged_row_width += (nn ? 2 : 1) * w;
+            }
+        };
+        add_cb(preprocessed_callback, preprocessed_width, needs_next[0], &prep_src_idx);
+        add_cb(main_callback, main_width, needs_next[1], &main_src_idx);
+        add_cb(stage2_callback, stage2_width, needs_next[2], &stage2_src_idx);
+
+        const size_t num_blocks = next_step;
+        const size_t block_rows = quotient_size / next_step;
+        const size_t staging_cap = max_staging_bytes >= (size_t(4) << 20)
+                                       ? max_staging_bytes
+                                       : (size_t(64) << 20);
+        size_t chunk_rows = 0;
+        if (status == cudaSuccess) {
+            const size_t row_bytes = staged_row_width * sizeof(uint64_t);
+            chunk_rows = staging_cap / row_bytes;
+            if (chunk_rows == 0) chunk_rows = 1;
+            if (chunk_rows > block_rows) chunk_rows = block_rows;
+            if (chunk_rows >= 128) chunk_rows = (chunk_rows / 128) * 128;
+        }
+        const size_t staging_bytes = chunk_rows * staged_row_width * sizeof(uint64_t);
+        size_t staging_offset = 0;
+        for (size_t i = 0; i < host_source_count; ++i) {
+            host_sources[i].offset = staging_offset;
+            staging_offset += chunk_rows * host_sources[i].width * (host_sources[i].needs_next ? 2 : 1);
+        }
+
+        PinnedHostBuffer host_staging[2];
+        uint64_t* device_staging[2] = {nullptr, nullptr};
+        cudaStream_t streams[2] = {nullptr, nullptr};
+        bool stream_busy[2] = {false, false};
+        for (size_t i = 0; i < 2 && status == cudaSuccess; ++i) {
+            status = host_staging[i].allocate(staging_bytes);
+            if (status == cudaSuccess)
+                status = persistent_malloc(reinterpret_cast<void**>(&device_staging[i]), staging_bytes);
+            if (status == cudaSuccess)
+                status = cudaStreamCreateWithFlags(&streams[i], cudaStreamNonBlocking);
+        }
+        uint64_t* scratch[2] = {nullptr, nullptr};
+        if (status == cudaSuccess && global) {
+            const size_t scratch_bytes = block_cap * slot_count * tile * sizeof(uint64_t);
+            status = persistent_malloc(reinterpret_cast<void**>(&scratch[0]), scratch_bytes);
+            if (status == cudaSuccess)
+                status = persistent_malloc(reinterpret_cast<void**>(&scratch[1]), scratch_bytes);
+        }
+
+        cudaEvent_t inputs_ready = nullptr;
+        if (status == cudaSuccess) status = cudaEventCreateWithFlags(&inputs_ready, cudaEventDisableTiming);
+        if (status == cudaSuccess) status = cudaEventRecord(inputs_ready, cudaStreamPerThread);
+        for (size_t i = 0; i < 2 && status == cudaSuccess; ++i)
+            status = cudaStreamWaitEvent(streams[i], inputs_ready, 0);
+
+        const unsigned int log_size = static_cast<unsigned int>(__builtin_ctzll(quotient_size));
+        const auto pack = [&](uint64_t* destination, size_t storage_start, size_t block_base, size_t count) {
+            const long online = sysconf(_SC_NPROCESSORS_ONLN);
+            size_t workers = online > 0 ? static_cast<size_t>(online) : 1;
+            if (workers > 64) workers = 64;
+            const size_t useful = (count + 4095) / 4096;
+            if (workers > useful) workers = useful;
+            if (workers == 0) workers = 1;
+            pthread_t threads[64];
+            QuotientPackTask tasks[64];
+            bool launched[64] = {};
+            for (size_t worker = 0; worker < workers; ++worker) {
+                tasks[worker] = {destination, host_sources, host_source_count, storage_start, block_base,
+                    count * worker / workers, count * (worker + 1) / workers,
+                    quotient_size, next_step, log_size};
+                if (pthread_create(&threads[worker], nullptr, pack_quotient_rows, &tasks[worker]) == 0)
+                    launched[worker] = true;
+                else
+                    pack_quotient_rows(&tasks[worker]);
+            }
+            for (size_t worker = 0; worker < workers; ++worker)
+                if (launched[worker]) pthread_join(threads[worker], nullptr);
+        };
+
+        size_t chunk = 0;
+        for (size_t block = 0; status == cudaSuccess && block < num_blocks; ++block) {
+            const uint64_t* prep_block = nullptr;
+            const uint64_t* main_block = nullptr;
+            const uint64_t* stage2_block = nullptr;
+            const int load_status = loader(loader_ctx, block, &prep_block, &main_block, &stage2_block);
+            if (load_status != 0) {
+                status = static_cast<cudaError_t>(load_status);
+                break;
+            }
+            if (prep_src_idx >= 0) {
+                if (prep_block == nullptr) { status = cudaErrorInvalidValue; break; }
+                host_sources[prep_src_idx].values = prep_block;
+            }
+            if (main_src_idx >= 0) {
+                if (main_block == nullptr) { status = cudaErrorInvalidValue; break; }
+                host_sources[main_src_idx].values = main_block;
+            }
+            if (stage2_src_idx >= 0) {
+                if (stage2_block == nullptr) { status = cudaErrorInvalidValue; break; }
+                host_sources[stage2_src_idx].values = stage2_block;
+            }
+
+            const size_t block_base = block * block_rows;
+            const size_t block_end = block_base + block_rows;
+            for (size_t storage_start = block_base; status == cudaSuccess && storage_start < block_end;
+                 storage_start += chunk_rows, ++chunk) {
+                const size_t buffer = chunk & 1U;
+                const size_t count = std::min(chunk_rows, block_end - storage_start);
+                if (stream_busy[buffer]) status = cudaStreamSynchronize(streams[buffer]);
+                if (status != cudaSuccess) break;
+                pack(host_staging[buffer].get(), storage_start, block_base, count);
+                for (size_t i = 0; i < host_source_count; ++i) {
+                    const auto& source = host_sources[i];
+                    const size_t copy_bytes = count * source.width * (source.needs_next ? 2 : 1) * sizeof(uint64_t);
+                    status = cudaMemcpyAsync(device_staging[buffer] + source.offset,
+                        host_staging[buffer].get() + source.offset, copy_bytes,
+                        cudaMemcpyHostToDevice, streams[buffer]);
+                    if (status != cudaSuccess) break;
+                }
+                if (status != cudaSuccess) break;
+                const auto staged_src = [&](int idx, size_t w, const ResidentLde* resident) {
+                    if (idx < 0)
+                        return QuotientMatrix{resident ? resident->values : nullptr, resident ? resident->width : 0, false, false};
+                    const auto& source = host_sources[idx];
+                    return QuotientMatrix{device_staging[buffer] + source.offset, w, true, source.needs_next};
+                };
+                const QuotientMatrix prep = staged_src(prep_src_idx, preprocessed_width, prep_resident);
+                const QuotientMatrix main = staged_src(main_src_idx, main_width, main_resident);
+                const QuotientMatrix stage2 = staged_src(stage2_src_idx, stage2_width, stage2_resident);
+                size_t blocks = (count + tile - 1) / tile;
+                if (blocks > block_cap) blocks = block_cap;
+                evaluate_quotient_t<Ext><<<static_cast<unsigned int>(blocks), static_cast<unsigned int>(tile), dynamic_shared, streams[buffer]>>>(
+                    quotient, dn, node_count, slot_count, dr, root_count, dl, lookup_count, da, group_size,
+                    prep, main, stage2, dp, ds, dal, dd, ext_w, quotient_size, next_step, scratch[buffer],
+                    storage_start, count, true);
+                status = cudaGetLastError();
+                stream_busy[buffer] = (status == cudaSuccess);
+            }
+        }
+        for (size_t i = 0; i < 2; ++i) {
+            if (streams[i]) {
+                const cudaError_t synced = cudaStreamSynchronize(streams[i]);
+                if (status == cudaSuccess) status = synced;
+                cudaStreamDestroy(streams[i]);
+            }
+            if (device_staging[i]) persistent_free(device_staging[i]);
+            if (scratch[i]) persistent_free(scratch[i]);
+        }
+        if (inputs_ready) cudaEventDestroy(inputs_ready);
+    }
+
+    // Free constraint graph and selector buffers BEFORE the forward NTT to
+    // maximize available VRAM for sppark scratch.
+    cudaFree(allocation);
+    allocation = nullptr;
+
+    if (want_transformed) {
+        if (status == cudaSuccess)
+            status = forward_in_place(device_id, quotient, quotient_size, D, quotient_plan);
+        if (status == cudaSuccess) status = cudaStreamSynchronize(cudaStreamPerThread);
+        ResidentLde* lde = nullptr;
+        if (status == cudaSuccess) status = create_resident_lde(&lde);
+        if (status == cudaSuccess) {
+            lde->values = quotient;
+            lde->height = quotient_size;
+            lde->width = D;
+            quotient = nullptr;
+            *transformed_handle = lde;
+        } else if (lde) {
+            destroy_resident_lde(lde);
+        }
+    } else {
+        if (status == cudaSuccess) {
+            const size_t out_bytes = D * quotient_size * sizeof(uint64_t);
+            if (out_bytes >= (size_t(8) << 20)) {
+                status = staged_download(host_values_output, quotient, out_bytes);
+            } else {
+                status = cudaMemcpy(host_values_output, quotient, out_bytes, cudaMemcpyDeviceToHost);
+            }
+        }
+    }
+    if (quotient) cudaFree(quotient);
+    return static_cast<int>(status);
+}
+} // namespace
+
+extern "C" int multi_stark_cuda_quotient_eval_blocks(
+    int device_id, void** transformed_handle, uint64_t* host_values_output,
+    const void* nodes, size_t node_count, size_t slot_count,
+    const uint32_t* roots, size_t root_count,
+    const void* lookups, size_t lookup_count, const uint32_t* lookup_args,
+    size_t lookup_arg_count, size_t group_size,
+    const void* preprocessed_handle, size_t preprocessed_width, bool preprocessed_callback,
+    const void* main_handle, size_t main_width, bool main_callback,
+    const void* stage2_handle, size_t stage2_width, bool stage2_callback,
+    void* loader_ctx, QuotientBlockLoader loader,
+    const uint64_t* publics, size_t public_count,
+    uint64_t coset_shift, uint64_t coset_generator, uint64_t trace_last,
+    uint64_t vanishing_start, uint64_t vanishing_step, const uint64_t* alpha,
+    size_t constraint_count, const uint64_t* delta, uint64_t ext_w,
+    size_t quotient_size, size_t next_step, size_t max_staging_bytes,
+    const MultiStarkNttPlan* quotient_plan) {
+    return quotient_eval_blocks_impl<Ext2>(
+        device_id, transformed_handle, host_values_output, nodes, node_count,
+        slot_count, roots, root_count, lookups, lookup_count, lookup_args,
+        lookup_arg_count, group_size, preprocessed_handle, preprocessed_width,
+        preprocessed_callback, main_handle, main_width, main_callback,
+        stage2_handle, stage2_width, stage2_callback, loader_ctx, loader,
+        publics, public_count, coset_shift, coset_generator, trace_last,
+        vanishing_start, vanishing_step, alpha, constraint_count, delta, ext_w,
+        quotient_size, next_step, max_staging_bytes, quotient_plan);
+}
+
+extern "C" int multi_stark_cuda_quotient_eval_blocks_ext3(
+    int device_id, void** transformed_handle, uint64_t* host_values_output,
+    const void* nodes, size_t node_count, size_t slot_count,
+    const uint32_t* roots, size_t root_count,
+    const void* lookups, size_t lookup_count, const uint32_t* lookup_args,
+    size_t lookup_arg_count, size_t group_size,
+    const void* preprocessed_handle, size_t preprocessed_width, bool preprocessed_callback,
+    const void* main_handle, size_t main_width, bool main_callback,
+    const void* stage2_handle, size_t stage2_width, bool stage2_callback,
+    void* loader_ctx, QuotientBlockLoader loader,
+    const uint64_t* publics, size_t public_count,
+    uint64_t coset_shift, uint64_t coset_generator, uint64_t trace_last,
+    uint64_t vanishing_start, uint64_t vanishing_step, const uint64_t* alpha,
+    size_t constraint_count, const uint64_t* delta,
+    size_t quotient_size, size_t next_step, size_t max_staging_bytes,
+    const MultiStarkNttPlan* quotient_plan) {
+    return quotient_eval_blocks_impl<Ext3>(
+        device_id, transformed_handle, host_values_output, nodes, node_count,
+        slot_count, roots, root_count, lookups, lookup_count, lookup_args,
+        lookup_arg_count, group_size, preprocessed_handle, preprocessed_width,
+        preprocessed_callback, main_handle, main_width, main_callback,
+        stage2_handle, stage2_width, stage2_callback, loader_ctx, loader,
+        publics, public_count, coset_shift, coset_generator, trace_last,
+        vanishing_start, vanishing_step, alpha, constraint_count, delta, 0,
+        quotient_size, next_step, max_staging_bytes, quotient_plan);
+}
+
+extern "C" int multi_stark_cuda_quotient_slice_panel_lde(
+    int device_id, void** output_handle, const void* transformed_handle,
+    const uint64_t* slice_weights, size_t quotient_degree, size_t trace_height,
+    size_t chunk_start, size_t chunk_count, size_t log_blowup,
+    const MultiStarkNttPlan* panel_lde_plan) {
+    if (output_handle == nullptr || transformed_handle == nullptr ||
+        slice_weights == nullptr || panel_lde_plan == nullptr ||
+        !is_power_of_two(quotient_degree) || !is_power_of_two(trace_height) ||
+        chunk_count == 0 || chunk_start > quotient_degree ||
+        chunk_count > quotient_degree - chunk_start ||
+        log_blowup >= sizeof(size_t) * 8 || trace_height > (SIZE_MAX >> log_blowup)) {
+        return static_cast<int>(cudaErrorInvalidValue);
+    }
+    *output_handle = nullptr;
+    const auto* transformed = static_cast<const ResidentLde*>(transformed_handle);
+    const size_t ext_degree = transformed->width;
+    const size_t quotient_size = trace_height * quotient_degree;
+    if ((ext_degree != 2 && ext_degree != 3) || transformed->height != quotient_size) {
+        return static_cast<int>(cudaErrorInvalidValue);
+    }
+    const size_t lde_height = trace_height << log_blowup;
+    const size_t panel_width = chunk_count * ext_degree;
+    if (!product_fits(lde_height, panel_width)) {
+        return static_cast<int>(cudaErrorInvalidValue);
+    }
+    cudaError_t status = cudaSetDevice(device_id);
+    const uint64_t* device_weights = nullptr;
+    if (status == cudaSuccess) {
+        status = cached_device_constants(
+            device_id, slice_weights, quotient_degree, 4, slice_weights[0],
+            quotient_degree > 1 ? slice_weights[1] : 0, &device_weights);
+    }
+    ResidentLde* lde = nullptr;
+    if (status == cudaSuccess) status = create_resident_lde(&lde);
+    const size_t total_elements = lde_height * panel_width;
+    const size_t coeff_elements = trace_height * panel_width;
+    if (status == cudaSuccess) {
+        lde->height = lde_height;
+        lde->width = panel_width;
+        status = cudaMalloc(reinterpret_cast<void**>(&lde->values),
+                            total_elements * sizeof(uint64_t));
+    }
+    if (status == cudaSuccess && total_elements > coeff_elements) {
+        status = cudaMemsetAsync(lde->values + coeff_elements, 0,
+                                 (total_elements - coeff_elements) * sizeof(uint64_t),
+                                 cudaStreamPerThread);
+    }
+    if (status == cudaSuccess) {
+        gather_shifted_quotient_slices_panel<<<blocks_for(coeff_elements), THREADS, 0,
+                                               cudaStreamPerThread>>>(
+            lde->values, transformed->values, device_weights, quotient_size,
+            trace_height, chunk_start, chunk_count, ext_degree);
+        status = cudaGetLastError();
+    }
+    if (status == cudaSuccess) {
+        status = forward_in_place(device_id, lde->values, lde_height, panel_width,
+                                  panel_lde_plan);
+    }
+    if (status == cudaSuccess) status = cudaStreamSynchronize(cudaStreamPerThread);
+    if (status == cudaSuccess) {
+        *output_handle = lde;
+    } else if (lde) {
+        destroy_resident_lde(lde);
+    }
+    return static_cast<int>(status);
 }
 
 namespace {
@@ -3705,6 +4386,297 @@ extern "C" __attribute__((visibility("default"))) int multi_stark_cuda_fri_reduc
 extern "C" __attribute__((visibility("default"))) int multi_stark_cuda_fri_reduce_batch_ext3(int device_id,void* handle,
     const ReductionTaskExt3* tasks,size_t task_count,const uint64_t* alpha,size_t alpha_count){
     return fri_reduce_batch_impl<Ext3,ReductionTaskExt3>(device_id,handle,tasks,task_count,alpha,alpha_count,0);
+}
+
+namespace {
+cudaError_t ensure_fri_chunk_buf(ResidentFriWorkspace* w, size_t elements) {
+    if (w->chunk_capacity >= elements) return cudaSuccess;
+    if (w->chunk_buf) {
+        cudaError_t s = cudaFree(w->chunk_buf);
+        w->chunk_buf = nullptr;
+        w->chunk_capacity = 0;
+        if (s != cudaSuccess) return s;
+    }
+    cudaError_t s = cudaMalloc(reinterpret_cast<void**>(&w->chunk_buf),
+                               elements * sizeof(uint64_t));
+    if (s == cudaSuccess) w->chunk_capacity = elements;
+    return s;
+}
+
+template <typename Ext>
+int fri_chunk_interp_add_impl(
+    int device_id, void* handle, const uint64_t* host_chunk,
+    size_t width, size_t row_start, size_t row_count,
+    const size_t* inv_offsets, size_t num_points) {
+    constexpr size_t D = ExtOps<Ext>::D;
+    if (!handle || !host_chunk || !inv_offsets || width == 0 ||
+        row_count == 0 || num_points == 0) {
+        return static_cast<int>(cudaErrorInvalidValue);
+    }
+    cudaError_t status = cudaSetDevice(device_id);
+    auto* w = static_cast<ResidentFriWorkspace*>(handle);
+    if (w->ext_degree != D || row_start + row_count > w->coset_count ||
+        num_points * width > w->output_capacity) {
+        return static_cast<int>(cudaErrorInvalidValue);
+    }
+    for (size_t p = 0; p < num_points; ++p) {
+        if (inv_offsets[p] > w->inv_count ||
+            row_start + row_count > w->inv_count - inv_offsets[p]) {
+            return static_cast<int>(cudaErrorInvalidValue);
+        }
+    }
+    const size_t elements = row_count * width;
+    const size_t bytes = elements * sizeof(uint64_t);
+    if (status == cudaSuccess) status = ensure_fri_chunk_buf(w, elements);
+    if (status == cudaSuccess) {
+        if (bytes >= (size_t(8) << 20)) {
+            status = staged_upload(w->chunk_buf, host_chunk, bytes);
+        } else {
+            status = cudaMemcpyAsync(w->chunk_buf, host_chunk, bytes,
+                                     cudaMemcpyHostToDevice, cudaStreamPerThread);
+        }
+    }
+    if (status == cudaSuccess) {
+        canonicalize_goldilocks<<<blocks_for(elements), THREADS, 0,
+                                  cudaStreamPerThread>>>(w->chunk_buf, elements);
+        status = cudaGetLastError();
+    }
+    const size_t row_tiles = (row_count + INTERPOLATION_ROWS - 1) / INTERPOLATION_ROWS;
+    const size_t col_tiles = (width + INTERPOLATION_COLUMNS - 1) / INTERPOLATION_COLUMNS;
+    const size_t partial_needed = row_tiles * width * (num_points >= 2 ? 2 : 1);
+    if (status == cudaSuccess && w->partial_capacity < partial_needed) {
+        if (w->interpolation_partials) status = cudaFree(w->interpolation_partials);
+        w->interpolation_partials = nullptr;
+        w->partial_capacity = 0;
+        if (status == cudaSuccess) {
+            status = cudaMalloc(reinterpret_cast<void**>(&w->interpolation_partials),
+                                partial_needed * sizeof(Ext));
+            if (status == cudaSuccess) w->partial_capacity = partial_needed;
+        }
+    }
+    Ext* dev_partials = reinterpret_cast<Ext*>(w->interpolation_partials);
+    const Ext* dev_inv = reinterpret_cast<const Ext*>(w->inv_denoms);
+    Ext* dev_out = reinterpret_cast<Ext*>(w->output);
+    const dim3 grid(static_cast<unsigned int>(row_tiles),
+                    static_cast<unsigned int>(col_tiles));
+    const dim3 block(INTERPOLATION_COLUMNS, INTERPOLATION_LANES);
+    for (size_t p = 0; status == cudaSuccess && p < num_points;) {
+        const bool pair = (p + 1 < num_points);
+        Ext* p0 = dev_partials;
+        Ext* p1 = pair ? dev_partials + row_tiles * width : nullptr;
+        interpolate_chunk_tile_t<Ext><<<grid, block, 0, cudaStreamPerThread>>>(
+            w->chunk_buf, w->coset, dev_inv + inv_offsets[p],
+            pair ? dev_inv + inv_offsets[p + 1] : nullptr,
+            p0, p1, width, row_start, row_count);
+        status = cudaGetLastError();
+        if (status == cudaSuccess) {
+            accumulate_chunk_interp_partials_t<Ext>
+                <<<static_cast<unsigned int>(width), THREADS,
+                   THREADS * sizeof(Ext), cudaStreamPerThread>>>(
+                    dev_out + p * width, p0, row_tiles, width);
+            status = cudaGetLastError();
+        }
+        if (status == cudaSuccess && pair) {
+            accumulate_chunk_interp_partials_t<Ext>
+                <<<static_cast<unsigned int>(width), THREADS,
+                   THREADS * sizeof(Ext), cudaStreamPerThread>>>(
+                    dev_out + (p + 1) * width, p1, row_tiles, width);
+            status = cudaGetLastError();
+        }
+        p += pair ? 2 : 1;
+    }
+    if (status == cudaSuccess) status = cudaStreamSynchronize(cudaStreamPerThread);
+    return static_cast<int>(status);
+}
+
+template <typename Ext>
+int fri_chunk_interp_finish_impl(
+    int device_id, void* handle, uint64_t* host_out,
+    size_t width, const uint64_t* scales, size_t num_points, uint64_t ext_w) {
+    constexpr size_t D = ExtOps<Ext>::D;
+    if (!handle || !host_out || !scales || width == 0 || num_points == 0) {
+        return static_cast<int>(cudaErrorInvalidValue);
+    }
+    cudaError_t status = cudaSetDevice(device_id);
+    auto* w = static_cast<ResidentFriWorkspace*>(handle);
+    if (w->ext_degree != D || num_points * width > w->output_capacity) {
+        return static_cast<int>(cudaErrorInvalidValue);
+    }
+    Ext* dev_out = reinterpret_cast<Ext*>(w->output);
+    for (size_t p = 0; status == cudaSuccess && p < num_points; ++p) {
+        scale_chunk_interp_outputs_t<Ext>
+            <<<blocks_for(width), THREADS, 0, cudaStreamPerThread>>>(
+                dev_out + p * width, width, ExtOps<Ext>::load(scales + p * D), ext_w);
+        status = cudaGetLastError();
+    }
+    if (status == cudaSuccess) {
+        status = cudaMemcpyAsync(host_out, w->output,
+                                 num_points * width * sizeof(Ext),
+                                 cudaMemcpyDeviceToHost, cudaStreamPerThread);
+    }
+    if (status == cudaSuccess) status = cudaStreamSynchronize(cudaStreamPerThread);
+    return static_cast<int>(status);
+}
+
+template <typename Ext>
+int fri_reduce_chunk_impl(
+    int device_id, void* handle, void* reduced_handle,
+    const uint64_t* host_chunk, size_t width, size_t row_start, size_t row_count,
+    const size_t* inv_offsets, const uint64_t* reduced_ys,
+    const uint64_t* alpha_offsets, size_t num_points,
+    const uint64_t* alpha, size_t alpha_count, bool upload_alpha, uint64_t ext_w) {
+    constexpr size_t D = ExtOps<Ext>::D;
+    if (!handle || !reduced_handle || !host_chunk || !inv_offsets ||
+        !reduced_ys || !alpha_offsets || width == 0 || row_count == 0 ||
+        num_points == 0 || (upload_alpha && (!alpha || alpha_count < width))) {
+        return static_cast<int>(cudaErrorInvalidValue);
+    }
+    cudaError_t status = cudaSetDevice(device_id);
+    auto* w = static_cast<ResidentFriWorkspace*>(handle);
+    auto* r = static_cast<ResidentReducedOpening*>(reduced_handle);
+    if (w->ext_degree != D || r->ext_degree != D ||
+        row_start + row_count > r->height ||
+        (!upload_alpha && w->alpha_capacity < width)) {
+        return static_cast<int>(cudaErrorInvalidValue);
+    }
+    for (size_t p = 0; p < num_points; ++p) {
+        if (inv_offsets[p] > w->inv_count ||
+            row_start + row_count > w->inv_count - inv_offsets[p]) {
+            return static_cast<int>(cudaErrorInvalidValue);
+        }
+    }
+    if (status == cudaSuccess && upload_alpha) {
+        if (w->alpha_capacity < alpha_count) {
+            if (w->alpha) status = cudaFree(w->alpha);
+            w->alpha = nullptr;
+            w->alpha_capacity = 0;
+            if (status == cudaSuccess) {
+                status = cudaMalloc(reinterpret_cast<void**>(&w->alpha),
+                                    alpha_count * sizeof(Ext));
+                if (status == cudaSuccess) w->alpha_capacity = alpha_count;
+            }
+        }
+        if (status == cudaSuccess) {
+            status = cudaMemcpyAsync(w->alpha, alpha, alpha_count * sizeof(Ext),
+                                     cudaMemcpyHostToDevice, cudaStreamPerThread);
+        }
+    }
+    const size_t elements = row_count * width;
+    const size_t bytes = elements * sizeof(uint64_t);
+    if (status == cudaSuccess) status = ensure_fri_chunk_buf(w, elements);
+    if (status == cudaSuccess) {
+        if (bytes >= (size_t(8) << 20)) {
+            status = staged_upload(w->chunk_buf, host_chunk, bytes);
+        } else {
+            status = cudaMemcpyAsync(w->chunk_buf, host_chunk, bytes,
+                                     cudaMemcpyHostToDevice, cudaStreamPerThread);
+        }
+    }
+    if (status == cudaSuccess) {
+        canonicalize_goldilocks<<<blocks_for(elements), THREADS, 0,
+                                  cudaStreamPerThread>>>(w->chunk_buf, elements);
+        status = cudaGetLastError();
+    }
+    const Ext* dev_inv = reinterpret_cast<const Ext*>(w->inv_denoms);
+    const Ext* dev_alpha = reinterpret_cast<const Ext*>(w->alpha);
+    Ext* dev_out = reinterpret_cast<Ext*>(r->values);
+    for (size_t p = 0; status == cudaSuccess && p < num_points;) {
+        const bool pair = (p + 1 < num_points);
+        const Ext y0 = ExtOps<Ext>::load(reduced_ys + p * D);
+        const Ext off0 = ExtOps<Ext>::load(alpha_offsets + p * D);
+        const Ext y1 = pair ? ExtOps<Ext>::load(reduced_ys + (p + 1) * D) : ExtOps<Ext>::zero();
+        const Ext off1 = pair ? ExtOps<Ext>::load(alpha_offsets + (p + 1) * D) : ExtOps<Ext>::zero();
+        accumulate_reduced_opening_chunk_t<Ext>
+            <<<blocks_for(row_count), THREADS, 0, cudaStreamPerThread>>>(
+                dev_out, w->chunk_buf, width, dev_inv, dev_alpha,
+                row_start, row_count, inv_offsets[p], y0, off0,
+                pair, pair ? inv_offsets[p + 1] : 0, y1, off1, ext_w);
+        status = cudaGetLastError();
+        p += pair ? 2 : 1;
+    }
+    if (status == cudaSuccess) status = cudaStreamSynchronize(cudaStreamPerThread);
+    return static_cast<int>(status);
+}
+} // namespace
+
+extern "C" int multi_stark_cuda_fri_chunk_interp_begin(
+    int device_id, void* handle, size_t output_count) {
+    if (!handle || output_count == 0) {
+        return static_cast<int>(cudaErrorInvalidValue);
+    }
+    cudaError_t status = cudaSetDevice(device_id);
+    auto* w = static_cast<ResidentFriWorkspace*>(handle);
+    const size_t elem_bytes = w->ext_degree * sizeof(uint64_t);
+    if (status == cudaSuccess && w->output_capacity < output_count) {
+        if (w->output) status = cudaFree(w->output);
+        w->output = nullptr;
+        w->output_capacity = 0;
+        if (status == cudaSuccess) {
+            status = cudaMalloc(reinterpret_cast<void**>(&w->output),
+                                output_count * elem_bytes);
+            if (status == cudaSuccess) w->output_capacity = output_count;
+        }
+    }
+    if (status == cudaSuccess) {
+        status = cudaMemsetAsync(w->output, 0, output_count * elem_bytes,
+                                 cudaStreamPerThread);
+    }
+    if (status == cudaSuccess) status = cudaStreamSynchronize(cudaStreamPerThread);
+    return static_cast<int>(status);
+}
+
+extern "C" int multi_stark_cuda_fri_chunk_interp_add(
+    int device_id, void* handle, const uint64_t* host_chunk,
+    size_t width, size_t row_start, size_t row_count,
+    const size_t* inv_offsets, size_t num_points) {
+    return fri_chunk_interp_add_impl<Ext2>(
+        device_id, handle, host_chunk, width, row_start, row_count, inv_offsets, num_points);
+}
+
+extern "C" int multi_stark_cuda_fri_chunk_interp_add_ext3(
+    int device_id, void* handle, const uint64_t* host_chunk,
+    size_t width, size_t row_start, size_t row_count,
+    const size_t* inv_offsets, size_t num_points) {
+    return fri_chunk_interp_add_impl<Ext3>(
+        device_id, handle, host_chunk, width, row_start, row_count, inv_offsets, num_points);
+}
+
+extern "C" int multi_stark_cuda_fri_chunk_interp_finish(
+    int device_id, void* handle, uint64_t* host_out,
+    size_t width, const uint64_t* scales, size_t num_points, uint64_t ext_w) {
+    return fri_chunk_interp_finish_impl<Ext2>(
+        device_id, handle, host_out, width, scales, num_points, ext_w);
+}
+
+extern "C" int multi_stark_cuda_fri_chunk_interp_finish_ext3(
+    int device_id, void* handle, uint64_t* host_out,
+    size_t width, const uint64_t* scales, size_t num_points) {
+    return fri_chunk_interp_finish_impl<Ext3>(
+        device_id, handle, host_out, width, scales, num_points, 0);
+}
+
+extern "C" int multi_stark_cuda_fri_reduce_chunk(
+    int device_id, void* handle, void* reduced_handle,
+    const uint64_t* host_chunk, size_t width, size_t row_start, size_t row_count,
+    const size_t* inv_offsets, const uint64_t* reduced_ys,
+    const uint64_t* alpha_offsets, size_t num_points,
+    const uint64_t* alpha, size_t alpha_count, bool upload_alpha, uint64_t ext_w) {
+    return fri_reduce_chunk_impl<Ext2>(
+        device_id, handle, reduced_handle, host_chunk, width, row_start, row_count,
+        inv_offsets, reduced_ys, alpha_offsets, num_points, alpha, alpha_count,
+        upload_alpha, ext_w);
+}
+
+extern "C" int multi_stark_cuda_fri_reduce_chunk_ext3(
+    int device_id, void* handle, void* reduced_handle,
+    const uint64_t* host_chunk, size_t width, size_t row_start, size_t row_count,
+    const size_t* inv_offsets, const uint64_t* reduced_ys,
+    const uint64_t* alpha_offsets, size_t num_points,
+    const uint64_t* alpha, size_t alpha_count, bool upload_alpha) {
+    return fri_reduce_chunk_impl<Ext3>(
+        device_id, handle, reduced_handle, host_chunk, width, row_start, row_count,
+        inv_offsets, reduced_ys, alpha_offsets, num_points, alpha, alpha_count,
+        upload_alpha, 0);
 }
 
 extern "C" int multi_stark_cuda_fri_workspace_destroy(int device_id,void* handle){

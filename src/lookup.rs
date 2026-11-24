@@ -1226,19 +1226,16 @@ impl<F: Field> TraceRowChunk<F> for InMemoryChunk<'_, F> {
 
 /// Owned row-window chunk holding `n_rows + 1` rows (the chunk plus one
 /// wrap-around halo row), used when streaming chunks from disk.
-#[cfg(not(feature = "cuda"))]
 pub(crate) struct OwnedWindowChunk<F> {
     rows: RowMajorMatrix<F>,
 }
 
-#[cfg(not(feature = "cuda"))]
 impl<F: Field> OwnedWindowChunk<F> {
     pub(crate) fn new(rows: RowMajorMatrix<F>) -> Self {
         Self { rows }
     }
 }
 
-#[cfg(not(feature = "cuda"))]
 impl<F: Field> TraceRowChunk<F> for OwnedWindowChunk<F> {
     #[inline]
     fn row_pair(&self, local_row: usize) -> (&[F], &[F]) {

@@ -7,7 +7,9 @@
 
 use core::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, OnceLock};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use itertools::Itertools;
 use p3_commit::{BatchOpening, BatchOpeningRef, ExtensionMmcs, Mmcs};
@@ -20,12 +22,17 @@ use p3_merkle_tree::{MerkleTreeError, PrunedMerklePaths};
 use p3_symmetric::MerkleCap;
 use p3_util::log2_ceil_usize;
 
+use super::mmcs::{CudaMatrixSource, HybridMerkleTree};
 use super::{
     CudaLde, CudaMixedMerkleTree, mixed_lde_open_row, mixed_lde_open_row_at_height,
     mixed_lde_open_rows, mixed_lde_open_rows_at_height,
 };
+use crate::p3_adapter::blake3_simd;
 use crate::p3_adapter::cap::{CapValidatingMmcs, verify_merkle_cap_len_for_log_height};
 use crate::p3_adapter::domain_blake3::Blake3Domain;
+use crate::p3_adapter::spill::{
+    STREAM_BLOCK_BYTES, SpillPackWriter, SpilledMatrix, build_merkle_digests_from_height_hashes,
+};
 use crate::p3_adapter::zk::{
     HidingBatchProof, HidingMultiProof, ZK_LEAF_SALT_BYTES, derive_leaf_salt,
     open_hiding_batch_salts, open_hiding_multi_salts, random_seed, verify_hiding_batch,
@@ -338,19 +345,100 @@ enum HidingCudaMmcsDataInner<M> {
     Cpu(CpuHidingTree<M>),
     Hybrid {
         resident: Vec<Option<CudaLde>>,
+        resident_active: Vec<AtomicBool>,
         materialize: Box<dyn Fn(&CudaLde) -> M + Send + Sync>,
+        materialize_spilled: Box<dyn Fn(&SpilledMatrix) -> M + Send + Sync>,
         committed_matrices: Vec<OnceLock<M>>,
+        spilled_matrices: Vec<OnceLock<SpilledMatrix>>,
         dimensions: Vec<Dimensions>,
-        tree: CudaMixedMerkleTree,
+        retained_traces: Mutex<Vec<Option<M>>>,
+        spilled_traces: Mutex<Vec<Option<SpilledMatrix>>>,
+        tree: HybridMerkleTree,
         salt_seed: [u8; 32],
     },
     Cuda {
         resident: Arc<Vec<CudaLde>>,
         materialize: Option<Box<dyn Fn() -> Vec<M> + Send + Sync>>,
         committed_matrices: OnceLock<Vec<M>>,
+        retained_traces: Mutex<Vec<Option<M>>>,
         tree: CudaMixedMerkleTree,
         salt_seed: [u8; 32],
     },
+}
+
+impl<M> HidingCudaMmcsData<M> {
+    pub(crate) fn spilled_original_trace(&self, index: usize) -> Option<SpilledMatrix> {
+        match &self.0 {
+            HidingCudaMmcsDataInner::Hybrid { spilled_traces, .. } => spilled_traces
+                .lock()
+                .expect("hiding spilled_traces lock poisoned")
+                .get(index)
+                .and_then(Clone::clone),
+            HidingCudaMmcsDataInner::Cpu(_) | HidingCudaMmcsDataInner::Cuda { .. } => None,
+        }
+    }
+
+    pub(crate) fn set_retained_traces(&self, traces: Vec<Option<M>>) {
+        match &self.0 {
+            HidingCudaMmcsDataInner::Hybrid {
+                retained_traces, ..
+            }
+            | HidingCudaMmcsDataInner::Cuda {
+                retained_traces, ..
+            } => {
+                *retained_traces
+                    .lock()
+                    .expect("hiding retained_traces lock poisoned") = traces;
+            }
+            HidingCudaMmcsDataInner::Cpu(_) => {}
+        }
+    }
+
+    pub(crate) fn release_original_traces(&self) {
+        match &self.0 {
+            HidingCudaMmcsDataInner::Hybrid {
+                retained_traces,
+                spilled_traces,
+                ..
+            } => {
+                retained_traces
+                    .lock()
+                    .expect("hiding retained_traces lock poisoned")
+                    .clear();
+                spilled_traces
+                    .lock()
+                    .expect("hiding spilled_traces lock poisoned")
+                    .clear();
+            }
+            HidingCudaMmcsDataInner::Cuda {
+                retained_traces, ..
+            } => {
+                retained_traces
+                    .lock()
+                    .expect("hiding retained_traces lock poisoned")
+                    .clear();
+            }
+            HidingCudaMmcsDataInner::Cpu(_) => {}
+        }
+    }
+}
+
+impl<M: Clone> HidingCudaMmcsData<M> {
+    pub(crate) fn clone_in_memory_original_trace(&self, index: usize) -> Option<M> {
+        match &self.0 {
+            HidingCudaMmcsDataInner::Hybrid {
+                retained_traces, ..
+            }
+            | HidingCudaMmcsDataInner::Cuda {
+                retained_traces, ..
+            } => retained_traces
+                .lock()
+                .expect("hiding retained_traces lock poisoned")
+                .get(index)
+                .and_then(Clone::clone),
+            HidingCudaMmcsDataInner::Cpu(_) => None,
+        }
+    }
 }
 
 /// CUDA-accelerated salted BLAKE3 MMCS for Protocol `v6-zk`.
@@ -360,6 +448,7 @@ pub struct HidingCudaMmcs {
     leaf_domain: Blake3Domain,
     compress_domain: Blake3Domain,
     device_id: i32,
+    spill_dir: Option<PathBuf>,
 }
 
 impl HidingCudaMmcs {
@@ -377,7 +466,16 @@ impl HidingCudaMmcs {
             leaf_domain: Blake3Domain::ZkMerkleLeaf,
             compress_domain: Blake3Domain::ZkMerkleCompress,
             device_id,
+            spill_dir: None,
         }
+    }
+
+    pub fn set_spill_dir(&mut self, spill_dir: Option<PathBuf>) {
+        self.spill_dir = spill_dir;
+    }
+
+    pub fn spill_dir(&self) -> Option<&Path> {
+        self.spill_dir.as_deref()
     }
 
     #[inline]
@@ -388,6 +486,11 @@ impl HidingCudaMmcs {
     #[inline]
     pub(crate) const fn device_id(&self) -> i32 {
         self.device_id
+    }
+
+    #[inline]
+    pub(crate) const fn leaf_domain(&self) -> Blake3Domain {
+        self.leaf_domain
     }
 
     #[inline]
@@ -404,6 +507,234 @@ impl HidingCudaMmcs {
             HidingCudaMmcsDataInner::Cuda { resident, .. } => Some(Arc::clone(resident)),
             HidingCudaMmcsDataInner::Cpu(_) | HidingCudaMmcsDataInner::Hybrid { .. } => None,
         }
+    }
+
+    pub(crate) fn matrix_dimensions<M: Matrix<Goldilocks>>(
+        &self,
+        data: &HidingCudaMmcsData<M>,
+    ) -> Vec<Dimensions> {
+        match &data.0 {
+            HidingCudaMmcsDataInner::Cpu(tree) => tree.dimensions(),
+            HidingCudaMmcsDataInner::Hybrid { dimensions, .. } => dimensions.clone(),
+            HidingCudaMmcsDataInner::Cuda { resident, .. } => resident
+                .iter()
+                .map(|lde| Dimensions {
+                    width: lde.width(),
+                    height: lde.height(),
+                })
+                .collect(),
+        }
+    }
+
+    pub(crate) fn spilled_matrices<'a, M>(
+        &self,
+        data: &'a HidingCudaMmcsData<M>,
+    ) -> Vec<Option<&'a SpilledMatrix>> {
+        match &data.0 {
+            HidingCudaMmcsDataInner::Hybrid {
+                spilled_matrices, ..
+            } => spilled_matrices.iter().map(OnceLock::get).collect(),
+            HidingCudaMmcsDataInner::Cpu(tree) => vec![None; tree.leaves.len()],
+            HidingCudaMmcsDataInner::Cuda { resident, .. } => vec![None; resident.len()],
+        }
+    }
+
+    pub(crate) fn is_matrix_cuda_resident<M>(
+        &self,
+        data: &HidingCudaMmcsData<M>,
+        index: usize,
+    ) -> bool {
+        match &data.0 {
+            HidingCudaMmcsDataInner::Cuda { resident, .. } => index < resident.len(),
+            HidingCudaMmcsDataInner::Hybrid {
+                resident,
+                resident_active,
+                ..
+            } => {
+                resident.get(index).is_some_and(Option::is_some)
+                    && resident_active
+                        .get(index)
+                        .is_some_and(|a| a.load(Ordering::Acquire))
+            }
+            HidingCudaMmcsDataInner::Cpu(_) => false,
+        }
+    }
+
+    pub(crate) fn with_resident_matrix<M, R>(
+        &self,
+        data: &HidingCudaMmcsData<M>,
+        index: usize,
+        f: impl FnOnce(&CudaLde) -> R,
+    ) -> R {
+        match &data.0 {
+            HidingCudaMmcsDataInner::Cuda { resident, .. } => f(&resident[index]),
+            HidingCudaMmcsDataInner::Hybrid {
+                resident,
+                resident_active,
+                ..
+            } => {
+                assert!(
+                    resident_active[index].load(Ordering::Acquire),
+                    "hiding hybrid matrix {index} was evicted from CUDA"
+                );
+                f(resident[index]
+                    .as_ref()
+                    .expect("hiding hybrid matrix is not CUDA-resident"))
+            }
+            HidingCudaMmcsDataInner::Cpu(_) => {
+                panic!("attempted to access CPU hiding commitment as CUDA-resident")
+            }
+        }
+    }
+
+    pub(crate) fn cpu_matrices<'a, M: Matrix<Goldilocks>>(
+        &self,
+        data: &'a HidingCudaMmcsData<M>,
+    ) -> Vec<Option<&'a M>> {
+        match &data.0 {
+            HidingCudaMmcsDataInner::Cpu(tree) => tree.leaves.iter().map(Some).collect(),
+            HidingCudaMmcsDataInner::Cuda { resident, .. } => vec![None; resident.len()],
+            HidingCudaMmcsDataInner::Hybrid {
+                resident,
+                resident_active,
+                committed_matrices,
+                spilled_matrices,
+                ..
+            } => (0..resident.len())
+                .map(|index| {
+                    let is_active =
+                        resident[index].is_some() && resident_active[index].load(Ordering::Acquire);
+                    if is_active || spilled_matrices[index].get().is_some() {
+                        None
+                    } else {
+                        committed_matrices[index].get()
+                    }
+                })
+                .collect(),
+        }
+    }
+
+    pub(crate) fn with_matrix_source<R>(
+        &self,
+        data: &HidingCudaMmcsData<RowMajorMatrix<Goldilocks>>,
+        index: usize,
+        f: impl FnOnce(CudaMatrixSource<'_>) -> R,
+    ) -> R {
+        match &data.0 {
+            HidingCudaMmcsDataInner::Cpu(tree) => f(CudaMatrixSource::Host(&tree.leaves[index])),
+            HidingCudaMmcsDataInner::Cuda { resident, .. } => {
+                f(CudaMatrixSource::Resident(&resident[index]))
+            }
+            HidingCudaMmcsDataInner::Hybrid {
+                resident,
+                resident_active,
+                committed_matrices,
+                spilled_matrices,
+                ..
+            } => {
+                if let Some(lde) = resident[index].as_ref()
+                    && resident_active[index].load(Ordering::Acquire)
+                {
+                    f(CudaMatrixSource::Resident(lde))
+                } else if let Some(spilled) = spilled_matrices[index].get() {
+                    f(CudaMatrixSource::Spilled(spilled))
+                } else {
+                    f(CudaMatrixSource::Host(
+                        committed_matrices[index]
+                            .get()
+                            .expect("hiding hybrid host matrix missing"),
+                    ))
+                }
+            }
+        }
+    }
+
+    pub(crate) fn ensure_device_headroom_batch<M>(
+        &self,
+        datas: &[&HidingCudaMmcsData<M>],
+        target_free_bytes: usize,
+        phase: &str,
+    ) -> usize {
+        let mut free_bytes = super::device_memory_info(self.device_id).0;
+        if free_bytes >= target_free_bytes {
+            return free_bytes;
+        }
+        let mut candidates: Vec<(usize, usize, usize, bool)> = Vec::new();
+        for (data_idx, data) in datas.iter().enumerate() {
+            if let HidingCudaMmcsDataInner::Hybrid {
+                resident,
+                resident_active,
+                committed_matrices,
+                spilled_matrices,
+                ..
+            } = &data.0
+            {
+                for (mat_idx, lde) in resident.iter().enumerate() {
+                    let Some(lde) = lde.as_ref() else {
+                        continue;
+                    };
+                    if resident_active[mat_idx].load(Ordering::Acquire) {
+                        candidates.push((
+                            data_idx,
+                            mat_idx,
+                            lde.height().saturating_mul(lde.width()),
+                            committed_matrices[mat_idx].get().is_some()
+                                || spilled_matrices[mat_idx].get().is_some(),
+                        ));
+                    }
+                }
+            }
+        }
+        candidates
+            .sort_unstable_by_key(|&(_, _, cells, has_copy)| (Reverse(has_copy), Reverse(cells)));
+        for (data_idx, mat_idx, _, _) in candidates {
+            if free_bytes >= target_free_bytes {
+                break;
+            }
+            if let HidingCudaMmcsDataInner::Hybrid {
+                resident,
+                resident_active,
+                materialize,
+                committed_matrices,
+                spilled_matrices,
+                ..
+            } = &datas[data_idx].0
+            {
+                let lde = resident[mat_idx]
+                    .as_ref()
+                    .expect("hiding hybrid resident LDE missing");
+                if committed_matrices[mat_idx].get().is_none()
+                    && spilled_matrices[mat_idx].get().is_none()
+                {
+                    let matrix_bytes = lde
+                        .height()
+                        .saturating_mul(lde.width())
+                        .saturating_mul(size_of::<Goldilocks>());
+                    if let Some(dir) = self.spill_dir.as_deref()
+                        && !super::host_spill_headroom(lde.device_id, matrix_bytes)
+                    {
+                        let mut pack = SpillPackWriter::create(dir);
+                        let sp = lde.spill_to_pack(&mut pack);
+                        pack.flush();
+                        let _ = spilled_matrices[mat_idx].set(sp);
+                    } else {
+                        committed_matrices[mat_idx].get_or_init(|| materialize(lde));
+                    }
+                }
+                // SAFETY: eviction runs between proving phases when no CUDA
+                // operation accesses this LDE.
+                unsafe { lde.release_values() };
+                lde.release_generator_device();
+                resident_active[mat_idx].store(false, Ordering::Release);
+            }
+            free_bytes = super::device_memory_info(self.device_id).0;
+            if super::memory_diagnostics_enabled() {
+                eprintln!(
+                    "[multi-stark/cuda] v6-zk {phase}: evicted data[{data_idx}][{mat_idx}], free={free_bytes}/{target_free_bytes}"
+                );
+            }
+        }
+        free_bytes
     }
 
     /// Commits host matrices on CPU using an explicit `salt_seed`.
@@ -423,6 +754,263 @@ impl HidingCudaMmcs {
         )
     }
 
+    /// Commits a mixed set of CUDA-resident, host-resident, and NVMe-spilled
+    /// matrices for Protocol `v6-zk` with an explicit `salt_seed`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn commit_cuda_mixed_spilled_with_seed(
+        &self,
+        resident: Vec<Option<CudaLde>>,
+        host_matrices: Vec<Option<RowMajorMatrix<Goldilocks>>>,
+        spilled: Vec<Option<SpilledMatrix>>,
+        mut prehashed: Vec<Option<Vec<[u8; 32]>>>,
+        retained_traces: Vec<Option<RowMajorMatrix<Goldilocks>>>,
+        spilled_traces: Vec<Option<SpilledMatrix>>,
+        salt_seed: [u8; 32],
+    ) -> (
+        <Self as Mmcs<Goldilocks>>::Commitment,
+        HidingCudaMmcsData<RowMajorMatrix<Goldilocks>>,
+    ) {
+        let count = resident.len();
+        assert!(count > 0, "No matrices given?");
+        assert_eq!(host_matrices.len(), count);
+        assert_eq!(spilled.len(), count);
+        assert_eq!(prehashed.len(), count);
+
+        let mut dimensions = Vec::with_capacity(count);
+        let mut any_spilled = false;
+        let mut any_host = false;
+        for i in 0..count {
+            let dims = if let Some(lde) = resident[i].as_ref() {
+                Dimensions {
+                    width: lde.width(),
+                    height: lde.height(),
+                }
+            } else if let Some(sp) = spilled[i].as_ref() {
+                any_spilled = true;
+                sp.dimensions()
+            } else if let Some(mat) = host_matrices[i].as_ref() {
+                any_host = true;
+                mat.dimensions()
+            } else {
+                panic!("v6-zk mixed commit matrix {i} has no backing storage");
+            };
+            dimensions.push(dims);
+        }
+
+        let wide_heights = host_hashed_heights_zk(dimensions.iter().copied());
+        let max_height = dimensions.iter().map(|d| d.height).max().unwrap_or(0);
+        let tree_workspace_bytes = max_height.saturating_mul(96);
+        let (free_bytes, _) = super::device_memory_info(self.device_id);
+        let min_free = super::minimum_free_bytes();
+
+        // Pure device fast path when nothing is spilled, all groups fit device
+        // hashing, and the GPU Merkle tree fits in free VRAM.
+        if !any_spilled
+            && !any_host
+            && wide_heights.is_empty()
+            && tree_workspace_bytes.saturating_add(min_free) <= free_bytes
+        {
+            let ldes: Vec<CudaLde> = resident
+                .into_iter()
+                .map(|opt| opt.expect("resident LDE"))
+                .collect();
+            if self.spill_dir.is_none() && spilled_traces.is_empty() {
+                let ldes = Arc::new(ldes);
+                let tree = CudaMixedMerkleTree::from_ldes_v6zk(self.device_id, &ldes, &salt_seed);
+                let commitment = MerkleCap::new(vec![tree.root()]);
+                let materialize_ldes = Arc::clone(&ldes);
+                return (
+                    commitment,
+                    HidingCudaMmcsData(HidingCudaMmcsDataInner::Cuda {
+                        resident: ldes,
+                        materialize: Some(Box::new(move || {
+                            materialize_ldes
+                                .iter()
+                                .map(CudaLde::to_row_major_matrix)
+                                .collect()
+                        })),
+                        committed_matrices: OnceLock::new(),
+                        retained_traces: Mutex::new(retained_traces),
+                        tree,
+                        salt_seed,
+                    }),
+                );
+            }
+            let tree = CudaMixedMerkleTree::from_ldes_v6zk(self.device_id, &ldes, &salt_seed);
+            let commitment = MerkleCap::new(vec![tree.root()]);
+            let resident_opts: Vec<Option<CudaLde>> = ldes.into_iter().map(Some).collect();
+            let resident_active = (0..count).map(|_| AtomicBool::new(true)).collect();
+            let committed_matrices = (0..count).map(|_| OnceLock::new()).collect();
+            let spilled_cells = (0..count).map(|_| OnceLock::new()).collect();
+            return (
+                commitment,
+                HidingCudaMmcsData(HidingCudaMmcsDataInner::Hybrid {
+                    resident: resident_opts,
+                    resident_active,
+                    materialize: Box::new(CudaLde::to_row_major_matrix),
+                    materialize_spilled: Box::new(SpilledMatrix::read_all),
+                    committed_matrices,
+                    spilled_matrices: spilled_cells,
+                    dimensions,
+                    retained_traces: Mutex::new(retained_traces),
+                    spilled_traces: Mutex::new(spilled_traces),
+                    tree: HybridMerkleTree::Device(tree),
+                    salt_seed,
+                }),
+            );
+        }
+
+        // Build host `MerkleDigests` (0 bytes VRAM pinned across rounds), using
+        // GPU-prehashed leaf digests for unique heights and streaming chunked
+        // SIMD BLAKE3 for spilled / wide / multi-matrix groups.
+        let heights: Vec<usize> = dimensions.iter().map(|d| d.height).collect();
+        let leaf_domain = self.leaf_domain;
+        let device_id = self.device_id;
+        let digests = build_merkle_digests_from_height_hashes(
+            &heights,
+            |group_height, group_indices| {
+                if let &[single_idx] = group_indices
+                    && let Some(leaf_hashes) = prehashed[single_idx].take()
+                {
+                    assert_eq!(leaf_hashes.len(), group_height);
+                    return leaf_hashes;
+                }
+                let group_has_spilled = group_indices.iter().any(|&i| spilled[i].is_some());
+                let group_has_resident = group_indices.iter().any(|&i| resident[i].is_some());
+                let group_is_wide = wide_heights.contains(&group_height);
+                if !group_has_spilled
+                    && group_has_resident
+                    && !group_is_wide
+                    && group_height
+                        .saturating_mul(32)
+                        .saturating_add(64 << 20)
+                        .saturating_add(min_free)
+                        <= super::device_memory_info(device_id).0
+                {
+                    let res_refs: Vec<Option<&CudaLde>> = group_indices
+                        .iter()
+                        .map(|&i| resident[i].as_ref())
+                        .collect();
+                    let host_refs: Vec<Option<&RowMajorMatrix<Goldilocks>>> = group_indices
+                        .iter()
+                        .map(|&i| {
+                            resident[i]
+                                .is_none()
+                                .then(|| host_matrices[i].as_ref().expect("host matrix"))
+                        })
+                        .collect();
+                    return CudaMixedMerkleTree::hash_hybrid_height_group_v6zk(
+                        device_id, &res_refs, &host_refs, &salt_seed,
+                    );
+                }
+
+                // Stream rows across resident/host/spilled members of this height group.
+                let total_row_bytes: usize = group_indices
+                    .iter()
+                    .map(|&i| dimensions[i].width * size_of::<Goldilocks>())
+                    .sum();
+                let block_rows = (STREAM_BLOCK_BYTES / total_row_bytes.max(size_of::<u64>()))
+                    .clamp(1, group_height);
+                // SAFETY: every row `0..group_height` is initialized by
+                // `hash_raw_multi_rows_salted_uninit` across chunks.
+                unsafe {
+                    blake3_simd::alloc_and_fill_digests(group_height, group_height, |dst| {
+                        let mut row_start = 0usize;
+                        while row_start < group_height {
+                            let n_rows = (group_height - row_start).min(block_rows);
+                            let blocks: Vec<(Vec<u8>, usize)> = group_indices
+                                .iter()
+                                .map(|&i| {
+                                    let row_bytes = dimensions[i].width * size_of::<Goldilocks>();
+                                    if let Some(sp) = spilled[i].as_ref() {
+                                        (sp.read_raw_rows(row_start, n_rows), row_bytes)
+                                    } else if let Some(mat) = host_matrices[i].as_ref() {
+                                        let width = mat.width();
+                                        let mut raw = vec![0u8; n_rows * row_bytes];
+                                        let slice = &mat.values
+                                            [row_start * width..(row_start + n_rows) * width];
+                                        for (chunk, elem) in
+                                            raw.chunks_exact_mut(8).zip(slice.iter())
+                                        {
+                                            chunk.copy_from_slice(
+                                                &elem.as_canonical_u64().to_le_bytes(),
+                                            );
+                                        }
+                                        (raw, row_bytes)
+                                    } else if let Some(lde) = resident[i].as_ref() {
+                                        let mut words = vec![0u64; n_rows * lde.width()];
+                                        lde.copy_rows_to_host(row_start, n_rows, &mut words);
+                                        let mut raw = vec![0u8; n_rows * row_bytes];
+                                        for (chunk, &w) in raw.chunks_exact_mut(8).zip(words.iter())
+                                        {
+                                            chunk.copy_from_slice(&w.to_le_bytes());
+                                        }
+                                        (raw, row_bytes)
+                                    } else {
+                                        unreachable!("checked above")
+                                    }
+                                })
+                                .collect();
+                            blake3_simd::hash_raw_multi_rows_salted_uninit(
+                                &blocks,
+                                group_height,
+                                row_start,
+                                &salt_seed,
+                                &mut dst[row_start..row_start + n_rows],
+                                leaf_domain,
+                            );
+                            row_start += n_rows;
+                        }
+                    })
+                }
+            },
+            self.compress_domain,
+        );
+
+        let tree = HybridMerkleTree::Host(digests);
+        let commitment = tree.cap(self.cap_height);
+        let resident_active: Vec<AtomicBool> = resident
+            .iter()
+            .map(|opt| AtomicBool::new(opt.is_some()))
+            .collect();
+        let committed_matrices: Vec<OnceLock<RowMajorMatrix<Goldilocks>>> = host_matrices
+            .into_iter()
+            .map(|mat| {
+                let cell = OnceLock::new();
+                if let Some(mat) = mat {
+                    cell.set(mat).ok().expect("fresh hiding host cell");
+                }
+                cell
+            })
+            .collect();
+        let spilled_cells: Vec<OnceLock<SpilledMatrix>> = spilled
+            .into_iter()
+            .map(|sp| {
+                let cell = OnceLock::new();
+                if let Some(sp) = sp {
+                    cell.set(sp).ok().expect("fresh hiding spill cell");
+                }
+                cell
+            })
+            .collect();
+        (
+            commitment,
+            HidingCudaMmcsData(HidingCudaMmcsDataInner::Hybrid {
+                resident,
+                resident_active,
+                materialize: Box::new(CudaLde::to_row_major_matrix),
+                materialize_spilled: Box::new(SpilledMatrix::read_all),
+                committed_matrices,
+                spilled_matrices: spilled_cells,
+                dimensions,
+                retained_traces: Mutex::new(retained_traces),
+                spilled_traces: Mutex::new(spilled_traces),
+                tree,
+                salt_seed,
+            }),
+        )
+    }
+
     /// Commits device-resident CUDA LDEs with an explicit `salt_seed`, routing
     /// any height group exceeding [`MAX_DEVICE_LEAF_ROW_BYTES_ZK`] through
     /// host salted leaf hashing and hybrid CUDA Merkle tree construction.
@@ -439,9 +1027,10 @@ impl HidingCudaMmcs {
             height: lde.height(),
         }));
         if !wide_heights.is_empty() {
-            let mut resident: Vec<Option<CudaLde>> = Vec::with_capacity(ldes.len());
-            let mut host: Vec<Option<RowMajorMatrix<Goldilocks>>> = Vec::with_capacity(ldes.len());
-            let mut dimensions = Vec::with_capacity(ldes.len());
+            let count = ldes.len();
+            let mut resident: Vec<Option<CudaLde>> = Vec::with_capacity(count);
+            let mut host: Vec<Option<RowMajorMatrix<Goldilocks>>> = Vec::with_capacity(count);
+            let mut dimensions = Vec::with_capacity(count);
             for lde in ldes {
                 let dims = Dimensions {
                     width: lde.width(),
@@ -472,6 +1061,10 @@ impl HidingCudaMmcs {
                 &salt_seed,
             );
             let commitment = MerkleCap::new(vec![tree.root()]);
+            let resident_active = resident
+                .iter()
+                .map(|opt| AtomicBool::new(opt.is_some()))
+                .collect();
             let committed_matrices = host
                 .into_iter()
                 .map(|mat| {
@@ -482,14 +1075,20 @@ impl HidingCudaMmcs {
                     cell
                 })
                 .collect();
+            let spilled_matrices = (0..count).map(|_| OnceLock::new()).collect();
             return (
                 commitment,
                 HidingCudaMmcsData(HidingCudaMmcsDataInner::Hybrid {
                     resident,
+                    resident_active,
                     materialize: Box::new(CudaLde::to_row_major_matrix),
+                    materialize_spilled: Box::new(SpilledMatrix::read_all),
                     committed_matrices,
+                    spilled_matrices,
                     dimensions,
-                    tree,
+                    retained_traces: Mutex::new(Vec::new()),
+                    spilled_traces: Mutex::new(Vec::new()),
+                    tree: HybridMerkleTree::Device(tree),
                     salt_seed,
                 }),
             );
@@ -510,6 +1109,7 @@ impl HidingCudaMmcs {
                         .collect()
                 })),
                 committed_matrices: OnceLock::new(),
+                retained_traces: Mutex::new(Vec::new()),
                 tree,
                 salt_seed,
             }),
@@ -537,14 +1137,34 @@ impl HidingCudaMmcs {
             .sum();
         let max_height = ldes.iter().map(Matrix::height).max().unwrap_or(0);
         let tree_workspace_bytes = max_height.saturating_mul(96);
-        let (free_bytes, _) = super::device_memory_info(self.device_id);
+        let (free_bytes, total_device_bytes) = super::device_memory_info(self.device_id);
         let min_free = super::minimum_free_bytes();
-        if total_bytes
+        let exceeds_vram = total_bytes
             .saturating_add(tree_workspace_bytes)
             .saturating_add(min_free)
             > free_bytes
-            || !host_hashed_heights_zk(ldes.iter().map(Matrix::dimensions)).is_empty()
+            || !host_hashed_heights_zk(ldes.iter().map(Matrix::dimensions)).is_empty();
+        if let Some(dir) = self.spill_dir.as_deref()
+            && (exceeds_vram || total_bytes > total_device_bytes / 6)
         {
+            let mut pack = SpillPackWriter::create(dir);
+            let spilled: Vec<Option<SpilledMatrix>> = ldes
+                .into_iter()
+                .map(|m| Some(pack.append_matrix(&m)))
+                .collect();
+            pack.flush();
+            let count = spilled.len();
+            return self.commit_cuda_mixed_spilled_with_seed(
+                (0..count).map(|_| None).collect(),
+                (0..count).map(|_| None).collect(),
+                spilled,
+                (0..count).map(|_| None).collect(),
+                Vec::new(),
+                Vec::new(),
+                salt_seed,
+            );
+        }
+        if exceeds_vram {
             return self.commit_cpu_with_seed(ldes, salt_seed);
         }
         let resident: Vec<CudaLde> = ldes
@@ -585,13 +1205,24 @@ fn hash_wide_host_groups_salted(
 
 fn hybrid_open_row<M: Matrix<Goldilocks>>(
     resident: &[Option<CudaLde>],
+    resident_active: &[AtomicBool],
     committed_matrices: &[OnceLock<M>],
+    spilled_matrices: &[OnceLock<SpilledMatrix>],
     dimensions: &[Dimensions],
     index: usize,
 ) -> Vec<Vec<Goldilocks>> {
     let max_height = dimensions.iter().map(|d| d.height).max().unwrap();
     assert!(index < max_height, "MMCS opening index out of bounds");
-    let active_ldes: Vec<&CudaLde> = resident.iter().filter_map(Option::as_ref).collect();
+    let log_max_height = log2_ceil_usize(max_height);
+    let active_ldes: Vec<&CudaLde> = resident
+        .iter()
+        .enumerate()
+        .filter_map(|(i, lde)| {
+            resident_active[i]
+                .load(Ordering::Acquire)
+                .then_some(lde.as_ref())?
+        })
+        .collect();
     let mut gpu_rows = if active_ldes.is_empty() {
         Vec::new().into_iter()
     } else {
@@ -601,13 +1232,16 @@ fn hybrid_open_row<M: Matrix<Goldilocks>>(
         .iter()
         .enumerate()
         .map(|(matrix_index, lde)| {
-            if lde.is_some() {
+            if lde.is_some() && resident_active[matrix_index].load(Ordering::Acquire) {
                 gpu_rows.next().unwrap()
+            } else if let Some(spilled) = spilled_matrices[matrix_index].get() {
+                let row = index >> (log_max_height - log2_ceil_usize(spilled.height()));
+                spilled.read_row(row)
             } else {
                 let matrix = committed_matrices[matrix_index]
                     .get()
                     .expect("hybrid host matrix missing");
-                let row = index >> (max_height.trailing_zeros() - matrix.height().trailing_zeros());
+                let row = index >> (log_max_height - log2_ceil_usize(matrix.height()));
                 matrix.row(row).unwrap().into_iter().collect()
             }
         })
@@ -616,7 +1250,9 @@ fn hybrid_open_row<M: Matrix<Goldilocks>>(
 
 fn hybrid_open_rows<M: Matrix<Goldilocks>>(
     resident: &[Option<CudaLde>],
+    resident_active: &[AtomicBool],
     committed_matrices: &[OnceLock<M>],
+    spilled_matrices: &[OnceLock<SpilledMatrix>],
     dimensions: &[Dimensions],
     indices: &[usize],
 ) -> Vec<Vec<Vec<Goldilocks>>> {
@@ -625,7 +1261,16 @@ fn hybrid_open_rows<M: Matrix<Goldilocks>>(
     }
     let max_height = dimensions.iter().map(|d| d.height).max().unwrap();
     assert!(indices.iter().all(|&index| index < max_height));
-    let active_ldes: Vec<&CudaLde> = resident.iter().filter_map(Option::as_ref).collect();
+    let log_max_height = log2_ceil_usize(max_height);
+    let active_ldes: Vec<&CudaLde> = resident
+        .iter()
+        .enumerate()
+        .filter_map(|(i, lde)| {
+            resident_active[i]
+                .load(Ordering::Acquire)
+                .then_some(lde.as_ref())?
+        })
+        .collect();
     let mut gpu_queries = if active_ldes.is_empty() {
         (0..indices.len())
             .map(|_| Vec::new())
@@ -642,14 +1287,16 @@ fn hybrid_open_rows<M: Matrix<Goldilocks>>(
                 .iter()
                 .enumerate()
                 .map(|(matrix_index, lde)| {
-                    if lde.is_some() {
+                    if lde.is_some() && resident_active[matrix_index].load(Ordering::Acquire) {
                         gpu_rows.next().unwrap()
+                    } else if let Some(spilled) = spilled_matrices[matrix_index].get() {
+                        let row = index >> (log_max_height - log2_ceil_usize(spilled.height()));
+                        spilled.read_row(row)
                     } else {
                         let matrix = committed_matrices[matrix_index]
                             .get()
                             .expect("hybrid host matrix missing");
-                        let row = index
-                            >> (max_height.trailing_zeros() - matrix.height().trailing_zeros());
+                        let row = index >> (log_max_height - log2_ceil_usize(matrix.height()));
                         matrix.row(row).unwrap().into_iter().collect()
                     }
                 })
@@ -715,6 +1362,7 @@ impl Mmcs<Goldilocks> for HidingCudaMmcs {
                         resident,
                         materialize: None,
                         committed_matrices,
+                        retained_traces: Mutex::new(Vec::new()),
                         tree,
                         salt_seed,
                     }),
@@ -736,16 +1384,24 @@ impl Mmcs<Goldilocks> for HidingCudaMmcs {
             }
             HidingCudaMmcsDataInner::Hybrid {
                 resident,
+                resident_active,
                 committed_matrices,
+                spilled_matrices,
                 dimensions,
                 tree,
                 salt_seed,
                 ..
             } => {
                 let heights: Vec<usize> = dimensions.iter().map(|d| d.height).collect();
-                let opened_values =
-                    hybrid_open_row(resident, committed_matrices, dimensions, index);
-                let siblings = tree.open_siblings(index);
+                let opened_values = hybrid_open_row(
+                    resident,
+                    resident_active,
+                    committed_matrices,
+                    spilled_matrices,
+                    dimensions,
+                    index,
+                );
+                let siblings = tree.open_siblings(index, self.cap_height);
                 let salts = open_hiding_batch_salts(salt_seed, &heights, index, self.cap_height);
                 BatchOpening::new(opened_values, HidingBatchProof { salts, siblings })
             }
@@ -772,15 +1428,22 @@ impl Mmcs<Goldilocks> for HidingCudaMmcs {
             HidingCudaMmcsDataInner::Cpu(tree) => tree.leaves.iter().collect(),
             HidingCudaMmcsDataInner::Hybrid {
                 resident,
+                resident_active,
                 materialize,
+                materialize_spilled,
                 committed_matrices,
+                spilled_matrices,
                 ..
             } => resident
                 .iter()
                 .enumerate()
                 .map(|(index, lde)| {
-                    if let Some(lde) = lde.as_ref() {
+                    if let Some(lde) = lde.as_ref()
+                        && resident_active[index].load(Ordering::Acquire)
+                    {
                         committed_matrices[index].get_or_init(|| materialize(lde))
+                    } else if let Some(spilled) = spilled_matrices[index].get() {
+                        committed_matrices[index].get_or_init(|| materialize_spilled(spilled))
                     } else {
                         committed_matrices[index]
                             .get()
@@ -858,16 +1521,24 @@ impl Mmcs<Goldilocks> for HidingCudaMmcs {
             HidingCudaMmcsDataInner::Cpu(tree) => tree.open_multi_batch(indices, self.cap_height),
             HidingCudaMmcsDataInner::Hybrid {
                 resident,
+                resident_active,
                 committed_matrices,
+                spilled_matrices,
                 dimensions,
                 tree,
                 salt_seed,
                 ..
             } => {
                 let heights: Vec<usize> = dimensions.iter().map(|d| d.height).collect();
-                let opened_values =
-                    hybrid_open_rows(resident, committed_matrices, dimensions, indices);
-                let pruned = tree.open_pruned_siblings(indices);
+                let opened_values = hybrid_open_rows(
+                    resident,
+                    resident_active,
+                    committed_matrices,
+                    spilled_matrices,
+                    dimensions,
+                    indices,
+                );
+                let pruned = tree.open_pruned_siblings(indices, self.cap_height);
                 let salts = open_hiding_multi_salts(salt_seed, &heights, indices, self.cap_height);
                 (opened_values, HidingMultiProof { salts, pruned })
             }

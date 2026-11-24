@@ -9,7 +9,6 @@ use p3_fri::{
     TwoAdicFriFoldingForMmcs, prover,
 };
 use p3_matrix::interpolation::{Interpolate, compute_adjusted_weights};
-use p3_maybe_rayon::prelude::*;
 use p3_merkle_tree::MerkleTreeMmcs;
 use p3_symmetric::{CompressionFunctionFromHasher, SerializingHasher};
 use p3_util::linear_map::LinearMap;

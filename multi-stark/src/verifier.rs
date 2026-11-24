@@ -243,7 +243,9 @@ impl<SC: ProofConfig> System<SC> {
         // observations as the prover, so any divergence (e.g. different
         // commitments) produces different challenges, making it infeasible for a
         // cheating prover to predict them.
-        let mut challenger = self.config.initialise_challenger();
+        let mut challenger = self
+            .config
+            .initialise_challenger_for_mode(crate::config::TranscriptMode::Single);
 
         // Bind the system shape into the transcript. The protocol parameters
         // are already bound via the challenger seed.
@@ -424,6 +426,17 @@ impl<SC: ProofConfig> System<SC> {
                             // the value itself feeds no constraint.
                             let domain = pcs
                                 .natural_domain_for_degree(self.circuits[ci].preprocessed_height);
+                            if !self.config.omit_inactive_preprocessed_openings() {
+                                let prep_log_degree =
+                                    log2_strict_usize(self.circuits[ci].preprocessed_height);
+                                let unshifted =
+                                    zeta * SC::Challenge::from(domain.first_point().inverse());
+                                crate::ensure!(
+                                    unshifted.exp_power_of_2(prep_log_degree)
+                                        != <SC::Challenge as Algebra<SC::Challenge>>::ONE,
+                                    VerificationError::InvalidChallenge
+                                );
+                            }
                             let preprocessed_opened_values =
                                 preprocessed_opened_values.as_ref().unwrap();
                             preprocessed_trace_evaluations.push((
@@ -540,7 +553,7 @@ impl<SC: ProofConfig> System<SC> {
                 // p3's (unnormalized) last-row selector; the normalization
                 // constant is pre-absorbed into `delta_scaled`.
                 view.is_last_row,
-                crate::system::extension_params::<SC>().w,
+                crate::system::extension_params::<SC>().modulus,
                 extension_d,
                 circuit.lookup_group_size,
                 &mut constraint_values,
@@ -655,17 +668,40 @@ impl<SC: ProofConfig> System<SC> {
             num_preprocessed,
             "preprocessed commitment does not match configured circuits"
         );
+        if let Some(commit) = &self.preprocessed_commit {
+            let max_prep_height = self
+                .circuits
+                .iter()
+                .zip(&self.preprocessed_indices)
+                .filter_map(|(circuit, idx)| idx.map(|_| circuit.preprocessed_height))
+                .max()
+                .unwrap_or(0);
+            crate::ensure!(
+                max_prep_height > 0
+                    && max_prep_height.is_power_of_two()
+                    && self.config.validate_commitment_cap(
+                        commit,
+                        log2_strict_usize(max_prep_height) + self.config.log_blowup(),
+                    ),
+                VerificationError::InvalidSystem;
+                max_prep_height,
+                "preprocessed commitment cap root count mismatch"
+            );
+        }
         // Stage 0 round: the preprocessed commitment is built once over ALL
         // preprocessed traces at system construction, so its round carries one
         // entry per preprocessed matrix. Inactive matrices need one full-width
         // opening unless the PCS authenticates their boundaries independently.
-        ensure_eq!(
-            preprocessed_opened_values
-                .as_ref()
-                .map_or(0, |values| values.len()),
-            num_preprocessed,
+        // Reject `Some(vec![])` when `num_preprocessed == 0` so there is a
+        // single canonical proof encoding.
+        crate::ensure!(
+            match preprocessed_opened_values {
+                None => num_preprocessed == 0,
+                Some(values) => num_preprocessed > 0 && values.len() == num_preprocessed,
+            },
             VerificationError::InvalidProofShape;
-            actual = preprocessed_opened_values.as_ref().map_or(0, |values| values.len()),
+            present = preprocessed_opened_values.is_some(),
+            actual = preprocessed_opened_values.as_ref().map_or(0, Vec::len),
             expected = num_preprocessed,
             "unexpected number of preprocessed matrices"
         );
@@ -844,6 +880,36 @@ impl<SC: ProofConfig> System<SC> {
             );
             quotient_degrees.push(quotient_degree);
         }
+        // Validate exact Merkle cap root counts before any commitment enters
+        // the Fiat-Shamir transcript.
+        let max_log_lde_height = log_degrees
+            .iter()
+            .copied()
+            .map(usize::from)
+            .max()
+            .expect("num_active > 0")
+            + self.config.log_blowup();
+        crate::ensure!(
+            self.config
+                .validate_commitment_cap(&proof.commitments.stage_1_trace, max_log_lde_height),
+            VerificationError::InvalidProofShape;
+            max_log_lde_height,
+            "stage-1 commitment cap root count mismatch"
+        );
+        crate::ensure!(
+            self.config
+                .validate_commitment_cap(&proof.commitments.stage_2_trace, max_log_lde_height),
+            VerificationError::InvalidProofShape;
+            max_log_lde_height,
+            "stage-2 commitment cap root count mismatch"
+        );
+        crate::ensure!(
+            self.config
+                .validate_commitment_cap(&proof.commitments.quotient_chunks, max_log_lde_height),
+            VerificationError::InvalidProofShape;
+            max_log_lde_height,
+            "quotient commitment cap root count mismatch"
+        );
         // One wide quotient matrix per active circuit, holding all its
         // coefficient slices, opened at the single point ζ.
         ensure_eq!(

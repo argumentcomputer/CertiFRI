@@ -87,15 +87,7 @@ fn fixture<F: Field>(height: usize, fixed: bool) -> (Circuit<F>, RowMajorMatrix<
         ],
         ..Default::default()
     };
-    let graph = compile(
-        &spec,
-        &ExtensionParams {
-            degree: 1,
-            w: F::ONE,
-            karatsuba: false,
-        },
-    )
-    .unwrap();
+    let graph = compile(&spec, &ExtensionParams::base()).unwrap();
     let circuit = Circuit {
         graph,
         main_width: 2,
@@ -231,11 +223,13 @@ fn witness_circuit_order_and_lookup_totals() {
         .into_iter()
         .map(|height| fixture::<Val>(height, true))
         .unzip();
+    let vk_digest = compute_vk_digest::<Val, ExtVal>(&circuits);
     let system = System {
         config: config(),
         circuits,
         preprocessed_commit: None,
         preprocessed_indices: vec![None; 3],
+        vk_digest,
     };
     let expected: Vec<_> = traces
         .iter()

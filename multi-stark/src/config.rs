@@ -64,6 +64,29 @@ pub type PackedVal<SC> = <Val<SC> as Field>::Packing;
 /// Packed (SIMD) representation of the challenge field.
 pub type PackedChallenge<SC> = <<SC as ProofConfig>::Challenge as ExtensionOf<Val<SC>>>::ExtPacking;
 
+/// Protocol wire & cryptographic specification version.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum ProtocolVersion {
+    /// Legacy `v5` protocol: unkeyed BLAKE3, Horner FRI batching, shape-only
+    /// transcript binding.
+    V5,
+    /// Hardened `v6` protocol: BLAKE3 `derive_key` domain separation across
+    /// Merkle leaves / compressions / single-vs-batch transcripts / VK digest,
+    /// canonical VK & constraint-graph digest plus extension degree/modulus
+    /// bound in the transcript, and configurable multilinear tensor FRI batching.
+    V6,
+}
+
+/// Transcript mode separating standalone single-proof transcripts from
+/// multi-shard batch transcripts.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum TranscriptMode {
+    /// Standalone single proof (`prove` / `verify`).
+    Single,
+    /// Multi-shard batch proof (`batch_challenger` / `prove_batch_shard` / `verify_batch`).
+    Batch,
+}
+
 pub trait ProofConfig {
     /// The PCS used to commit to trace polynomials.
     type Pcs: Pcs<F: Field, Challenge = Self::Challenge, Challenger = Self::Challenger>;
@@ -80,6 +103,13 @@ pub trait ProofConfig {
     /// Returns a reference to the PCS.
     fn pcs(&self) -> &Self::Pcs;
 
+    /// Protocol specification version governing transcript & hash domain
+    /// separation. Defaults to [`ProtocolVersion::V5`] for backwards
+    /// compatibility with existing configurations.
+    fn protocol_version(&self) -> ProtocolVersion {
+        ProtocolVersion::V5
+    }
+
     /// Returns a fresh challenger.
     ///
     /// # Transcript contract
@@ -89,6 +119,14 @@ pub trait ProofConfig {
     /// never collide. The circuit shape is bound separately via
     /// `System::observe_shape`.
     fn initialise_challenger(&self) -> Self::Challenger;
+
+    /// Returns a fresh challenger domain-separated for `mode` (single proof
+    /// vs batch proof). Legacy `v5` configurations fall back to
+    /// [`Self::initialise_challenger`]; `v6` configurations use distinct
+    /// BLAKE3 `derive_key` contexts for `Single` and `Batch`.
+    fn initialise_challenger_for_mode(&self, _mode: TranscriptMode) -> Self::Challenger {
+        self.initialise_challenger()
+    }
 
     /// Largest log2 length of a committed polynomial.
     fn max_log_degree(&self) -> usize;
@@ -138,6 +176,17 @@ pub trait ProofConfig {
     /// evaluations.
     fn log_blowup(&self) -> usize;
 
+    /// Validate that `commit` has the exact expected structure (e.g. exact
+    /// Merkle cap root count) for a commitment whose tallest committed LDE has
+    /// height `2^max_log_lde_height`.
+    ///
+    /// Called by the verifier before observing any commitment into the
+    /// Fiat-Shamir transcript so variable-length caps cannot collide with
+    /// subsequent transcript fields or enable free challenge grinding.
+    fn validate_commitment_cap(&self, _commit: &Com<Self>, _max_log_lde_height: usize) -> bool {
+        true
+    }
+
     /// Commit deterministic main-trace sources.
     fn commit_main(
         &self,
@@ -152,6 +201,65 @@ pub trait ProofConfig {
                 .map(|(domain, trace)| (domain, trace.materialize()))
                 .collect(),
         )
+    }
+
+    /// Commit preprocessed evaluation matrices from a streaming iterator.
+    ///
+    /// Each item is `(domain, matrix, retain_1x_for_lookups)`, where
+    /// `retain_1x_for_lookups` is `true` when the system does not retain
+    /// `circuit.preprocessed` in RAM and the circuit's lookup expressions read
+    /// preprocessed columns.
+    ///
+    /// Backends that spill LDEs to disk can process one matrix at a time so
+    /// all preprocessed matrices never coexist in RAM simultaneously. Returns
+    /// `None` if the iterator yields no matrices.
+    fn commit_preprocessed(
+        &self,
+        evaluations: &mut dyn Iterator<
+            Item = (
+                Domain<Self>,
+                p3_matrix::dense::RowMajorMatrix<Val<Self>>,
+                bool,
+            ),
+        >,
+    ) -> Option<(Com<Self>, PcsData<Self>)>
+    where
+        Self: Sized,
+    {
+        let evals: Vec<_> = evaluations
+            .map(|(domain, matrix, _retain_1x)| (domain, matrix))
+            .collect();
+        if evals.is_empty() {
+            None
+        } else {
+            Some(self.pcs().commit(evals))
+        }
+    }
+
+    /// Commit deterministic main-trace sources from a streaming iterator.
+    ///
+    /// Each item is `(domain, trace_source, retain_1x_for_lookups)`, where
+    /// `retain_1x_for_lookups` is `true` when the circuit's lookup witness is
+    /// unmaterialized (`shape_only`) and the circuit has at least one lookup.
+    ///
+    /// Returns `None` if the iterator yields no active traces.
+    fn commit_main_streaming(
+        &self,
+        evaluations: &mut dyn Iterator<
+            Item = (Domain<Self>, crate::witness::TraceSource<Val<Self>>, bool),
+        >,
+    ) -> Option<(Com<Self>, PcsData<Self>)>
+    where
+        Self: Sized,
+    {
+        let evals: Vec<_> = evaluations
+            .map(|(domain, trace, _retain_1x)| (domain, trace))
+            .collect();
+        if evals.is_empty() {
+            None
+        } else {
+            Some(self.commit_main(evals))
+        }
     }
 
     /// Normalize any backend-dependent field representatives before proof

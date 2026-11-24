@@ -41,7 +41,7 @@ def CurveCA (F : Type*) [Field F] [DecidableEq F] (T : ℕ → ℕ → ℕ → �
 
 /-- The threshold of the unique-decoding proximity gap proved here: for a
 domain of `n` points, `e` errors and a curve of `m` terms,
-`(m - 1) * (n * (e + 1) + 1)` exceptional parameters. -/
-def udThreshold (n e m : ℕ) : ℕ := (m - 1) * (n * (e + 1) + 1)
+`(m - 1) * (n + e)` exceptional parameters (linear in `n`, matching BCIKS). -/
+def udThreshold (n e m : ℕ) : ℕ := (m - 1) * (n + e)
 
 end CertiFri

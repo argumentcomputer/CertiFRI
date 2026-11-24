@@ -274,6 +274,27 @@ theorem rbrSound_pcs_ud [Fintype K] (M : StarkModel F EF K) (sys : System F D) {
           (δ * 2 ^ (sys.maxLogDegree + sys.fri.logBlowup) + 1) + 1 := by
       have htwo : hs.params.n ≤ sys.maxLogDegree + sys.fri.logBlowup := hs.height
       gcongr <;> norm_num
+    have h2n_ge : (1 : ℝ) ≤ (2 : ℝ) ^ hs.params.n := one_le_pow₀ (by norm_num)
+    have hlin_le : (1 + δ) * (2 : ℝ) ^ hs.params.n ≤
+        (2 : ℝ) ^ (sys.maxLogDegree + sys.fri.logBlowup) *
+          (δ * 2 ^ (sys.maxLogDegree + sys.fri.logBlowup) + 1) + 1 := by
+      set X : ℝ := (2 : ℝ) ^ hs.params.n
+      have h1 : (1 + δ) * X ≤ X * (δ * X + 1) + 1 := by
+        have hX : 0 ≤ X * (X - 1) := mul_nonneg (by linarith) (by linarith)
+        have hdX : 0 ≤ δ * (X * (X - 1)) := mul_nonneg hδ hX
+        linarith
+      exact h1.trans hc
+    have h1d_le : 1 + δ ≤ 2 := by
+      have : (0 : ℝ) ≤ (1 / 2 : ℝ) ^ sys.fri.logBlowup := pow_nonneg (by norm_num) _
+      linarith
+    have h2n_le : (2 : ℝ) ^ hs.params.n ≤
+        (2 : ℝ) ^ (sys.maxLogDegree + sys.fri.logBlowup) *
+          (δ * 2 ^ (sys.maxLogDegree + sys.fri.logBlowup) + 1) + 1 := by
+      set X : ℝ := (2 : ℝ) ^ hs.params.n
+      have h1 : X ≤ X * (δ * X + 1) + 1 := by
+        have hdX2 : 0 ≤ δ * (X * X) := mul_nonneg hδ (mul_nonneg (by linarith) (by linarith))
+        linarith
+      exact h1.trans hc
     intro i hi t msg hd
     refine (h i hi t msg hd).mono_right ?_
     beta_reduce

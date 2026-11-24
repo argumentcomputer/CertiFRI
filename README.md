@@ -440,7 +440,7 @@ They run as part of the build: a failing `#guard` fails the build.
   hashers, the challenger and the pruned Merkle proofs against values computed
   by Plonky3. BabyBear, its quartic extension and the scalar field of BN254
   against natural-number arithmetic and against values computed by Plonky3 at
-  revision `0d803737` (`CertiFriTest/vectors/fields`).
+  revision `3152b14a` (`CertiFriTest/vectors/fields`).
 - `CertiFriTest/Merkle.lean`: the Merkle tree layout against openings produced
   by Plonky3.
 - `CertiFriTest/Stark/MultiStark.lean`: `Stark.verify` on three proofs and
@@ -489,7 +489,7 @@ claimed value; Plonky3 inverts one per opening point, in a batch.
 | `CertiFriTest/` | Executable checks against reference code and against Plonky3, and the generators of their vectors. |
 | `Proofs/` | A separate Lake package that depends on Mathlib and on `CertiFri`: the security theory, and the refinement of the executable verifier to it. |
 | `multi-stark/` | The Rust crate multi-stark, prover and verifier, with its CPU and CUDA backends: revision `3515632` of `argumentcomputer/multi-stark`, imported with its history. Its license files are in the directory. The STARK test vectors are made with it. |
-| `plonky3/` | Submodule: a Plonky3 checkout for reference. Nothing builds from it. |
+| `plonky3/` | Submodule: Plonky3 at `3152b14a`, the revision multi-stark builds on. The generator of the field vectors (`CertiFriTest/vectors/fields`) builds from it. |
 
 Mathlib is confined to `Proofs/` so that a project can depend on the verifier
 without inheriting it.
@@ -497,8 +497,7 @@ without inheriting it.
 `CertiFri/Schedule.lean` and `CertiFri/Shape.lean` derive a folding schedule
 from the claims, as later Plonky3 revisions do, and prove two properties of it.
 The verifier does not use them: at revision `3152b14a` the arities are read
-from the proof, and the verifier requires each to be two. The `plonky3/`
-submodule points at that later revision (`0d803737`), not at `3152b14a`.
+from the proof, and the verifier requires each to be two.
 
 ## Build
 

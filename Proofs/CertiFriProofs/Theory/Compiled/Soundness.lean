@@ -33,7 +33,7 @@ is read as it is.
 
 * `Params.soundness`: the verifier accepts while the claims fail with
   probability at most
-  `N * εmax + ((batches + 1) * (rounds + 2) + 3) * N * (N - 1) / (2 * |D|)`,
+  `N * εmax + (max (batches + rounds) 3 + 3) * N ^ 2 / (4 * |D|)`,
   where `N = Q + (rounds + 2) + P.verifierQueries` counts the oracle queries of
   the adversary, of the derivation of the challenges and of the verifier, and
   `εmax` bounds the round-by-round error of every round.
@@ -129,7 +129,7 @@ def experimentGrind (bits : ℕ → ℕ) {A : Type*}
 queries: the probability that the model verifier accepts while the claims of
 the adversary's first message fail is at most
 
-    N * εmax + ((batches + 1) * (rounds + 2) + 3) * N * (N - 1) / (2 * |D|),
+    N * εmax + (max (batches + rounds) 3 + 3) * N ^ 2 / (4 * |D|),
 
 with `N = Q + (rounds + 2) + P.verifierQueries`, the number of oracle queries
 of the whole experiment. The first term is the Fiat–Shamir loss: each query can
@@ -206,8 +206,8 @@ theorem soundness {θ : ℝ} (hθ : 0 ≤ θ) {εα εβ : ℕ → ℝ} {εmax :
         ClaimsFail P.ldt P.shift θ (P.claims (msgs res.1 0) (committedRow l)))
       (P.experiment adv msgs proofOf) [] ≤
       (Q + (P.rounds + 2) + P.verifierQueries) * εmax +
-        ((P.batches + 1) * (P.rounds + 2) + 3) * (Q + (P.rounds + 2) + P.verifierQueries) *
-          (Q + (P.rounds + 2) + P.verifierQueries - 1) / (2 * Fintype.card D) := by
+        ((max (P.batches + P.rounds) 3 + 3 : ℕ) : ℝ) * (Q + (P.rounds + 2) + P.verifierQueries) ^ 2 /
+          (4 * Fintype.card D) := by
   have : ∀ i, Nonempty (Chal P.ldt P.queries i) :=
     PcsRbr.Chal.nonempty P.domain_zero_nonempty P.queries
   have hnd : ∀ t : Transcript (PcsRbr.Msg F P.numClaims) (Chal P.ldt P.queries) (P.rounds + 2),
@@ -218,7 +218,8 @@ theorem soundness {θ : ℝ} (hθ : 0 ≤ θ) {εα εβ : ℕ → ℝ} {εmax :
     (PcsRbr.rbrSound P.ldt P.shift_ne hθ P.queries hmca hstep)
     (fun i _ => roundError_le hα hβ hq i) ((pow_nonneg hθ _).trans hq)
     (PcsRbr.doomed_zero P.ldt P.shift θ P.queries _)
-    (digestsOf := digestsOf) (K := P.batches + 1) (fun m => (length_digestsOf m).le)
+    (digestsOf := digestsOfAt P.rounds) (M := P.batches + P.rounds)
+    (fun x => length_chalDigests_le P.rounds id x)
     (read := fun j m c => P.read j m c) (fun j m c c' hc => P.read_congr j m c c' hc)
     hadv msgs
     (rest := fun out => (P.verify (proofOf out.1) out.2).bind fun b => .pure (out.1, b))
@@ -239,8 +240,7 @@ theorem soundness {θ : ℝ} (hθ : 0 ≤ θ) {εα εβ : ℕ → ℝ} {εmax :
         rfl
       rw [PcsRbr.claimsOf_mapIdx _ out.2 h0]
       exact hfail)
-  push_cast at h
-  exact h
+  rwa [show ((P.rounds + 2 : ℕ) : ℝ) = (P.rounds : ℝ) + 2 by push_cast; rfl] at h
 
 /-- **Soundness with proof of work.** The setting of `soundness`, with a
 proof-of-work check of `bits i` bits in round `i`: the oracle's answer to the
@@ -272,8 +272,8 @@ theorem soundness_grind (bits : ℕ → ℕ) {θ : ℝ} (hθ : 0 ≤ θ) {εα �
         ClaimsFail P.ldt P.shift θ (P.claims (msgs res.1 0) (committedRow l)))
       (P.experimentGrind bits adv msgs proofOf) [] ≤
       (Q + (P.rounds + 2) + P.verifierQueries) * εmax +
-        ((P.batches + 1) * (P.rounds + 2) + 3) * (Q + (P.rounds + 2) + P.verifierQueries) *
-          (Q + (P.rounds + 2) + P.verifierQueries - 1) / (2 * Fintype.card D) :=
+        ((max (P.batches + P.rounds) 3 + 3 : ℕ) : ℝ) * (Q + (P.rounds + 2) + P.verifierQueries) ^ 2 /
+          (4 * Fintype.card D) :=
   P.soundness_grind_view bits id hθ hmca hstep hα hβ hq hadv msgs proofOf
 
 /-! ## The folding hypothesis proved -/
@@ -305,8 +305,8 @@ theorem soundness_of_relDist {logBlowup logFinalPolyLen : ℕ}
         ClaimsFail P.ldt P.shift (1 - δ) (P.claims (msgs res.1 0) (committedRow l)))
       (P.experiment adv msgs proofOf) [] ≤
       (Q + (P.rounds + 2) + P.verifierQueries) * εmax +
-        ((P.batches + 1) * (P.rounds + 2) + 3) * (Q + (P.rounds + 2) + P.verifierQueries) *
-          (Q + (P.rounds + 2) + P.verifierQueries - 1) / (2 * Fintype.card D) := by
+        ((max (P.batches + P.rounds) 3 + 3 : ℕ) : ℝ) * (Q + (P.rounds + 2) + P.verifierQueries) ^ 2 /
+          (4 * Fintype.card D) := by
   have hθ : (0 : ℝ) ≤ 1 - δ := by
     have := pow_nonneg (by norm_num : (0 : ℝ) ≤ 1 / 2) logBlowup
     linarith

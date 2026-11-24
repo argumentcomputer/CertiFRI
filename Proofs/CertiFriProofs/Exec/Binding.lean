@@ -119,7 +119,7 @@ agreement `1 - δ` at every level that has a claim. Whatever the adversary, as
 long as it makes at most `Q` oracle queries: the probability that both of its
 attempts are accepted by `Fri.verify` and conflict is at most
 
-    2 * (N * εmax + ((batches + 1) * (rounds + 2) + 3) * N * (N - 1) / (2 * |D|)),
+    2 * (N * εmax + (max (batches + rounds) 3 + 3) * N ^ 2 / (4 * |D|)),
 
 with `N = Q + 2 * ((rounds + 2) + verifierQueries)`, the number of oracle
 queries of the experiment, and `εmax` bounding the round errors of
@@ -139,10 +139,8 @@ theorem binding
         ((modelParams m params shape wf).ldt.degree j) (1 - δ))
     {εmax : ℝ}
     (hα : ((claimRefs params.logBlowup shape).length : ℝ) *
-        ((2 : ℝ) ^ logMaxHeight params.logBlowup shape *
-          (δ * 2 ^ logMaxHeight params.logBlowup shape + 1) + 1) / Fintype.card K ≤ εmax)
-    (hβ : 2 * ((2 : ℝ) ^ logMaxHeight params.logBlowup shape *
-          (δ * 2 ^ logMaxHeight params.logBlowup shape + 1) + 1) / Fintype.card K /
+        ((1 + δ) * (2 : ℝ) ^ logMaxHeight params.logBlowup shape) / Fintype.card K ≤ εmax)
+    (hβ : ((1 + δ) * (2 : ℝ) ^ logMaxHeight params.logBlowup shape) / Fintype.card K /
         2 ^ params.commitPowBits ≤ εmax)
     (hq : (1 - δ) ^ params.numQueries / 2 ^ params.queryPowBits ≤ εmax) {A : Type*}
     {adv : OracleComp (OracleAnswer (D := D) m params shape wf) A} {Q : ℕ}
@@ -154,12 +152,10 @@ theorem binding
       (experiment₂ m params shape wf adv attempt₁ attempt₂) [] ≤
       2 * ((Q + 2 * (((modelParams m params shape wf).rounds + 2) +
             (modelParams m params shape wf).verifierQueries)) * εmax +
-        (((modelParams m params shape wf).batches + 1) *
-            ((modelParams m params shape wf).rounds + 2) + 3) *
+        ((max ((modelParams m params shape wf).batches +
+            (modelParams m params shape wf).rounds) 3 + 3 : ℕ) : ℝ) *
           (Q + 2 * (((modelParams m params shape wf).rounds + 2) +
-            (modelParams m params shape wf).verifierQueries)) *
-          (Q + 2 * (((modelParams m params shape wf).rounds + 2) +
-            (modelParams m params shape wf).verifierQueries) - 1) / (2 * Fintype.card D)) := by
+            (modelParams m params shape wf).verifierQueries)) ^ 2 / (4 * Fintype.card D)) := by
   refine (prob_mono (fun res l hE => ?_) _ _).trans
     (soundness₂_uniqueDecoding m params shape wf hheight hδ hrate hα hβ hq hadv attempt₁ attempt₂)
   obtain ⟨hacc₁, hacc₂, hconf⟩ := hE
@@ -180,10 +176,8 @@ theorem binding_of_rate
         3 / 2 ^ (logMaxHeight params.logBlowup shape - j) ≤ 1)
     {εmax : ℝ}
     (hα : ((claimRefs params.logBlowup shape).length : ℝ) *
-        ((2 : ℝ) ^ logMaxHeight params.logBlowup shape *
-          (δ * 2 ^ logMaxHeight params.logBlowup shape + 1) + 1) / Fintype.card K ≤ εmax)
-    (hβ : 2 * ((2 : ℝ) ^ logMaxHeight params.logBlowup shape *
-          (δ * 2 ^ logMaxHeight params.logBlowup shape + 1) + 1) / Fintype.card K /
+        ((1 + δ) * (2 : ℝ) ^ logMaxHeight params.logBlowup shape) / Fintype.card K ≤ εmax)
+    (hβ : ((1 + δ) * (2 : ℝ) ^ logMaxHeight params.logBlowup shape) / Fintype.card K /
         2 ^ params.commitPowBits ≤ εmax)
     (hq : (1 - δ) ^ params.numQueries / 2 ^ params.queryPowBits ≤ εmax) {A : Type*}
     {adv : OracleComp (OracleAnswer (D := D) m params shape wf) A} {Q : ℕ}
@@ -195,12 +189,10 @@ theorem binding_of_rate
       (experiment₂ m params shape wf adv attempt₁ attempt₂) [] ≤
       2 * ((Q + 2 * (((modelParams m params shape wf).rounds + 2) +
             (modelParams m params shape wf).verifierQueries)) * εmax +
-        (((modelParams m params shape wf).batches + 1) *
-            ((modelParams m params shape wf).rounds + 2) + 3) *
+        ((max ((modelParams m params shape wf).batches +
+            (modelParams m params shape wf).rounds) 3 + 3 : ℕ) : ℝ) *
           (Q + 2 * (((modelParams m params shape wf).rounds + 2) +
-            (modelParams m params shape wf).verifierQueries)) *
-          (Q + 2 * (((modelParams m params shape wf).rounds + 2) +
-            (modelParams m params shape wf).verifierQueries) - 1) / (2 * Fintype.card D)) :=
+            (modelParams m params shape wf).verifierQueries)) ^ 2 / (4 * Fintype.card D)) :=
   binding m params shape wf hheight hδ hrate
     (fun j hj hne => decodeMargin_of_rate m params shape wf hheight hj (hmargin j hj hne))
     hα hβ hq hadv attempt₁ attempt₂

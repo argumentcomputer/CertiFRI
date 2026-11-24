@@ -32,7 +32,7 @@ queries of the experiment for an adversary with at most `Q` queries:
   probability that one of the two attempts is accepted on the final log while
   its claims fail on the final log is at most
 
-      2 * (N * εmax + ((batches + 1) * (rounds + 2) + 3) * N * (N - 1) / (2 * |D|)).
+      2 * (N * εmax + (max (batches + rounds) 3 + 3) * N ^ 2 / (4 * |D|)).
 
 * `soundness₂_uniqueDecoding`: the same at agreement `1 - δ`, for
   `2 * δ + (1 / 2) ^ logBlowup ≤ 1`, with no proximity hypothesis, as
@@ -148,7 +148,7 @@ adversary, as long as it makes at most `Q` oracle queries and outputs two
 attempts: the probability that the executable verifier accepts one of the two
 attempts while the claims of that attempt fail is at most
 
-    2 * (N * εmax + ((batches + 1) * (rounds + 2) + 3) * N * (N - 1) / (2 * |D|)),
+    2 * (N * εmax + (max (batches + rounds) 3 + 3) * N ^ 2 / (4 * |D|)),
 
 where `N = Q + 2 * ((rounds + 2) + P.verifierQueries)` counts the oracle
 queries of the experiment `experiment₂`, with `batches`, `rounds` and
@@ -196,12 +196,10 @@ theorem soundness₂ {θ : ℝ} (hθ : 0 ≤ θ) {εα εβ : ℕ → ℝ} {εma
       (experiment₂ m params shape wf adv attempt₁ attempt₂) [] ≤
       2 * ((Q + 2 * (((modelParams m params shape wf).rounds + 2) +
             (modelParams m params shape wf).verifierQueries)) * εmax +
-        (((modelParams m params shape wf).batches + 1) *
-            ((modelParams m params shape wf).rounds + 2) + 3) *
+        ((max ((modelParams m params shape wf).batches +
+            (modelParams m params shape wf).rounds) 3 + 3 : ℕ) : ℝ) *
           (Q + 2 * (((modelParams m params shape wf).rounds + 2) +
-            (modelParams m params shape wf).verifierQueries)) *
-          (Q + 2 * (((modelParams m params shape wf).rounds + 2) +
-            (modelParams m params shape wf).verifierQueries) - 1) / (2 * Fintype.card D)) := by
+            (modelParams m params shape wf).verifierQueries)) ^ 2 / (4 * Fintype.card D)) := by
   have h := (modelParams m params shape wf).soundness_grind_view₂ (powBits params shape)
     (view m params shape) hθ (εmax := εmax) hmca hstep
     (by rw [powBits_zero, pow_zero, div_one]; exact hα)
@@ -225,13 +223,13 @@ at most `Q` oracle queries and outputs two attempts, the probability that
 `Fri.verify` accepts one of the two attempts while the claims of that attempt
 fail at agreement `1 - δ` is at most
 
-    2 * (N * εmax + ((batches + 1) * (rounds + 2) + 3) * N * (N - 1) / (2 * |D|)),
+    2 * (N * εmax + (max (batches + rounds) 3 + 3) * N ^ 2 / (4 * |D|)),
 
 with `N = Q + 2 * ((rounds + 2) + verifierQueries)`, provided `εmax` bounds the
 error of every round. With `n = logMaxHeight params.logBlowup shape` and
-`c = 2 ^ n * (δ * 2 ^ n + 1) + 1`, these are
+`c = (1 + δ) * 2 ^ n`, these are
 `(number of claimed values) * c / |K|` for the batching round,
-`2 * c / |K| / 2 ^ commitPowBits` for a folding round, and
+`c / |K| / 2 ^ commitPowBits` for a folding round, and
 `(1 - δ) ^ numQueries / 2 ^ queryPowBits` for the query round.
 
 The experiment and the events, both read on the final log, are those of
@@ -241,10 +239,8 @@ theorem soundness₂_uniqueDecoding
     (hheight : params.logFinalHeight ≤ logMaxHeight params.logBlowup shape) {δ : ℝ} (hδ : 0 ≤ δ)
     (hrate : 2 * δ + (1 / 2) ^ params.logBlowup ≤ 1) {εmax : ℝ}
     (hα : ((claimRefs params.logBlowup shape).length : ℝ) *
-        ((2 : ℝ) ^ logMaxHeight params.logBlowup shape *
-          (δ * 2 ^ logMaxHeight params.logBlowup shape + 1) + 1) / Fintype.card K ≤ εmax)
-    (hβ : 2 * ((2 : ℝ) ^ logMaxHeight params.logBlowup shape *
-          (δ * 2 ^ logMaxHeight params.logBlowup shape + 1) + 1) / Fintype.card K /
+        ((1 + δ) * (2 : ℝ) ^ logMaxHeight params.logBlowup shape) / Fintype.card K ≤ εmax)
+    (hβ : ((1 + δ) * (2 : ℝ) ^ logMaxHeight params.logBlowup shape) / Fintype.card K /
         2 ^ params.commitPowBits ≤ εmax)
     (hq : (1 - δ) ^ params.numQueries / 2 ^ params.queryPowBits ≤ εmax) {A : Type*}
     {adv : OracleComp (OracleAnswer (D := D) m params shape wf) A} {Q : ℕ}
@@ -257,12 +253,10 @@ theorem soundness₂_uniqueDecoding
       (experiment₂ m params shape wf adv attempt₁ attempt₂) [] ≤
       2 * ((Q + 2 * (((modelParams m params shape wf).rounds + 2) +
             (modelParams m params shape wf).verifierQueries)) * εmax +
-        (((modelParams m params shape wf).batches + 1) *
-            ((modelParams m params shape wf).rounds + 2) + 3) *
+        ((max ((modelParams m params shape wf).batches +
+            (modelParams m params shape wf).rounds) 3 + 3 : ℕ) : ℝ) *
           (Q + 2 * (((modelParams m params shape wf).rounds + 2) +
-            (modelParams m params shape wf).verifierQueries)) *
-          (Q + 2 * (((modelParams m params shape wf).rounds + 2) +
-            (modelParams m params shape wf).verifierQueries) - 1) / (2 * Fintype.card D)) := by
+            (modelParams m params shape wf).verifierQueries)) ^ 2 / (4 * Fintype.card D)) := by
   have hθ : (0 : ℝ) ≤ 1 - δ := by
     have := pow_nonneg (by norm_num : (0 : ℝ) ≤ 1 / 2) params.logBlowup
     linarith
@@ -279,8 +273,7 @@ theorem soundness₂_uniqueDecoding
     exact_mod_cast sum_numClaims_sub_one_le m params shape wf
   refine soundness₂ m params shape wf hθ
     (εα := fun j => (((modelParams m params shape wf).numClaims j - 1 : ℕ) : ℝ) *
-      ((2 : ℝ) ^ logMaxHeight params.logBlowup shape *
-        (δ * 2 ^ logMaxHeight params.logBlowup shape + 1) + 1) / Fintype.card K)
+      ((1 + δ) * (2 : ℝ) ^ logMaxHeight params.logBlowup shape) / Fintype.card K)
     (fun j hj => (modelParams m params shape wf).curveMCA_of_rate_of_curveCA
       (curveCA_udThreshold K) hn hfinal hδ hrate hj ((modelParams m params shape wf).numClaims j))
     (fun i hi => (modelParams m params shape wf).stepMCA_of_rate_of_curveCA

@@ -332,7 +332,7 @@ omit [FieldOps F] [FieldOps EF] [TwoAdicOps F] [ExtensionOps F EF] [Field K] [In
 that is read in a message of a challenge query of a prefix of the log commits to
 the same rows in the prefix and in the log. -/
 private theorem committedRow_of_mentions {l₁ : Log (SAns F EF D K slots width)} (hl₁ : l₁ <+: l)
-    (hno : ¬ HasBad (Hit (digestsOf (F := F) (EF := EF) B) r) l) {j : ℕ} {m : RawMsg F EF D}
+    (hno : ¬ HasBad (Hit (fun _ => digestsOf (F := F) (EF := EF) B) r) l) {j : ℕ} {m : RawMsg F EF D}
     (hm : Mentions l₁ j m) (hj : j < r) {root : D} (hroot : root ∈ digestsOf B m) :
     committedRow l root = committedRow l₁ root := by
   obtain ⟨s, rfl⟩ := hl₁

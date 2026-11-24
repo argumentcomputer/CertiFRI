@@ -33,7 +33,7 @@ the same reading are different queries to the oracle.
 
 Each bounds a probability by
 
-    N * εmax + ((batches + 1) * (rounds + 2) + 3) * N * (N - 1) / (2 * |D|),
+    N * εmax + (max (batches + rounds) 3 + 3) * N ^ 2 / (4 * |D|),
 
 where `N` is the number of oracle queries of the whole experiment and `εmax`
 bounds the error of every round, divided by `2 ^ bits i` in round `i`.
@@ -203,7 +203,7 @@ transcript without the samples, read through `view` and from the rows `l'`
 commits to, is accepted by the oracle-model protocol. Then `E` has probability
 at most
 
-    N * εmax + ((batches + 1) * (rounds + 2) + 3) * N * (N - 1) / (2 * |D|),
+    N * εmax + (max (batches + rounds) 3 + 3) * N ^ 2 / (4 * |D|),
 
 with `N = Q + (rounds + 2) + R`.
 
@@ -234,15 +234,15 @@ theorem soundness_grind_view_of_accepts {M : Type} [DecidableEq M] (bits : ℕ �
       (l : Log (MerkleAnswer M (GrindChal bits (Chal P.ldt P.queries)) F D)) (b : B)
       (l' : Log (MerkleAnswer M (GrindChal bits (Chal P.ldt P.queries)) F D)),
       Outcome (fsExperiment (P.rounds + 2) adv msgs) [] out l → Outcome (rest out) l b l' →
-      E b l' → ¬ HasBad (Hit (fun m => digestsOf (view m)) (P.rounds + 2)) l' →
+      E b l' → ¬ HasBad (Hit (fun j m => digestsOfAt P.rounds j (view m)) (P.rounds + 2)) l' →
       ClaimsFail P.ldt P.shift θ (P.claims (view (msgs out.1 0)) (committedRow l')) ∧
         PowPasses out.2 ∧
         Accepts P.ldt P.shift
           ((ungrind out.2).mapIdx fun j m => P.read j (view m) (committedRow l'))) :
     prob E ((fsExperiment (P.rounds + 2) adv msgs).bind rest) [] ≤
       (Q + (P.rounds + 2) + R) * εmax +
-        ((P.batches + 1) * (P.rounds + 2) + 3) * (Q + (P.rounds + 2) + R) *
-          (Q + (P.rounds + 2) + R - 1) / (2 * Fintype.card D) := by
+        ((max (P.batches + P.rounds) 3 + 3 : ℕ) : ℝ) * (Q + (P.rounds + 2) + R) ^ 2 /
+          (4 * Fintype.card D) := by
   have : ∀ i, Nonempty (Chal P.ldt P.queries i) :=
     PcsRbr.Chal.nonempty P.domain_zero_nonempty P.queries
   have hε : ∀ i < P.rounds + 2, roundError P.rounds εα εβ θ P.queries i / 2 ^ bits i ≤ εmax := by
@@ -264,8 +264,8 @@ theorem soundness_grind_view_of_accepts {M : Type} [DecidableEq M] (bits : ℕ �
     (PcsRbr.rbrSound_grind P.ldt P.shift_ne hθ P.queries hmca hstep bits) hε
     ((div_nonneg (pow_nonneg hθ _) (by positivity)).trans hq)
     (PcsRbr.grindDoomed_nil (PcsRbr.doomed_zero P.ldt P.shift θ P.queries _))
-    (digestsOf := fun m => digestsOf (view m)) (K := P.batches + 1)
-    (fun m => (length_digestsOf (view m)).le)
+    (digestsOf := fun j m => digestsOfAt P.rounds j (view m)) (M := P.batches + P.rounds)
+    (fun x => length_chalDigests_le P.rounds view x)
     (read := fun j m c => P.read j (view m) c)
     (fun j m c c' hc => P.read_congr j (view m) c c' hc)
     hadv msgs hrest (E := E)
@@ -280,8 +280,7 @@ theorem soundness_grind_view_of_accepts {M : Type} [DecidableEq M] (bits : ℕ �
         exact hfail
       · rw [PcsRbr.ungrind_mapIdx]
         exact hacc)
-  push_cast at h
-  exact h
+  rwa [show ((P.rounds + 2 : ℕ) : ℝ) = (P.rounds : ℝ) + 2 by push_cast; rfl] at h
 
 /-- **Soundness with proof of work for an event that implies acceptance, on raw
 messages.** In the experiment `experimentGrindView`, let `E` be an event of the
@@ -320,8 +319,8 @@ theorem soundness_grind_view_of_imp {M : Type} [DecidableEq M] (bits : ℕ → �
         ClaimsFail P.ldt P.shift θ (P.claims (view (msgs res.1 0)) (committedRow l)))
       (P.experimentGrindView bits view adv msgs proofOf) [] ≤
       (Q + (P.rounds + 2) + P.verifierQueries) * εmax +
-        ((P.batches + 1) * (P.rounds + 2) + 3) * (Q + (P.rounds + 2) + P.verifierQueries) *
-          (Q + (P.rounds + 2) + P.verifierQueries - 1) / (2 * Fintype.card D) := by
+        ((max (P.batches + P.rounds) 3 + 3 : ℕ) : ℝ) * (Q + (P.rounds + 2) + P.verifierQueries) ^ 2 /
+          (4 * Fintype.card D) := by
   refine P.soundness_grind_view_of_accepts bits view hθ hmca hstep hα hβ hq hadv msgs
     (rest := fun out =>
       (P.verifyGrindView bits view (proofOf out.1) out.2).bind fun b => .pure (out.1, b))
@@ -343,7 +342,7 @@ queries: in the experiment `experimentGrindView`, the probability that the
 model verifier `verifyGrindView` accepts while the claims of the adversary's
 first message, read through `view`, fail is at most
 
-    N * εmax + ((batches + 1) * (rounds + 2) + 3) * N * (N - 1) / (2 * |D|),
+    N * εmax + (max (batches + rounds) 3 + 3) * N ^ 2 / (4 * |D|),
 
 with `N = Q + (rounds + 2) + P.verifierQueries`.
 
@@ -375,8 +374,8 @@ theorem soundness_grind_view {M : Type} [DecidableEq M] (bits : ℕ → ℕ)
         ClaimsFail P.ldt P.shift θ (P.claims (view (msgs res.1 0)) (committedRow l)))
       (P.experimentGrindView bits view adv msgs proofOf) [] ≤
       (Q + (P.rounds + 2) + P.verifierQueries) * εmax +
-        ((P.batches + 1) * (P.rounds + 2) + 3) * (Q + (P.rounds + 2) + P.verifierQueries) *
-          (Q + (P.rounds + 2) + P.verifierQueries - 1) / (2 * Fintype.card D) := by
+        ((max (P.batches + P.rounds) 3 + 3 : ℕ) : ℝ) * (Q + (P.rounds + 2) + P.verifierQueries) ^ 2 /
+          (4 * Fintype.card D) := by
   refine P.soundness_grind_view_of_accepts bits view hθ hmca hstep hα hβ hq hadv msgs
     (rest := fun out =>
       (P.verifyGrindView bits view (proofOf out.1) out.2).bind fun b => .pure (out.1, b))
@@ -452,8 +451,8 @@ theorem soundness_grind_view_of_imp_of_relDist {M : Type} [DecidableEq M] (bits 
         ClaimsFail P.ldt P.shift (1 - δ) (P.claims (view (msgs res.1 0)) (committedRow l)))
       (P.experimentGrindView bits view adv msgs proofOf) [] ≤
       (Q + (P.rounds + 2) + P.verifierQueries) * εmax +
-        ((P.batches + 1) * (P.rounds + 2) + 3) * (Q + (P.rounds + 2) + P.verifierQueries) *
-          (Q + (P.rounds + 2) + P.verifierQueries - 1) / (2 * Fintype.card D) := by
+        ((max (P.batches + P.rounds) 3 + 3 : ℕ) : ℝ) * (Q + (P.rounds + 2) + P.verifierQueries) ^ 2 /
+          (4 * Fintype.card D) := by
   have hθ : (0 : ℝ) ≤ 1 - δ := by
     have := pow_nonneg (by norm_num : (0 : ℝ) ≤ 1 / 2) logBlowup
     linarith
@@ -487,8 +486,8 @@ theorem soundness_grind_view_of_relDist {M : Type} [DecidableEq M] (bits : ℕ �
         ClaimsFail P.ldt P.shift (1 - δ) (P.claims (view (msgs res.1 0)) (committedRow l)))
       (P.experimentGrindView bits view adv msgs proofOf) [] ≤
       (Q + (P.rounds + 2) + P.verifierQueries) * εmax +
-        ((P.batches + 1) * (P.rounds + 2) + 3) * (Q + (P.rounds + 2) + P.verifierQueries) *
-          (Q + (P.rounds + 2) + P.verifierQueries - 1) / (2 * Fintype.card D) := by
+        ((max (P.batches + P.rounds) 3 + 3 : ℕ) : ℝ) * (Q + (P.rounds + 2) + P.verifierQueries) ^ 2 /
+          (4 * Fintype.card D) := by
   have hθ : (0 : ℝ) ≤ 1 - δ := by
     have := pow_nonneg (by norm_num : (0 : ℝ) ≤ 1 / 2) logBlowup
     linarith

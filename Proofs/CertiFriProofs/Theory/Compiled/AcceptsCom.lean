@@ -119,7 +119,7 @@ theorem accepts_of_outcome_verifyWith_view_com (view : M' → Msg F D P.batches)
         if j = 0 then P.read 0 (view m) c else P.read j (view m) (committedRow l')) =
       P.claims (view (msgAt t 0)) c := by
     rw [PcsRbr.claimsOf_mapIdx _ t (getElem?_msgs t (Nat.zero_le _)), ite_eq_left rfl,
-      P.read_claims]
+      P.read_claims_zero]
   refine ⟨?_, fun k => ?_⟩
   · have h := P.isCodeword_finalWord (view (msgAt t (P.rounds + 1))).finalCoeffs
     rw [← P.read_word_last _ (committedRow l'), ← hwords _ le_rfl] at h

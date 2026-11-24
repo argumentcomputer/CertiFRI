@@ -8,7 +8,8 @@ description = "Generator of the Plonky3 reference values for BabyBear, its quart
 # This package is its own workspace: it is not a member of any enclosing one.
 [workspace]
 
-# Plonky3 is the checkout of the `plonky3/` submodule (revision `0d803737`).
+# Plonky3 is the checkout of the `plonky3/` submodule (revision `3152b14a`,
+# the revision multi-stark builds on).
 [dependencies]
 p3-field = { path = "../../../plonky3/field" }
 p3-baby-bear = { path = "../../../plonky3/baby-bear" }

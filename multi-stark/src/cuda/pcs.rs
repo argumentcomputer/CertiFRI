@@ -22,17 +22,18 @@ use core::iter;
 use core::marker::PhantomData;
 use core::mem::size_of;
 use std::borrow::Cow;
+use std::path::{Path, PathBuf};
 use std::vec;
 use std::vec::Vec;
 
-use itertools::{Itertools, izip};
+use itertools::Itertools;
 use p3_challenger::{CanObserve, FieldChallenger, GrindingChallenger};
 use p3_commit::{ExtensionMmcs, Mmcs, OpenedValues, Pcs, PeriodicLdeTable};
 use p3_dft::{Radix2DFTSmallBatch, Radix2DitParallel, TwoAdicSubgroupDft};
 use p3_field::coset::TwoAdicMultiplicativeCoset;
 use p3_field::{
-    BasedVectorSpace, ExtensionField, PackedFieldExtension, PrimeCharacteristicRing, PrimeField64,
-    TwoAdicField, batch_multiplicative_inverse, dot_product,
+    BasedVectorSpace, ExtensionField, Field, PackedFieldExtension, PrimeCharacteristicRing,
+    PrimeField64, TwoAdicField, batch_multiplicative_inverse, dot_product,
 };
 use p3_matrix::Matrix;
 use p3_matrix::bitrev::{BitReversedMatrixView, BitReversibleMatrix};
@@ -41,10 +42,18 @@ use p3_matrix::interpolation::{Interpolate, compute_adjusted_weights};
 use p3_maybe_rayon::prelude::*;
 use p3_util::linear_map::LinearMap;
 use p3_util::{log2_strict_usize, reverse_slice_index_bits};
-use tracing::{debug_span, instrument};
 
-use super::mmcs::{CudaCommitMmcs, hash_host_only_height_groups};
-use super::{CudaFriWorkspace, CudaLde, CudaMixedMerkleTree, CudaReducedOpening};
+use super::mmcs::{CudaCommitMmcs, CudaMmcs, CudaMmcsData, hash_host_only_height_groups};
+use super::{
+    CudaDft, CudaFriWorkspace, CudaInterpolationTasks, CudaLde, CudaMixedMerkleTree,
+    CudaReducedOpening, CudaReductionTasks,
+};
+use crate::p3_adapter::cap::{CapValidatingMmcs, validate_fri_commitment_caps};
+use crate::p3_adapter::domain_blake3::Blake3Domain;
+use crate::p3_adapter::fri_batching::{
+    FriBatching, FriBatchingSchedule, pack_ext_weights, verify_fri_with_batching,
+};
+use crate::p3_adapter::spill::{STREAM_BLOCK_BYTES, SpillPackWriter, SpilledMatrix};
 use p3_goldilocks::Goldilocks;
 use p3_symmetric::MerkleCap;
 
@@ -69,6 +78,98 @@ fn goldilocks_quadratic_inverse_denominators(
         .zip(inverse_norms.par_iter())
         .map(|(&x, &inverse_norm)| [(point_0 - x) * inverse_norm, inverse_point_1 * inverse_norm])
         .collect()
+}
+
+fn goldilocks_cubic_trinomial_inverse_denominators(
+    point: [Goldilocks; 3],
+    coset: &[Goldilocks],
+) -> Vec<[Goldilocks; 3]> {
+    let [z0, z1, z2] = point;
+    let z1_sq = z1 * z1;
+    let z2_sq = z2 * z2;
+    let z1_s12 = z1 * (z1 + z2);
+    let norms = coset
+        .par_iter()
+        .map(|&x| {
+            let a0 = z0 - x;
+            let s02 = a0 + z2;
+            let d0 = s02 * s02 - z1_s12;
+            let d1 = z2_sq - a0 * z1;
+            let d2 = z1_sq - z2 * s02;
+            a0 * d0 + z2 * d1 + z1 * d2
+        })
+        .collect::<Vec<_>>();
+    let inverse_norms = batch_multiplicative_inverse(&norms);
+    coset
+        .par_iter()
+        .zip(inverse_norms.par_iter())
+        .map(|(&x, &inv_norm)| {
+            let a0 = z0 - x;
+            let s02 = a0 + z2;
+            let d0 = s02 * s02 - z1_s12;
+            let d1 = z2_sq - a0 * z1;
+            let d2 = z1_sq - z2 * s02;
+            [d0 * inv_norm, d1 * inv_norm, d2 * inv_norm]
+        })
+        .collect()
+}
+
+pub(super) fn cuda_ext_degree_and_w<
+    Val: TwoAdicField + PrimeField64,
+    Challenge: ExtensionField<Val>,
+>() -> (usize, Goldilocks) {
+    let d = <Challenge as BasedVectorSpace<Val>>::DIMENSION;
+    assert!(
+        d == 2 || d == 3,
+        "CUDA PCS supports Goldilocks extension degrees 2 and 3, got {d}"
+    );
+    if d == 2 {
+        let ext_x = Challenge::from_basis_coefficients_slice(&[Val::ZERO, Val::ONE])
+            .expect("quadratic extension generator");
+        let w = Goldilocks::from_u64(
+            <Challenge as BasedVectorSpace<Val>>::as_basis_coefficients_slice(&(ext_x * ext_x))[0]
+                .as_canonical_u64(),
+        );
+        assert_eq!(w, Goldilocks::from_u64(7));
+        (2, w)
+    } else {
+        let ext_x = Challenge::from_basis_coefficients_slice(&[Val::ZERO, Val::ONE, Val::ZERO])
+            .expect("cubic extension generator");
+        let expected_x3 =
+            Challenge::from_basis_coefficients_slice(&[Val::ONE, Val::ONE, Val::ZERO])
+                .expect("cubic trinomial X + 1");
+        assert_eq!(
+            ext_x * ext_x * ext_x,
+            expected_x3,
+            "CUDA degree-3 extension requires X^3 - X - 1"
+        );
+        (3, Goldilocks::ZERO)
+    }
+}
+
+#[inline]
+pub(super) fn ext_to_goldilocks<Val: PrimeField64, Challenge: ExtensionField<Val>>(
+    value: Challenge,
+    d: usize,
+) -> ([Goldilocks; 3], usize) {
+    let coeffs = <Challenge as BasedVectorSpace<Val>>::as_basis_coefficients_slice(&value);
+    let mut out = [Goldilocks::ZERO; 3];
+    for i in 0..d {
+        out[i] = Goldilocks::from_u64(coeffs[i].as_canonical_u64());
+    }
+    (out, d)
+}
+
+#[inline]
+pub(super) fn ext_from_goldilocks<Val: PrimeField64, Challenge: ExtensionField<Val>>(
+    slice: &[Goldilocks],
+) -> Challenge {
+    let mut coeffs = [Val::ZERO; 3];
+    let d = slice.len();
+    for i in 0..d {
+        coeffs[i] = Val::from_u64(slice[i].as_canonical_u64());
+    }
+    Challenge::from_basis_coefficients_slice(&coeffs[..d]).expect("extension element")
 }
 
 pub trait CudaPcsDft<T: TwoAdicField>: TwoAdicSubgroupDft<T> + Send + Sync + 'static {
@@ -98,13 +199,33 @@ pub trait CudaPcsDft<T: TwoAdicField>: TwoAdicSubgroupDft<T> + Send + Sync + 'st
         added_bits: usize,
         shift: T,
     ) -> Option<RowMajorMatrix<T>>;
+
+    /// Computes a bit-reversed coset LDE using full GPU NTT, GPU column-panel
+    /// streaming, or CPU fallback and writes it directly into `pack`.
+    fn coset_lde_spilled(
+        &self,
+        matrix: &RowMajorMatrix<T>,
+        added_bits: usize,
+        shift: T,
+        pack: &mut SpillPackWriter,
+        unique_leaf_hash: Option<(Blake3Domain, Option<&[u8; 32]>)>,
+    ) -> (SpilledMatrix, Option<Vec<[u8; 32]>>);
+
+    /// Computes a bit-reversed coset LDE on GPU (1-shot or column-panel
+    /// streamed) and returns it in host RAM (`Tier 2`).
+    fn coset_lde_to_host(
+        &self,
+        matrix: &RowMajorMatrix<T>,
+        added_bits: usize,
+        shift: T,
+        unique_leaf_hash: Option<(Blake3Domain, Option<&[u8; 32]>)>,
+    ) -> (RowMajorMatrix<T>, Option<Vec<[u8; 32]>>);
 }
 
 use p3_fri::{
     BatchMultiOpening, CommitPhaseMultiStep, FriParameters, FriProof, TwoAdicFriFolding,
     TwoAdicFriFoldingForMmcs, build_periodic_lde_table_two_adic, compute_log_arity_for_round,
-    prover,
-    verifier::{self, FriError},
+    prover, verifier::FriError,
 };
 
 struct CudaFriRound {
@@ -218,6 +339,7 @@ trait CudaFriMmcs<Val, Challenge: Send + Sync + Clone>: Mmcs<Challenge> {
         &self,
         codeword: CudaLde,
         log_arity: usize,
+        domain_v6: bool,
     ) -> (Self::Commitment, CudaFriRound);
     fn open_cuda_fri_batch(
         &self,
@@ -227,7 +349,7 @@ trait CudaFriMmcs<Val, Challenge: Send + Sync + Clone>: Mmcs<Challenge> {
 }
 
 impl<Challenge> CudaFriMmcs<Goldilocks, Challenge>
-    for ExtensionMmcs<Goldilocks, Challenge, super::mmcs::CudaMmcs>
+    for ExtensionMmcs<Goldilocks, Challenge, CudaMmcs>
 where
     Challenge: ExtensionField<Goldilocks>,
 {
@@ -235,9 +357,10 @@ where
         &self,
         codeword: CudaLde,
         log_arity: usize,
+        domain_v6: bool,
     ) -> (Self::Commitment, CudaFriRound) {
         let arity = 1 << log_arity;
-        let tree = CudaMixedMerkleTree::from_fri_codeword(&codeword, arity);
+        let tree = CudaMixedMerkleTree::from_fri_codeword_with_domain(&codeword, arity, domain_v6);
         let commitment = MerkleCap::new(vec![tree.root()]);
         (
             commitment,
@@ -264,9 +387,8 @@ where
             .map(|query_rows| {
                 query_rows
                     .iter()
-                    .map(|pair| {
-                        Challenge::from_basis_coefficients_slice(pair)
-                            .expect("quadratic extension row")
+                    .map(|row| {
+                        Challenge::from_basis_coefficients_slice(row).expect("extension row")
                     })
                     .collect()
             })
@@ -287,6 +409,8 @@ pub struct CudaTwoAdicFriPcs<Val, Dft, InputMmcs, FriMmcs> {
     pub(crate) dft: Dft,
     pub(crate) mmcs: InputMmcs,
     pub(crate) fri: FriParameters<FriMmcs>,
+    pub(crate) batching: FriBatching,
+    pub(crate) spill_dir: Option<PathBuf>,
     _phantom: PhantomData<Val>,
 }
 
@@ -297,7 +421,7 @@ pub struct CudaTwoAdicFriPcs<Val, Dft, InputMmcs, FriMmcs> {
 /// `i < 2^k`, so every smaller coset is a prefix of a larger one: one vector
 /// per process serves every height, and grows only when a larger height is
 /// opened. Every shard of a proof opens on the same coset.
-fn bit_reversed_coset<Val: TwoAdicField + PrimeField64>(
+pub(super) fn bit_reversed_coset<Val: TwoAdicField + PrimeField64>(
     log_height: usize,
 ) -> std::sync::Arc<Vec<Goldilocks>> {
     static CACHE: std::sync::Mutex<Option<std::sync::Arc<Vec<Goldilocks>>>> =
@@ -307,7 +431,7 @@ fn bit_reversed_coset<Val: TwoAdicField + PrimeField64>(
     }
     let to_gold = |v: Val| Goldilocks::from_u64(v.as_canonical_u64());
     let generator: Goldilocks = TwoAdicField::two_adic_generator(log_height);
-    let shift = <Goldilocks as p3_field::Field>::GENERATOR;
+    let shift = <Goldilocks as Field>::GENERATOR;
     assert_eq!(to_gold(Val::two_adic_generator(log_height)), generator);
     assert_eq!(to_gold(Val::GENERATOR), shift);
     let size = 1usize << log_height;
@@ -343,6 +467,7 @@ fn cache_at_least(
         .map(std::sync::Arc::clone)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn prove_fri_cuda_resident<Val, Challenge, InputMmcs, FriMmcs, Challenger>(
     params: &FriParameters<FriMmcs>,
     mut inputs: Vec<CudaReducedOpening>,
@@ -355,6 +480,8 @@ fn prove_fri_cuda_resident<Val, Challenge, InputMmcs, FriMmcs, Challenger>(
     >],
     input_mmcs: &InputMmcs,
     ext_w: Goldilocks,
+    ext_degree: usize,
+    domain_v6: bool,
 ) -> FriProof<Challenge, FriMmcs, Challenger::Witness, Vec<BatchMultiOpening<Val, InputMmcs>>>
 where
     Val: TwoAdicField + PrimeField64 + 'static,
@@ -364,6 +491,7 @@ where
     Challenger: FieldChallenger<Val> + GrindingChallenger + CanObserve<FriMmcs::Commitment>,
 {
     assert!(!inputs.is_empty());
+    assert!(ext_degree == 2 || ext_degree == 3);
     assert!(
         params.num_queries > 0,
         "num_queries must be at least 1 for FRI soundness"
@@ -387,20 +515,6 @@ where
     if params.log_final_poly_len > 0 {
         assert!(log_min_height > params.log_final_poly_len + params.log_blowup);
     }
-    let to_pair = |value: Challenge| {
-        let coefficients = value.as_basis_coefficients_slice();
-        [
-            Goldilocks::from_u64(coefficients[0].as_canonical_u64()),
-            Goldilocks::from_u64(coefficients[1].as_canonical_u64()),
-        ]
-    };
-    let from_pair = |pair: [Goldilocks; 2]| {
-        Challenge::from_basis_coefficients_slice(&[
-            Val::from_u64(pair[0].as_canonical_u64()),
-            Val::from_u64(pair[1].as_canonical_u64()),
-        ])
-        .expect("quadratic extension element")
-    };
 
     let mut codeword = inputs.remove(0).into_lde();
     let mut commits = Vec::new();
@@ -422,7 +536,7 @@ where
         );
         let arity = 1 << log_arity;
         let (commitment, round) = tracing::info_span!("stark/fri_round_commit")
-            .in_scope(|| params.mmcs.commit_cuda_fri(codeword, log_arity));
+            .in_scope(|| params.mmcs.commit_cuda_fri(codeword, log_arity, domain_v6));
         challenger.observe(commitment.clone());
         commits.push(commitment);
         commit_pow_witnesses.push(
@@ -431,18 +545,18 @@ where
         );
         let beta: Challenge = challenger.sample_algebra_element();
         let mut beta_step = beta;
-        let betas = (0..log_arity)
-            .map(|_| {
-                let result = to_pair(beta_step);
-                beta_step = beta_step.square();
-                result
-            })
-            .collect_vec();
+        let mut betas_flat = Vec::with_capacity(log_arity * ext_degree);
+        for _ in 0..log_arity {
+            let (buf, d) = ext_to_goldilocks::<Val, Challenge>(beta_step, ext_degree);
+            betas_flat.extend_from_slice(&buf[..d]);
+            beta_step = beta_step.square();
+        }
         let folded_height = round.codeword.height() >> log_arity;
         let add_next = inputs
             .first()
             .is_some_and(|input| input.height() == folded_height);
-        let beta_power = to_pair(beta.exp_power_of_2(log_arity));
+        let (beta_power_buf, _) =
+            ext_to_goldilocks::<Val, Challenge>(beta.exp_power_of_2(log_arity), ext_degree);
         let g_inv = Goldilocks::from_u64(
             Val::two_adic_generator(log_height)
                 .inverse()
@@ -450,10 +564,12 @@ where
         );
         codeword = round.codeword.fri_fold(
             add_next.then(|| &inputs[0]),
-            &betas,
-            beta_power,
+            &betas_flat,
+            log_arity,
+            &beta_power_buf[..ext_degree],
             g_inv,
             ext_w,
+            ext_degree,
         );
         if add_next {
             inputs.remove(0);
@@ -467,11 +583,9 @@ where
     let final_matrix = codeword.to_row_major_matrix();
     let mut final_values = final_matrix
         .values
-        .as_chunks::<2>()
-        .0
-        .iter()
+        .chunks_exact(ext_degree)
         .take(params.final_poly_len())
-        .map(|pair| from_pair([pair[0], pair[1]]))
+        .map(ext_from_goldilocks::<Val, Challenge>)
         .collect_vec();
     reverse_slice_index_bits(&mut final_values);
     let final_poly = Radix2DFTSmallBatch::default().idft_algebra(final_values);
@@ -557,8 +671,332 @@ impl<Val, Dft, InputMmcs, FriMmcs> CudaTwoAdicFriPcs<Val, Dft, InputMmcs, FriMmc
             dft,
             mmcs,
             fri,
+            batching: FriBatching::Horner,
+            spill_dir: None,
             _phantom: PhantomData,
         }
+    }
+
+    /// Configures the FRI opening batching strategy (`Horner` or `Tensor`).
+    pub const fn with_batching(mut self, batching: FriBatching) -> Self {
+        self.batching = batching;
+        self
+    }
+
+    /// Returns the configured disk-spill directory, if enabled.
+    pub fn spill_dir(&self) -> Option<&Path> {
+        self.spill_dir.as_deref()
+    }
+}
+
+impl<Dft, FriMmcs> CudaTwoAdicFriPcs<Goldilocks, Dft, CudaMmcs, FriMmcs> {
+    /// Configures the disk-spill directory on both this PCS and its underlying
+    /// [`CudaMmcs`].
+    pub fn set_spill_dir(&mut self, spill_dir: Option<PathBuf>) {
+        self.mmcs.set_spill_dir(spill_dir.clone());
+        self.spill_dir = spill_dir;
+    }
+}
+
+type CudaCommitOutput = (
+    MerkleCap<Goldilocks, [u8; 32]>,
+    CudaMmcsData<RowMajorMatrix<Goldilocks>>,
+);
+
+impl<FriMmcs> CudaTwoAdicFriPcs<Goldilocks, CudaDft, CudaMmcs, FriMmcs> {
+    /// Commits a streaming iterator of `(domain, trace, retain_1x)` items.
+    ///
+    /// When disk spilling is configured, keeps small batches resident in VRAM
+    /// (zero disk I/O) and seamlessly switches to GPU-computed, NVMe-spilled
+    /// LDEs (including GPU column-panel streaming when a single matrix's LDE
+    /// exceeds VRAM!) whenever cumulative LDE bytes exceed the per-round VRAM
+    /// budget or free VRAM headroom.
+    pub(crate) fn commit_streaming_with_originals(
+        &self,
+        evaluations: &mut dyn Iterator<
+            Item = (
+                TwoAdicMultiplicativeCoset<Goldilocks>,
+                RowMajorMatrix<Goldilocks>,
+                bool,
+            ),
+        >,
+    ) -> Option<CudaCommitOutput> {
+        let Some(dir) = self.spill_dir.as_deref() else {
+            // Without a spill directory, fall back to the standard CUDA commit
+            // path (keeping retained 1× traces when requested).
+            let mut items = Vec::new();
+            let mut any_retained = false;
+            let mut originals = Vec::new();
+            for (domain, evals, retain_1x) in evaluations {
+                if retain_1x {
+                    any_retained = true;
+                    originals.push(Some(evals.clone()));
+                } else {
+                    originals.push(None);
+                }
+                items.push((domain, evals));
+            }
+            if items.is_empty() {
+                return None;
+            }
+            let (commit, mut data) = self.commit_batch_without_spill(items);
+            if any_retained {
+                if let CudaMmcsData::Hybrid {
+                    retained_traces, ..
+                } = &mut data
+                {
+                    for (slot, orig) in retained_traces.iter_mut().zip(originals) {
+                        if slot.is_none() {
+                            *slot = orig;
+                        }
+                    }
+                } else if let CudaMmcsData::Cuda {
+                    retained_traces, ..
+                } = &mut data
+                    && originals.iter().all(Option::is_some)
+                {
+                    let _ = retained_traces.set(
+                        originals
+                            .into_iter()
+                            .map(|o| o.expect("retained trace"))
+                            .collect(),
+                    );
+                }
+            }
+            return Some((commit, data));
+        };
+
+        let started = std::time::Instant::now();
+        let log_blowup = self.fri.log_blowup;
+        let device_id = self.mmcs.cuda_device_id();
+        let leaf_domain = self.mmcs.leaf_domain();
+        let (keep_budget, reserve) = super::resident_keep_budget(device_id);
+
+        let mut lde_pack: Option<SpillPackWriter> = None;
+        let mut orig_pack: Option<SpillPackWriter> = None;
+        let mut resident: Vec<Option<CudaLde>> = Vec::new();
+        let mut host_matrices: Vec<Option<RowMajorMatrix<Goldilocks>>> = Vec::new();
+        let mut spilled: Vec<Option<SpilledMatrix>> = Vec::new();
+        let mut prehashed: Vec<Option<Vec<[u8; 32]>>> = Vec::new();
+        let mut spilled_traces: Vec<Option<SpilledMatrix>> = Vec::new();
+        let mut retained_traces: Vec<Option<RowMajorMatrix<Goldilocks>>> = Vec::new();
+        let mut first_idx_for_height: std::collections::HashMap<usize, Option<usize>> =
+            std::collections::HashMap::new();
+        let mut resident_bytes = 0usize;
+        let mut tier1_count = 0usize;
+        let mut tier2_count = 0usize;
+        let mut tier3_count = 0usize;
+
+        for (domain, evals, retain_1x) in evaluations {
+            assert_eq!(domain.size(), evals.height());
+            let height = evals.height();
+            let width = evals.width();
+            let lde_height = height
+                .checked_shl(u32::try_from(log_blowup).expect("LDE blowup exceeds u32"))
+                .expect("LDE height overflows usize");
+            let shift = Goldilocks::GENERATOR / domain.shift();
+            let idx = resident.len();
+            let is_unique_so_far = match first_idx_for_height.get_mut(&lde_height) {
+                None => {
+                    first_idx_for_height.insert(lde_height, Some(idx));
+                    true
+                }
+                Some(prev) => {
+                    if let Some(prev_idx) = prev.take() {
+                        prehashed[prev_idx] = None;
+                    }
+                    false
+                }
+            };
+
+            if retain_1x {
+                let trace_bytes = height
+                    .saturating_mul(width)
+                    .saturating_mul(size_of::<Goldilocks>());
+                if trace_bytes > (64 << 20) || trace_bytes > keep_budget {
+                    let writer = orig_pack.get_or_insert_with(|| SpillPackWriter::create(dir));
+                    spilled_traces.push(Some(writer.append_matrix(&evals)));
+                    retained_traces.push(None);
+                } else {
+                    spilled_traces.push(None);
+                    retained_traces.push(Some(evals.clone()));
+                }
+            } else {
+                spilled_traces.push(None);
+                retained_traces.push(None);
+            }
+
+            let lde_bytes = lde_height
+                .saturating_mul(width)
+                .saturating_mul(size_of::<Goldilocks>());
+            let trace_bytes = height
+                .saturating_mul(width)
+                .saturating_mul(size_of::<Goldilocks>());
+            let can_use_cuda = CudaDft::supports_cuda_coset_lde(height, width, log_blowup);
+            let projected_resident = resident_bytes.saturating_add(lde_bytes);
+
+            let mut keep_resident = can_use_cuda && projected_resident <= keep_budget;
+            if keep_resident {
+                let plan = self.dft.lde_plan(height, width, log_blowup, shift);
+                let needed = lde_bytes
+                    .saturating_add(trace_bytes)
+                    .saturating_add(plan.scratch_bytes())
+                    .saturating_add(plan.constant_bytes())
+                    .saturating_add(lde_height.saturating_mul(96))
+                    .saturating_add(reserve);
+                if needed > super::device_memory_info(device_id).0 {
+                    keep_resident = false;
+                }
+            }
+
+            if keep_resident {
+                let lde = self.dft.coset_lde_batch_resident(&evals, log_blowup, shift);
+                // SAFETY: `coset_lde_batch_resident` completed synchronously.
+                unsafe { lde.release_trace() };
+                resident_bytes = projected_resident;
+                resident.push(Some(lde));
+                host_matrices.push(None);
+                spilled.push(None);
+                prehashed.push(None);
+                tier1_count += 1;
+            } else if super::host_spill_headroom(device_id, lde_bytes) {
+                let leaf_spec = is_unique_so_far.then_some((leaf_domain, None));
+                let (host_mat, digests) = self
+                    .dft
+                    .coset_lde_to_host(&evals, log_blowup, shift, leaf_spec);
+                resident.push(None);
+                host_matrices.push(Some(host_mat));
+                spilled.push(None);
+                prehashed.push(digests);
+                tier2_count += 1;
+            } else {
+                let writer = lde_pack.get_or_insert_with(|| SpillPackWriter::create(dir));
+                let leaf_spec = is_unique_so_far.then_some((leaf_domain, None));
+                let (sp, digests) = self
+                    .dft
+                    .coset_lde_spilled(&evals, log_blowup, shift, writer, leaf_spec);
+                resident.push(None);
+                host_matrices.push(None);
+                spilled.push(Some(sp));
+                prehashed.push(digests);
+                tier3_count += 1;
+            }
+        }
+
+        if resident.is_empty() {
+            return None;
+        }
+        if let Some(writer) = &mut lde_pack {
+            writer.flush();
+        }
+        if let Some(writer) = &mut orig_pack {
+            writer.flush();
+        }
+        let lde_s = started.elapsed().as_secs_f64();
+        let merkle_started = std::time::Instant::now();
+        let spilled_traces_arg = if orig_pack.is_some() {
+            spilled_traces
+        } else {
+            Vec::new()
+        };
+        let out = self.mmcs.commit_cuda_mixed_spilled(
+            resident,
+            host_matrices,
+            spilled,
+            prehashed,
+            retained_traces,
+            spilled_traces_arg,
+        );
+        if super::memory_diagnostics_enabled() {
+            eprintln!(
+                "[multi-stark/cuda] streaming commit: mats={} tier1_vram={} tier2_host={} tier3_nvme={} lde={:.3}s merkle={:.3}s",
+                tier1_count + tier2_count + tier3_count,
+                tier1_count,
+                tier2_count,
+                tier3_count,
+                lde_s,
+                merkle_started.elapsed().as_secs_f64(),
+            );
+        }
+        Some(out)
+    }
+
+    fn commit_batch_without_spill(
+        &self,
+        evaluations: Vec<(
+            TwoAdicMultiplicativeCoset<Goldilocks>,
+            RowMajorMatrix<Goldilocks>,
+        )>,
+    ) -> (
+        MerkleCap<Goldilocks, [u8; 32]>,
+        CudaMmcsData<RowMajorMatrix<Goldilocks>>,
+    ) {
+        let log_blowup = self.fri.log_blowup;
+        let device_id = self.mmcs.cuda_device_id();
+        let source_cells: usize = evaluations
+            .iter()
+            .map(|(_, m)| m.height().saturating_mul(m.width()))
+            .sum();
+        let source_bytes = source_cells.saturating_mul(size_of::<Goldilocks>());
+        let lde_bytes = source_bytes
+            .checked_shl(u32::try_from(log_blowup).expect("LDE blowup exceeds u32"))
+            .unwrap_or(usize::MAX);
+        let max_trace_bytes = evaluations
+            .iter()
+            .map(|(_, m)| {
+                m.height()
+                    .saturating_mul(m.width())
+                    .saturating_mul(size_of::<Goldilocks>())
+            })
+            .max()
+            .unwrap_or(0);
+        let max_workspace = evaluations
+            .iter()
+            .map(|(d, m)| {
+                self.dft.coset_lde_workspace_bytes(
+                    m.height(),
+                    m.width(),
+                    log_blowup,
+                    Goldilocks::GENERATOR / d.shift(),
+                )
+            })
+            .max()
+            .unwrap_or(0);
+        let (initial_free, _) = super::device_memory_info(device_id);
+        let min_free = super::minimum_free_bytes();
+        let max_lde_height = evaluations
+            .iter()
+            .map(|(_, m)| m.height() << log_blowup)
+            .max()
+            .unwrap_or(0);
+        if lde_bytes
+            .saturating_add(max_trace_bytes)
+            .saturating_add(max_workspace)
+            .saturating_add(max_lde_height.saturating_mul(96))
+            .saturating_add(min_free)
+            <= initial_free
+        {
+            let ldes: Vec<CudaLde> = evaluations
+                .iter()
+                .map(|(domain, evals)| {
+                    let shift = Goldilocks::GENERATOR / domain.shift();
+                    let lde = self.dft.coset_lde_batch_resident(evals, log_blowup, shift);
+                    // SAFETY: `coset_lde_batch_resident` completed synchronously.
+                    unsafe { lde.release_trace() };
+                    lde
+                })
+                .collect();
+            return self.mmcs.commit_cuda_spillable(ldes);
+        }
+        let ldes: Vec<RowMajorMatrix<Goldilocks>> = host_coset_lde_jobs(
+            &self.dft,
+            evaluations.into_iter().enumerate().collect(),
+            log_blowup,
+        )
+        .into_iter()
+        .map(|(_, lde)| lde)
+        .collect();
+        self.mmcs.commit_cpu_storage(ldes)
     }
 }
 
@@ -592,8 +1030,8 @@ impl<Val, Dft, InputMmcs, FriMmcs, Challenge, Challenger> Pcs<Challenge, Challen
 where
     Val: TwoAdicField + PrimeField64,
     Dft: TwoAdicSubgroupDft<Val> + CudaPcsDft<Val> + Sync,
-    InputMmcs: Mmcs<Val, MultiProof: Sync, Error: Sync> + CudaCommitMmcs<Val>,
-    FriMmcs: Mmcs<Challenge> + CudaFriMmcs<Val, Challenge>,
+    InputMmcs: CapValidatingMmcs<Val, MultiProof: Sync, Error: Sync> + CudaCommitMmcs<Val>,
+    FriMmcs: CapValidatingMmcs<Challenge> + CudaFriMmcs<Val, Challenge>,
     Challenge: ExtensionField<Val>,
     Challenger:
         FieldChallenger<Val> + CanObserve<FriMmcs::Commitment> + GrindingChallenger<Witness = Val>,
@@ -651,7 +1089,7 @@ where
         let max_transform_workspace = transform_workspaces.iter().copied().max().unwrap_or(0);
         let (initial_free, total_bytes) =
             crate::cuda::device_memory_info(self.mmcs.cuda_device_id());
-        let minimum_free = crate::cuda::minimum_free_bytes(total_bytes);
+        let minimum_free = crate::cuda::minimum_free_bytes();
         let source_bytes = source_cells.saturating_mul(size_of::<Val>());
         let lde_bytes = source_bytes
             .checked_shl(u32::try_from(log_blowup).expect("LDE blowup exceeds u32"))
@@ -661,7 +1099,74 @@ where
             .saturating_add(minimum_free)
             .saturating_add(max_transform_workspace)
             > initial_free;
+        // An LDE uploads its whole trace beside its values, and a trace
+        // released after construction is still resident while its own LDE
+        // runs, so the all-device path always needs the largest trace.
+        let max_trace_bytes = evaluations
+            .iter()
+            .map(|(_, matrix)| {
+                matrix
+                    .height()
+                    .saturating_mul(matrix.width())
+                    .saturating_mul(size_of::<Val>())
+            })
+            .max()
+            .unwrap_or(0);
+        let max_lde_height_all = evaluations
+            .iter()
+            .map(|(_, matrix)| matrix.height() << log_blowup)
+            .max()
+            .unwrap_or(0);
+        if let Some(dir) = self.mmcs.spill_dir() {
+            let reserve = minimum_free.saturating_add(128 << 20);
+            let round_resident_budget = initial_free
+                .saturating_sub(reserve)
+                .checked_div(4)
+                .unwrap_or(0)
+                .min(total_bytes / 6);
+            if lde_bytes
+                .saturating_add(max_trace_bytes)
+                .saturating_add(max_transform_workspace)
+                .saturating_add(max_lde_height_all.saturating_mul(96))
+                .saturating_add(reserve)
+                > initial_free
+                || lde_bytes > round_resident_budget
+            {
+                let mut pack = SpillPackWriter::create(dir);
+                let mut height_counts = std::collections::HashMap::<usize, usize>::new();
+                for (_, matrix) in &evaluations {
+                    *height_counts
+                        .entry(matrix.height() << log_blowup)
+                        .or_insert(0) += 1;
+                }
+                let leaf_domain = self.mmcs.leaf_domain();
+                let mut spilled = Vec::with_capacity(evaluations.len());
+                let mut prehashed = Vec::with_capacity(evaluations.len());
+                for (domain, matrix) in evaluations {
+                    assert_eq!(domain.size(), matrix.height());
+                    let shift = Val::GENERATOR / domain.shift();
+                    let lde_height = matrix.height() << log_blowup;
+                    let leaf_spec =
+                        (height_counts[&lde_height] == 1).then_some((leaf_domain, None));
+                    let (sp, digests) =
+                        dft.coset_lde_spilled(&matrix, log_blowup, shift, &mut pack, leaf_spec);
+                    spilled.push(Some(sp));
+                    prehashed.push(digests);
+                }
+                pack.flush();
+                let count = spilled.len();
+                return self.mmcs.commit_cuda_mixed_spilled(
+                    (0..count).map(|_| None).collect(),
+                    (0..count).map(|_| None).collect(),
+                    spilled,
+                    prehashed,
+                    (0..count).map(|_| None).collect(),
+                    Vec::new(),
+                );
+            }
+        }
         if lde_bytes
+            .saturating_add(max_trace_bytes)
             .saturating_add(minimum_free)
             .saturating_add(max_transform_workspace)
             > initial_free
@@ -1022,6 +1527,7 @@ where
                     &resident.iter().map(Option::as_ref).collect::<Vec<_>>(),
                     &deferred_dimensions,
                     &prehashed_heights,
+                    self.mmcs.leaf_domain(),
                 ));
                 if crate::cuda::memory_diagnostics_enabled() {
                     eprintln!(
@@ -1070,8 +1576,6 @@ where
         // Each Rayon worker uses its own per-thread CUDA stream. A bounded
         // admission window keeps pageable upload staging within the driver's
         // reliable concurrency range while retaining substantial overlap.
-        const CUDA_LDE_WAVE: usize = 16;
-        let mut ldes = Vec::with_capacity(evaluations.len());
         let wave_size = if release_traces_during_construction {
             1
         } else {
@@ -1079,33 +1583,29 @@ where
                 .saturating_sub(source_bytes)
                 .saturating_sub(lde_bytes)
                 .saturating_sub(minimum_free);
-            (workspace_budget / max_transform_workspace.max(1)).clamp(1, CUDA_LDE_WAVE)
+            (workspace_budget / max_transform_workspace.max(1)).clamp(1, super::MAX_CONCURRENT_LDES)
         };
-        for wave in evaluations.chunks(wave_size) {
-            let transform =
-                |(domain, evals): &(TwoAdicMultiplicativeCoset<Val>, RowMajorMatrix<Val>)| {
-                    assert_eq!(domain.size(), evals.height());
-                    let shift = Val::GENERATOR / domain.shift();
-                    dft.coset_lde_batch_resident(evals, log_blowup, shift)
-                };
-            // Ix's inner proof contains hundreds of tiny matrices. Entering
-            // CUDA concurrently for that low-volume batch costs more than it
-            // saves and can exhaust driver-side pageable-copy workers.
-            let wave_ldes: Vec<_> = if source_cells < 10_000_000 {
-                wave.iter().map(transform).collect()
-            } else {
-                wave.par_iter().map(transform).collect()
-            };
-            if release_traces_during_construction {
-                for lde in &wave_ldes {
-                    // SAFETY: this wave has completed synchronously. The host
-                    // matrices remain owned below and are retained for every
+        let transform =
+            |(domain, evals): &(TwoAdicMultiplicativeCoset<Val>, RowMajorMatrix<Val>)| {
+                assert_eq!(domain.size(), evals.height());
+                let shift = Val::GENERATOR / domain.shift();
+                let lde = dft.coset_lde_batch_resident(evals, log_blowup, shift);
+                if release_traces_during_construction {
+                    // SAFETY: the LDE has completed synchronously. The host
+                    // matrix remains owned below and is retained for every
                     // later consumer of the original trace.
                     unsafe { lde.release_trace() };
                 }
-            }
-            ldes.extend(wave_ldes);
-        }
+                lde
+            };
+        // Ix's inner proof contains hundreds of tiny matrices. Entering
+        // CUDA concurrently for that low-volume batch costs more than it
+        // saves and can exhaust driver-side pageable-copy workers.
+        let ldes: Vec<_> = if source_cells < 10_000_000 {
+            evaluations.iter().map(transform).collect()
+        } else {
+            super::bounded_parallel_map(&evaluations, wave_size, transform)
+        };
         // Preserve enough device headroom for lookup, quotient, and FRI
         // allocations. Spill the largest retained traces first, deriving the
         // policy from this device rather than a 96-GiB development machine.
@@ -1149,11 +1649,10 @@ where
             projected_free = projected_free.saturating_add(bytes);
             spilled = true;
         }
-        // Commit to the bit-reversed LDEs. Once host traces have been retained,
-        // keep the LDEs individually spillable as well: later quotient and FRI
-        // admission may need to trade a resident LDE for its host materialization.
-        // Small all-resident commitments retain the lower-overhead fast path.
-        let (commitment, mut data) = if spilled {
+        // Commit to the bit-reversed LDEs. Once host traces have been retained
+        // or disk spilling is enabled, keep the LDEs individually spillable so
+        // later quotient and FRI admission can evict resident LDEs to NVMe/host.
+        let (commitment, mut data) = if spilled || self.mmcs.spill_dir().is_some() {
             self.mmcs.commit_cuda_spillable(ldes)
         } else {
             self.mmcs.commit_cuda_resident(ldes)
@@ -1220,6 +1719,30 @@ where
         idx: usize,
         domain: Self::Domain,
     ) -> Self::EvaluationsOnDomain<'a> {
+        if let Some(spilled) = self.mmcs.spilled_matrices(prover_data)[idx] {
+            if domain.shift() == Val::GENERATOR && spilled.height() >= domain.size() {
+                let prefix = read_spilled_rows_as::<Val>(spilled, 0, domain.size());
+                let width = prefix.width();
+                return RowMajorMatrixCow::new(Cow::Owned(prefix.values), width).bit_reverse_rows();
+            }
+            let poly_height = spilled.height() >> self.fri.log_blowup;
+            let lde_mat = read_spilled_rows_as::<Val>(spilled, 0, spilled.height())
+                .as_view()
+                .bit_reverse_rows()
+                .to_row_major_matrix();
+            let mut coeffs = self.dft.coset_idft_batch(lde_mat, Val::GENERATOR);
+            let width = coeffs.width();
+            coeffs.values.truncate(poly_height * width);
+            coeffs.values.resize(domain.size() * width, Val::ZERO);
+            let result = self
+                .dft
+                .coset_dft_batch(coeffs, domain.shift())
+                .bit_reverse_rows()
+                .to_row_major_matrix();
+            let result_width = result.width();
+            return RowMajorMatrixCow::new(Cow::Owned(result.values), result_width)
+                .bit_reverse_rows();
+        }
         let lde = self.mmcs.get_matrices(prover_data)[idx];
         if domain.shift() == Val::GENERATOR && lde.height() >= domain.size() {
             return lde.split_rows(domain.size()).0.as_cow().bit_reverse_rows();
@@ -1322,33 +1845,37 @@ where
                 .max()
                 .unwrap_or(0);
             let final_fri_height = self.fri.blowup() * self.fri.final_poly_len();
-            if resident_max_height > 1024 && resident_max_height > final_fri_height {
+            let device_id = self.mmcs.cuda_device_id();
+            let (ext_degree, ext_w) = cuda_ext_degree_and_w::<Val, Challenge>();
+            let (free_bytes, total_device_bytes) = crate::cuda::device_memory_info(device_id);
+            let resident_fri_budget = resident_max_height
+                .saturating_mul(ext_degree * size_of::<Val>() * 4 + 96)
+                .saturating_add(total_device_bytes / 64)
+                .saturating_add(crate::cuda::minimum_free_bytes());
+            if resident_max_height > 1024
+                && resident_max_height > final_fri_height
+                && resident_fri_budget <= free_bytes
+            {
                 let _resident_guard = tracing::info_span!("stark/fri_resident").entered();
                 let rounds = resident_rounds;
-                let device_id = self.mmcs.cuda_device_id();
-                assert_eq!(<Challenge as BasedVectorSpace<Val>>::DIMENSION, 2);
-                let to_gold = |v: Val| Goldilocks::from_u64(v.as_canonical_u64());
-                let to_pair = |v: Challenge| {
-                    let c = <Challenge as BasedVectorSpace<Val>>::as_basis_coefficients_slice(&v);
-                    [to_gold(c[0]), to_gold(c[1])]
-                };
-                let from_pair = |v: [Goldilocks; 2]| {
-                    Challenge::from_basis_coefficients_slice(&[
-                        Val::from_u64(v[0].as_canonical_u64()),
-                        Val::from_u64(v[1].as_canonical_u64()),
-                    ])
-                    .unwrap()
-                };
+                let domain_v6 = self.mmcs.is_domain_v6();
                 let global_max_height = rounds
                     .iter()
                     .flat_map(|(ldes, _)| ldes.iter().map(CudaLde::height))
                     .max()
                     .unwrap();
-                let global_max_width = rounds
-                    .iter()
-                    .flat_map(|(ldes, _)| ldes.iter().map(CudaLde::width))
-                    .max()
-                    .unwrap();
+                let mut opened_max_width = 0usize;
+                let mut openings_per_height = [0usize; 33];
+                for (ldes, points) in &rounds {
+                    for (lde, ps) in ldes.iter().zip(points.iter()) {
+                        if !ps.is_empty() {
+                            opened_max_width = opened_max_width.max(lde.width());
+                            let lh = log2_strict_usize(lde.height());
+                            openings_per_height[lh] += ps.len();
+                        }
+                    }
+                }
+                let max_openings_per_height = openings_per_height.into_iter().max().unwrap_or(0);
                 let log_global_max_height = log2_strict_usize(global_max_height);
                 let coset_gold = bit_reversed_coset::<Val>(log_global_max_height);
                 let mut max_log: LinearMap<Challenge, usize> = LinearMap::new();
@@ -1363,17 +1890,14 @@ where
                         }
                     }
                 }
-                let ext_x =
-                    Challenge::from_basis_coefficients_slice(&[Val::ZERO, Val::ONE]).unwrap();
-                let ext_w = to_pair(ext_x * ext_x)[0];
-                assert_eq!(ext_w, Goldilocks::from_u64(7));
                 let mut inv_offsets = LinearMap::new();
                 let mut inverse_points = Vec::new();
                 let mut inverse_counts = Vec::new();
                 let mut inverse_count = 0usize;
                 for (point, lh) in max_log {
                     inv_offsets.insert(point, inverse_count);
-                    inverse_points.push(to_pair(point));
+                    let (buf, d) = ext_to_goldilocks::<Val, Challenge>(point, ext_degree);
+                    inverse_points.extend_from_slice(&buf[..d]);
                     let count = 1usize << lh;
                     inverse_counts.push(count);
                     inverse_count += count;
@@ -1384,8 +1908,9 @@ where
                     &inverse_counts,
                     &coset_gold,
                     ext_w,
+                    ext_degree,
                 );
-                let mut interpolation_tasks = Vec::new();
+                let mut interpolation_tasks = CudaInterpolationTasks::new(ext_degree);
                 let mut output_count = 0usize;
                 let layouts = rounds
                     .iter()
@@ -1402,12 +1927,15 @@ where
                                         let shift_pow = Val::GENERATOR.exp_power_of_2(lh);
                                         let scale = (point.exp_power_of_2(lh) - shift_pow)
                                             * (Val::from_usize(h) * shift_pow).inverse();
-                                        interpolation_tasks.push(lde.interpolation_task(
+                                        let (scale_buf, d) =
+                                            ext_to_goldilocks::<Val, Challenge>(scale, ext_degree);
+                                        interpolation_tasks.push(
+                                            lde,
                                             h,
                                             *inv_offsets.get(&point).unwrap(),
                                             offset,
-                                            to_pair(scale),
-                                        ));
+                                            &scale_buf[..d],
+                                        );
                                         (offset, lde.width())
                                     })
                                     .collect_vec()
@@ -1426,10 +1954,10 @@ where
                                 matrix
                                     .into_iter()
                                     .map(|(offset, width)| {
-                                        interpolated[offset..offset + width]
-                                            .iter()
-                                            .copied()
-                                            .map(from_pair)
+                                        interpolated
+                                            [offset * ext_degree..(offset + width) * ext_degree]
+                                            .chunks_exact(ext_degree)
+                                            .map(ext_from_goldilocks::<Val, Challenge>)
                                             .collect_vec()
                                     })
                                     .collect_vec()
@@ -1444,37 +1972,68 @@ where
                         }
                     }
                 }
-                let alpha: Challenge = challenger.sample_algebra_element();
-                let alpha_powers: Vec<_> = alpha.powers().take(global_max_width).collect();
-                let alpha_pairs: Vec<_> = alpha_powers.iter().copied().map(to_pair).collect();
+                let schedule = FriBatchingSchedule::<Challenge>::sample(
+                    self.batching,
+                    opened_max_width,
+                    max_openings_per_height,
+                    challenger,
+                );
+                let col_weights: Vec<Challenge> = match &schedule {
+                    FriBatchingSchedule::Horner { alpha } => {
+                        alpha.powers().take(opened_max_width).collect()
+                    }
+                    FriBatchingSchedule::Tensor { col_weights, .. } => col_weights.clone(),
+                };
+                let mut col_weights_flat = Vec::with_capacity(col_weights.len() * ext_degree);
+                for &w in &col_weights {
+                    let (buf, d) = ext_to_goldilocks::<Val, Challenge>(w, ext_degree);
+                    col_weights_flat.extend_from_slice(&buf[..d]);
+                }
                 let mut num_reduced = [0usize; 33];
+                let mut opening_idx_by_height = [0usize; 33];
                 let mut reduced: [Option<CudaReducedOpening>; 33] = core::array::from_fn(|_| None);
-                let mut reduction_tasks = Vec::new();
+                let mut reduction_tasks = CudaReductionTasks::new(ext_degree);
                 for ((ldes, points), openings_round) in rounds.iter().zip(all_opened_values.iter())
                 {
                     for ((lde, ps), openings) in
                         ldes.iter().zip(points.iter()).zip(openings_round.iter())
                     {
+                        if ps.is_empty() {
+                            continue;
+                        }
                         let lh = log2_strict_usize(lde.height());
                         let target = reduced[lh].get_or_insert_with(|| {
-                            CudaReducedOpening::new(device_id, lde.height())
+                            CudaReducedOpening::new_with_degree(device_id, lde.height(), ext_degree)
                         });
                         for (&point, ys) in ps.iter().zip(openings.iter()) {
-                            let reduced_y =
-                                dot_product(alpha_powers.iter().copied(), ys.iter().copied());
-                            let offset = alpha.exp_u64(num_reduced[lh] as u64);
-                            reduction_tasks.push(target.reduction_task(
+                            let reduced_y: Challenge =
+                                dot_product(col_weights.iter().copied(), ys.iter().copied());
+                            let offset = match &schedule {
+                                FriBatchingSchedule::Horner { alpha } => {
+                                    alpha.exp_u64(num_reduced[lh] as u64)
+                                }
+                                FriBatchingSchedule::Tensor { open_weights, .. } => {
+                                    open_weights[opening_idx_by_height[lh]]
+                                }
+                            };
+                            let (y_buf, d) =
+                                ext_to_goldilocks::<Val, Challenge>(reduced_y, ext_degree);
+                            let (off_buf, _) =
+                                ext_to_goldilocks::<Val, Challenge>(offset, ext_degree);
+                            reduction_tasks.push(
+                                target,
                                 lde,
                                 *inv_offsets.get(&point).unwrap(),
-                                to_pair(reduced_y),
-                                to_pair(offset),
-                            ));
+                                &y_buf[..d],
+                                &off_buf[..d],
+                            );
                             num_reduced[lh] += lde.width();
+                            opening_idx_by_height[lh] += 1;
                         }
                     }
                 }
                 tracing::info_span!("stark/fri_reduce")
-                    .in_scope(|| workspace.reduce(&reduction_tasks, &alpha_pairs, ext_w));
+                    .in_scope(|| workspace.reduce(&reduction_tasks, &col_weights_flat, ext_w));
                 let fri_input = reduced.into_iter().rev().flatten().collect_vec();
                 let fri_proof = tracing::info_span!("stark/fri_prove").in_scope(|| {
                     prove_fri_cuda_resident(
@@ -1485,6 +2044,8 @@ where
                         &commitment_data_with_opening_points,
                         &self.mmcs,
                         ext_w,
+                        ext_degree,
+                        domain_v6,
                     )
                 });
                 return (all_opened_values, fri_proof);
@@ -1514,32 +2075,35 @@ where
             .iter()
             .map(|(_, points)| points)
             .collect_vec();
-        let (cuda_max_height, cuda_max_width) = dimensions
+        let (cuda_max_height, _) = dimensions
             .iter()
             .flatten()
             .map(|dims| (dims.height, dims.width))
             .reduce(|(hmax, wmax), (height, width)| (hmax.max(height), wmax.max(width)))
             .expect("No Matrices Supplied?");
+        let mut opened_max_width = 0usize;
+        let mut openings_per_height = [0usize; 33];
+        for ((_, points), round_dimensions) in commitment_data_with_opening_points
+            .iter()
+            .zip(dimensions.iter())
+        {
+            for (pts, dims) in points.iter().zip(round_dimensions) {
+                if !pts.is_empty() {
+                    opened_max_width = opened_max_width.max(dims.width);
+                    let lh = log2_strict_usize(dims.height);
+                    openings_per_height[lh] += pts.len();
+                }
+            }
+        }
+        let max_openings_per_height = openings_per_height.into_iter().max().unwrap_or(0);
         let final_fri_height = self.fri.blowup() * self.fri.final_poly_len();
         if cuda_max_height > 1024 && cuda_max_height > final_fri_height {
             let _resident_guard = tracing::info_span!("stark/fri_streamed").entered();
             let prepare_span = tracing::info_span!("stark/fri_prepare").entered();
             let phase_started = std::time::Instant::now();
             let device_id = self.mmcs.cuda_device_id();
-            assert_eq!(<Challenge as BasedVectorSpace<Val>>::DIMENSION, 2);
-            let to_gold = |value: Val| Goldilocks::from_u64(value.as_canonical_u64());
-            let to_pair = |value: Challenge| {
-                let coefficients =
-                    <Challenge as BasedVectorSpace<Val>>::as_basis_coefficients_slice(&value);
-                [to_gold(coefficients[0]), to_gold(coefficients[1])]
-            };
-            let from_pair = |value: [Goldilocks; 2]| {
-                Challenge::from_basis_coefficients_slice(&[
-                    Val::from_u64(value[0].as_canonical_u64()),
-                    Val::from_u64(value[1].as_canonical_u64()),
-                ])
-                .expect("quadratic extension element")
-            };
+            let domain_v6 = self.mmcs.is_domain_v6();
+            let (ext_degree, ext_w) = cuda_ext_degree_and_w::<Val, Challenge>();
             let log_global_max_height = log2_strict_usize(cuda_max_height);
             let coset_gold = bit_reversed_coset::<Val>(log_global_max_height);
 
@@ -1560,10 +2124,6 @@ where
                 }
             }
 
-            let ext_x = Challenge::from_basis_coefficients_slice(&[Val::ZERO, Val::ONE])
-                .expect("quadratic extension generator");
-            let ext_w = to_pair(ext_x * ext_x)[0];
-            assert_eq!(ext_w, Goldilocks::from_u64(7));
             let mut inv_offsets = LinearMap::new();
             let mut inverse_points = Vec::new();
             let mut inverse_counts = Vec::new();
@@ -1587,112 +2147,143 @@ where
                 .into_iter()
                 .sum::<usize>();
             let fri_workspace_bytes = inverse_elements
-                .saturating_mul(2 * size_of::<Val>())
+                .saturating_mul(ext_degree * size_of::<Val>())
                 .saturating_add(cuda_max_height.saturating_mul(size_of::<Val>()))
-                .saturating_add(max_inverse_elements.saturating_mul(2 * size_of::<Val>()))
-                .saturating_add(reduced_elements.saturating_mul(2 * size_of::<Val>()))
+                .saturating_add(max_inverse_elements.saturating_mul(ext_degree * size_of::<Val>()))
+                .saturating_add(reduced_elements.saturating_mul(ext_degree * size_of::<Val>()))
+                .saturating_add(cuda_max_height.saturating_mul(ext_degree * size_of::<Val>() + 96))
+                .saturating_add(STREAM_BLOCK_BYTES)
                 .saturating_add(total_device_bytes / 64);
             let admission_started = std::time::Instant::now();
             let admission_data = commitment_data_with_opening_points
                 .iter()
                 .map(|entry| entry.0)
                 .collect_vec();
-            self.mmcs
-                .ensure_device_headroom_batch(&admission_data, fri_workspace_bytes, "fri");
+            let free_after_admission = self.mmcs.ensure_device_headroom_batch(
+                &admission_data,
+                fri_workspace_bytes.saturating_add(crate::cuda::minimum_free_bytes()),
+                "fri",
+            );
             if crate::cuda::memory_diagnostics_enabled() {
                 eprintln!(
-                    "[multi-stark/cuda] FRI admission: {:.3}s",
-                    admission_started.elapsed().as_secs_f64()
+                    "[multi-stark/cuda] FRI admission: {:.3}s (free={free_after_admission}, need={})",
+                    admission_started.elapsed().as_secs_f64(),
+                    fri_workspace_bytes.saturating_add(crate::cuda::minimum_free_bytes()),
                 );
             }
-            for &(point, log_height) in &point_logs {
-                inv_offsets.insert(point, inverse_count);
-                inverse_points.push(to_pair(point));
-                let count = 1usize << log_height;
-                inverse_counts.push(count);
-                inverse_count += count;
-            }
-            let cpu_round_matrices = commitment_data_with_opening_points
-                .iter()
-                .map(|(data, _)| self.mmcs.cpu_matrices(data))
-                .collect_vec();
-            let mut cpu_max_log: LinearMap<Challenge, usize> = LinearMap::new();
-            for ((matrices, &points), round_dimensions) in cpu_round_matrices
-                .iter()
-                .zip(opening_points.iter())
-                .zip(dimensions.iter())
+            if free_after_admission
+                >= fri_workspace_bytes.saturating_add(crate::cuda::minimum_free_bytes())
             {
-                for ((matrix, points), dims) in
-                    matrices.iter().zip(points.iter()).zip(round_dimensions)
+                for &(point, log_height) in &point_logs {
+                    inv_offsets.insert(point, inverse_count);
+                    let (buf, d) = ext_to_goldilocks::<Val, Challenge>(point, ext_degree);
+                    inverse_points.extend_from_slice(&buf[..d]);
+                    let count = 1usize << log_height;
+                    inverse_counts.push(count);
+                    inverse_count += count;
+                }
+                let cpu_round_matrices = commitment_data_with_opening_points
+                    .iter()
+                    .map(|(data, _)| self.mmcs.cpu_matrices(data))
+                    .collect_vec();
+                let spilled_round_matrices = commitment_data_with_opening_points
+                    .iter()
+                    .map(|(data, _)| self.mmcs.spilled_matrices(data))
+                    .collect_vec();
+                let mut cpu_max_log: LinearMap<Challenge, usize> = LinearMap::new();
+                for ((matrices, &points), round_dimensions) in cpu_round_matrices
+                    .iter()
+                    .zip(opening_points.iter())
+                    .zip(dimensions.iter())
                 {
-                    if matrix.is_none() {
-                        continue;
-                    }
-                    let log_height = log2_strict_usize(dims.height);
-                    for &point in points {
-                        if let Some(maximum) = cpu_max_log.get_mut(&point) {
-                            *maximum = (*maximum).max(log_height);
-                        } else {
-                            cpu_max_log.insert(point, log_height);
+                    for ((matrix, points), dims) in
+                        matrices.iter().zip(points.iter()).zip(round_dimensions)
+                    {
+                        if matrix.is_none() {
+                            continue;
+                        }
+                        let log_height = log2_strict_usize(dims.height);
+                        for &point in points {
+                            if let Some(maximum) = cpu_max_log.get_mut(&point) {
+                                *maximum = (*maximum).max(log_height);
+                            } else {
+                                cpu_max_log.insert(point, log_height);
+                            }
                         }
                     }
                 }
-            }
-            let cpu_point_logs = cpu_max_log.into_iter().collect_vec();
-            let fri_log_blowup = self.fri.log_blowup;
-            let denominators_started = std::time::Instant::now();
-            let ((inv_denoms, cpu_denominator_seconds), mut workspace, gpu_denominator_seconds) =
-                std::thread::scope(|scope| {
-                    let cpu_denominators = scope.spawn(|| {
-                        let started = std::time::Instant::now();
-                        let denominators: LinearMap<Challenge, Vec<Challenge>> = cpu_point_logs
-                            .iter()
-                            .map(|&(point, log_height)| {
-                                let count = 1 << log_height;
-                                let coset = coset_gold[..count].as_ref();
-                                let inverses = goldilocks_quadratic_inverse_denominators(
-                                    to_pair(point),
-                                    coset,
-                                    ext_w,
-                                )
-                                .into_par_iter()
-                                .map(from_pair)
+                let cpu_point_logs = cpu_max_log.into_iter().collect_vec();
+                let fri_log_blowup = self.fri.log_blowup;
+                let denominators_started = std::time::Instant::now();
+                let ((inv_denoms, cpu_denominator_seconds), mut workspace, gpu_denominator_seconds) =
+                    std::thread::scope(|scope| {
+                        let cpu_denominators = scope.spawn(|| {
+                            let started = std::time::Instant::now();
+                            let denominators: LinearMap<Challenge, Vec<Challenge>> = cpu_point_logs
+                                .iter()
+                                .map(|&(point, log_height)| {
+                                    let count = 1 << log_height;
+                                    let coset = coset_gold[..count].as_ref();
+                                    let (buf, _) =
+                                        ext_to_goldilocks::<Val, Challenge>(point, ext_degree);
+                                    let inverses: Vec<Challenge> = match ext_degree {
+                                        2 => goldilocks_quadratic_inverse_denominators(
+                                            [buf[0], buf[1]],
+                                            coset,
+                                            ext_w,
+                                        )
+                                        .into_par_iter()
+                                        .map(|pair| ext_from_goldilocks::<Val, Challenge>(&pair))
+                                        .collect(),
+                                        3 => goldilocks_cubic_trinomial_inverse_denominators(
+                                            buf, coset,
+                                        )
+                                        .into_par_iter()
+                                        .map(|triple| {
+                                            ext_from_goldilocks::<Val, Challenge>(&triple)
+                                        })
+                                        .collect(),
+                                        _ => unreachable!(),
+                                    };
+                                    (point, inverses)
+                                })
                                 .collect();
-                                (point, inverses)
-                            })
-                            .collect();
-                        (denominators, started.elapsed().as_secs_f64())
+                            (denominators, started.elapsed().as_secs_f64())
+                        });
+                        let gpu_started = std::time::Instant::now();
+                        let workspace = CudaFriWorkspace::new(
+                            device_id,
+                            &inverse_points,
+                            &inverse_counts,
+                            &coset_gold,
+                            ext_w,
+                            ext_degree,
+                        );
+                        let gpu_seconds = gpu_started.elapsed().as_secs_f64();
+                        let cpu_denominators = cpu_denominators.join().unwrap();
+                        (cpu_denominators, workspace, gpu_seconds)
                     });
-                    let gpu_started = std::time::Instant::now();
-                    let workspace = CudaFriWorkspace::new(
-                        device_id,
-                        &inverse_points,
-                        &inverse_counts,
-                        &coset_gold,
-                        ext_w,
+                let adjusted_weights: LinearMap<Challenge, Vec<Challenge>> = inv_denoms
+                    .iter()
+                    .map(|(point, denoms)| (*point, compute_adjusted_weights(*point, denoms)))
+                    .collect();
+                if crate::cuda::memory_diagnostics_enabled() {
+                    eprintln!(
+                        "[multi-stark/cuda] FRI denominators: {:.3}s (CPU {:.3}s, GPU {:.3}s)",
+                        denominators_started.elapsed().as_secs_f64(),
+                        cpu_denominator_seconds,
+                        gpu_denominator_seconds
                     );
-                    let gpu_seconds = gpu_started.elapsed().as_secs_f64();
-                    let cpu_denominators = cpu_denominators.join().unwrap();
-                    (cpu_denominators, workspace, gpu_seconds)
-                });
-            let adjusted_weights: LinearMap<Challenge, Vec<Challenge>> = inv_denoms
-                .iter()
-                .map(|(point, denoms)| (*point, compute_adjusted_weights(*point, denoms)))
-                .collect();
-            if crate::cuda::memory_diagnostics_enabled() {
-                eprintln!(
-                    "[multi-stark/cuda] FRI denominators: {:.3}s (CPU {:.3}s, GPU {:.3}s)",
-                    denominators_started.elapsed().as_secs_f64(),
-                    cpu_denominator_seconds,
-                    gpu_denominator_seconds
-                );
-            }
+                }
 
-            drop(prepare_span);
-            let interpolate_span = tracing::info_span!("stark/fri_interpolate").entered();
-            let interpolation_started = std::time::Instant::now();
-            let ((cpu_opened, cpu_interpolation_seconds), gpu_opened, gpu_interpolation_seconds) =
-                std::thread::scope(|scope| {
+                drop(prepare_span);
+                let interpolate_span = tracing::info_span!("stark/fri_interpolate").entered();
+                let interpolation_started = std::time::Instant::now();
+                let (
+                    (cpu_opened, cpu_interpolation_seconds),
+                    gpu_opened,
+                    gpu_interpolation_seconds,
+                ) = std::thread::scope(|scope| {
                     let cpu_opened = scope.spawn(|| {
                         let started = std::time::Instant::now();
                         let opened = cpu_round_matrices
@@ -1731,12 +2322,62 @@ where
                     let gpu_opened = commitment_data_with_opening_points
                         .iter()
                         .zip(dimensions.iter())
-                        .map(|((data, points), round_dimensions)| {
+                        .zip(spilled_round_matrices.iter())
+                        .map(|(((data, points), round_dimensions), spilled_mats)| {
                             points
                                 .iter()
                                 .zip(round_dimensions)
+                                .zip(spilled_mats.iter())
                                 .enumerate()
-                                .map(|(matrix_index, (points, dims))| {
+                                .map(|(matrix_index, ((points, dims), spilled_mat))| {
+                                    if let Some(spilled) = spilled_mat {
+                                        if points.is_empty() {
+                                            return Some(Vec::new());
+                                        }
+                                        assert_eq!(spilled.height(), dims.height);
+                                        assert_eq!(spilled.width(), dims.width);
+                                        let polynomial_height =
+                                            spilled.height() >> self.fri.log_blowup;
+                                        assert!(polynomial_height.is_power_of_two());
+                                        let log_polynomial_height =
+                                            log2_strict_usize(polynomial_height);
+                                        let shift_power = Val::GENERATOR
+                                            .exp_power_of_2(log_polynomial_height);
+                                        let mut mat_inv_offsets = Vec::with_capacity(points.len());
+                                        let mut mat_scales_flat =
+                                            Vec::with_capacity(points.len() * ext_degree);
+                                        for &point in points {
+                                            let scale = (point
+                                                .exp_power_of_2(log_polynomial_height)
+                                                - shift_power)
+                                                * (Val::from_usize(polynomial_height)
+                                                    * shift_power)
+                                                    .inverse();
+                                            let (scale_buf, d) =
+                                                ext_to_goldilocks::<Val, Challenge>(
+                                                    scale, ext_degree,
+                                                );
+                                            mat_inv_offsets.push(*inv_offsets.get(&point).unwrap());
+                                            mat_scales_flat.extend_from_slice(&scale_buf[..d]);
+                                        }
+                                        let flat = workspace.interpolate_spilled(
+                                            spilled,
+                                            polynomial_height,
+                                            &mat_inv_offsets,
+                                            &mat_scales_flat,
+                                            ext_w,
+                                        );
+                                        return Some(
+                                            flat.chunks_exact(spilled.width() * ext_degree)
+                                                .map(|values| {
+                                                    values
+                                                        .chunks_exact(ext_degree)
+                                                        .map(ext_from_goldilocks::<Val, Challenge>)
+                                                        .collect_vec()
+                                                })
+                                                .collect_vec(),
+                                        );
+                                    }
                                     if !self.mmcs.is_matrix_cuda_resident(data, matrix_index) {
                                         return None;
                                     }
@@ -1756,36 +2397,37 @@ where
                                                 log2_strict_usize(polynomial_height);
                                             let shift_power = Val::GENERATOR
                                                 .exp_power_of_2(log_polynomial_height);
-                                            let tasks = points
-                                                .iter()
-                                                .enumerate()
-                                                .map(|(point_index, &point)| {
-                                                    let scale = (point
-                                                        .exp_power_of_2(log_polynomial_height)
-                                                        - shift_power)
-                                                        * (Val::from_usize(polynomial_height)
-                                                            * shift_power)
-                                                            .inverse();
-                                                    lde.interpolation_task(
-                                                        polynomial_height,
-                                                        *inv_offsets.get(&point).unwrap(),
-                                                        point_index * lde.width(),
-                                                        to_pair(scale),
-                                                    )
-                                                })
-                                                .collect_vec();
+                                            let mut tasks = CudaInterpolationTasks::new(ext_degree);
+                                            for (point_index, &point) in points.iter().enumerate() {
+                                                let scale = (point
+                                                    .exp_power_of_2(log_polynomial_height)
+                                                    - shift_power)
+                                                    * (Val::from_usize(polynomial_height)
+                                                        * shift_power)
+                                                        .inverse();
+                                                let (scale_buf, d) =
+                                                    ext_to_goldilocks::<Val, Challenge>(
+                                                        scale, ext_degree,
+                                                    );
+                                                tasks.push(
+                                                    lde,
+                                                    polynomial_height,
+                                                    *inv_offsets.get(&point).unwrap(),
+                                                    point_index * lde.width(),
+                                                    &scale_buf[..d],
+                                                );
+                                            }
                                             workspace
                                                 .interpolate(
                                                     &tasks,
                                                     points.len() * lde.width(),
                                                     ext_w,
                                                 )
-                                                .chunks_exact(lde.width())
+                                                .chunks_exact(lde.width() * ext_degree)
                                                 .map(|values| {
                                                     values
-                                                        .iter()
-                                                        .copied()
-                                                        .map(from_pair)
+                                                        .chunks_exact(ext_degree)
+                                                        .map(ext_from_goldilocks::<Val, Challenge>)
                                                         .collect_vec()
                                                 })
                                                 .collect_vec()
@@ -1799,251 +2441,327 @@ where
                     let cpu_opened = cpu_opened.join().unwrap();
                     (cpu_opened, gpu_opened, gpu_seconds)
                 });
-            let all_opened_values = cpu_opened
-                .into_iter()
-                .zip(gpu_opened)
-                .map(|(cpu_round, gpu_round)| {
-                    cpu_round
-                        .into_iter()
-                        .zip(gpu_round)
-                        .map(|(cpu, gpu)| cpu.or(gpu).expect("matrix has no opening backend"))
-                        .collect_vec()
-                })
-                .collect_vec();
-            if crate::cuda::memory_diagnostics_enabled() {
-                eprintln!(
-                    "[multi-stark/cuda] FRI interpolation: {:.3}s (CPU {:.3}s, GPU {:.3}s)",
-                    interpolation_started.elapsed().as_secs_f64(),
-                    cpu_interpolation_seconds,
-                    gpu_interpolation_seconds
-                );
-            }
+                let all_opened_values = cpu_opened
+                    .into_iter()
+                    .zip(gpu_opened)
+                    .map(|(cpu_round, gpu_round)| {
+                        cpu_round
+                            .into_iter()
+                            .zip(gpu_round)
+                            .map(|(cpu, gpu)| cpu.or(gpu).expect("matrix has no opening backend"))
+                            .collect_vec()
+                    })
+                    .collect_vec();
+                if crate::cuda::memory_diagnostics_enabled() {
+                    eprintln!(
+                        "[multi-stark/cuda] FRI interpolation: {:.3}s (CPU {:.3}s, GPU {:.3}s)",
+                        interpolation_started.elapsed().as_secs_f64(),
+                        cpu_interpolation_seconds,
+                        gpu_interpolation_seconds
+                    );
+                }
 
-            drop(interpolate_span);
-            let observe_span = tracing::info_span!("stark/fri_observe_openings").entered();
-            for round in &all_opened_values {
-                for matrix in round {
-                    for values in matrix {
-                        challenger.observe_algebra_slice(values);
+                drop(interpolate_span);
+                let observe_span = tracing::info_span!("stark/fri_observe_openings").entered();
+                for round in &all_opened_values {
+                    for matrix in round {
+                        for values in matrix {
+                            challenger.observe_algebra_slice(values);
+                        }
                     }
                 }
-            }
-            let alpha: Challenge = challenger.sample_algebra_element();
-            let alpha_powers: Vec<_> = alpha.powers().take(cuda_max_width).collect();
-            let alpha_pairs: Vec<_> = alpha_powers.iter().copied().map(to_pair).collect();
-            let packed_alpha_powers =
-                Challenge::ExtensionPacking::packed_ext_powers_capped(alpha, cuda_max_width)
-                    .collect_vec();
-            let mut num_reduced = [0usize; 33];
-            let reduction_offsets = commitment_data_with_opening_points
-                .iter()
-                .zip(dimensions.iter())
-                .map(|((_, points), round_dimensions)| {
-                    points
+                let schedule = FriBatchingSchedule::<Challenge>::sample(
+                    self.batching,
+                    opened_max_width,
+                    max_openings_per_height,
+                    challenger,
+                );
+                let col_weights: Vec<Challenge> = match &schedule {
+                    FriBatchingSchedule::Horner { alpha } => {
+                        alpha.powers().take(opened_max_width).collect()
+                    }
+                    FriBatchingSchedule::Tensor { col_weights, .. } => col_weights.clone(),
+                };
+                let mut col_weights_flat = Vec::with_capacity(col_weights.len() * ext_degree);
+                for &w in &col_weights {
+                    let (buf, d) = ext_to_goldilocks::<Val, Challenge>(w, ext_degree);
+                    col_weights_flat.extend_from_slice(&buf[..d]);
+                }
+                let packed_col_weights: Vec<Challenge::ExtensionPacking> = match &schedule {
+                    FriBatchingSchedule::Horner { alpha } => {
+                        Challenge::ExtensionPacking::packed_ext_powers_capped(
+                            *alpha,
+                            opened_max_width,
+                        )
+                        .collect_vec()
+                    }
+                    FriBatchingSchedule::Tensor { col_weights, .. } => {
+                        pack_ext_weights::<Val, Challenge>(col_weights)
+                    }
+                };
+                let mut num_reduced = [0usize; 33];
+                let mut opening_idx_by_height = [0usize; 33];
+                let reduction_offsets: Vec<Vec<Vec<Challenge>>> =
+                    commitment_data_with_opening_points
                         .iter()
-                        .zip(round_dimensions)
-                        .map(|(points, dims)| {
-                            let log_height = log2_strict_usize(dims.height);
+                        .zip(dimensions.iter())
+                        .map(|((_, points), round_dimensions)| {
                             points
                                 .iter()
-                                .map(|_| {
-                                    let offset = num_reduced[log_height];
-                                    num_reduced[log_height] += dims.width;
-                                    offset
+                                .zip(round_dimensions)
+                                .map(|(points, dims)| {
+                                    let log_height = log2_strict_usize(dims.height);
+                                    points
+                                        .iter()
+                                        .map(|_| {
+                                            let offset = match &schedule {
+                                                FriBatchingSchedule::Horner { alpha } => {
+                                                    alpha.exp_u64(num_reduced[log_height] as u64)
+                                                }
+                                                FriBatchingSchedule::Tensor {
+                                                    open_weights,
+                                                    ..
+                                                } => {
+                                                    open_weights[opening_idx_by_height[log_height]]
+                                                }
+                                            };
+                                            num_reduced[log_height] += dims.width;
+                                            opening_idx_by_height[log_height] += 1;
+                                            offset
+                                        })
+                                        .collect_vec()
                                 })
                                 .collect_vec()
                         })
-                        .collect_vec()
-                })
-                .collect_vec();
+                        .collect_vec();
 
-            drop(observe_span);
-            let _reduce_span = tracing::info_span!("stark/fri_reduce").entered();
-            let reduction_started = std::time::Instant::now();
-            let ((cpu_reduced, cpu_reduction_seconds), mut gpu_reduced, gpu_reduction_seconds) =
-                std::thread::scope(|scope| {
-                    let cpu_reduced = scope.spawn(|| {
-                        let started = std::time::Instant::now();
-                        let mut reduced: [Option<Vec<Challenge>>; 33] =
+                drop(observe_span);
+                let _reduce_span = tracing::info_span!("stark/fri_reduce").entered();
+                let reduction_started = std::time::Instant::now();
+                let ((cpu_reduced, cpu_reduction_seconds), mut gpu_reduced, gpu_reduction_seconds) =
+                    std::thread::scope(|scope| {
+                        let cpu_reduced = scope.spawn(|| {
+                            let started = std::time::Instant::now();
+                            let mut reduced: [Option<Vec<Challenge>>; 33] =
+                                core::array::from_fn(|_| None);
+                            for (
+                                (((matrices, &points), round_dimensions), openings_round),
+                                offsets_round,
+                            ) in cpu_round_matrices
+                                .iter()
+                                .zip(opening_points.iter())
+                                .zip(dimensions.iter())
+                                .zip(all_opened_values.iter())
+                                .zip(reduction_offsets.iter())
+                            {
+                                for ((((matrix, points), dims), openings), offsets) in matrices
+                                    .iter()
+                                    .copied()
+                                    .zip(points)
+                                    .zip(round_dimensions)
+                                    .zip(openings_round)
+                                    .zip(offsets_round)
+                                {
+                                    let Some(matrix) = matrix else {
+                                        continue;
+                                    };
+                                    if points.is_empty() {
+                                        continue;
+                                    }
+                                    let log_height = log2_strict_usize(dims.height);
+                                    let target = reduced[log_height]
+                                        .get_or_insert_with(|| vec![Challenge::ZERO; dims.height]);
+                                    let compressed = matrix
+                                        .rowwise_packed_dot_product::<Challenge>(
+                                            &packed_col_weights,
+                                        )
+                                        .collect::<Vec<_>>();
+                                    for ((&point, values), &alpha_offset) in
+                                        points.iter().zip(openings).zip(offsets)
+                                    {
+                                        let reduced_y: Challenge = dot_product(
+                                            col_weights.iter().copied(),
+                                            values.iter().copied(),
+                                        );
+                                        compressed
+                                            .par_iter()
+                                            .zip(target.par_iter_mut())
+                                            .zip(inv_denoms.get(&point).unwrap().par_iter())
+                                            .for_each(|((&row, output), &inv_denom)| {
+                                                *output +=
+                                                    alpha_offset * (reduced_y - row) * inv_denom;
+                                            });
+                                    }
+                                }
+                            }
+                            (reduced, started.elapsed().as_secs_f64())
+                        });
+                        let gpu_started = std::time::Instant::now();
+                        let mut reduced: [Option<CudaReducedOpening>; 33] =
                             core::array::from_fn(|_| None);
+                        let mut reduction_tasks = CudaReductionTasks::new(ext_degree);
                         for (
-                            (((matrices, &points), round_dimensions), openings_round),
-                            offsets_round,
-                        ) in cpu_round_matrices
+                            ((((data, points), round_dimensions), openings_round), offsets_round),
+                            spilled_mats,
+                        ) in commitment_data_with_opening_points
                             .iter()
-                            .zip(opening_points.iter())
                             .zip(dimensions.iter())
                             .zip(all_opened_values.iter())
                             .zip(reduction_offsets.iter())
+                            .zip(spilled_round_matrices.iter())
                         {
-                            for ((((matrix, points), dims), openings), offsets) in matrices
+                            for (
+                                matrix_index,
+                                ((((points, dims), openings), offsets), spilled_mat),
+                            ) in points
                                 .iter()
-                                .copied()
-                                .zip(points)
                                 .zip(round_dimensions)
                                 .zip(openings_round)
                                 .zip(offsets_round)
+                                .zip(spilled_mats.iter())
+                                .enumerate()
                             {
-                                let Some(matrix) = matrix else {
-                                    continue;
-                                };
                                 if points.is_empty() {
                                     continue;
                                 }
-                                let log_height = log2_strict_usize(dims.height);
-                                let target = reduced[log_height]
-                                    .get_or_insert_with(|| vec![Challenge::ZERO; dims.height]);
-                                let compressed = matrix
-                                    .rowwise_packed_dot_product::<Challenge>(&packed_alpha_powers)
-                                    .collect::<Vec<_>>();
-                                for ((&point, values), &offset) in
-                                    points.iter().zip(openings).zip(offsets)
-                                {
-                                    let reduced_y: Challenge = dot_product(
-                                        alpha_powers.iter().copied(),
-                                        values.iter().copied(),
+                                if let Some(spilled) = spilled_mat {
+                                    let log_height = log2_strict_usize(dims.height);
+                                    let target = reduced[log_height].get_or_insert_with(|| {
+                                        CudaReducedOpening::new_with_degree(
+                                            device_id,
+                                            dims.height,
+                                            ext_degree,
+                                        )
+                                    });
+                                    let mut mat_inv_offsets = Vec::with_capacity(points.len());
+                                    let mut mat_ys_flat =
+                                        Vec::with_capacity(points.len() * ext_degree);
+                                    let mut mat_offs_flat =
+                                        Vec::with_capacity(points.len() * ext_degree);
+                                    for ((&point, values), &offset) in
+                                        points.iter().zip(openings).zip(offsets)
+                                    {
+                                        let reduced_y: Challenge = dot_product(
+                                            col_weights.iter().copied(),
+                                            values.iter().copied(),
+                                        );
+                                        let (y_buf, d) = ext_to_goldilocks::<Val, Challenge>(
+                                            reduced_y, ext_degree,
+                                        );
+                                        let (off_buf, _) =
+                                            ext_to_goldilocks::<Val, Challenge>(offset, ext_degree);
+                                        mat_inv_offsets.push(*inv_offsets.get(&point).unwrap());
+                                        mat_ys_flat.extend_from_slice(&y_buf[..d]);
+                                        mat_offs_flat.extend_from_slice(&off_buf[..d]);
+                                    }
+                                    workspace.reduce_spilled(
+                                        target,
+                                        spilled,
+                                        &mat_inv_offsets,
+                                        &mat_ys_flat,
+                                        &mat_offs_flat,
+                                        &col_weights_flat,
+                                        ext_w,
                                     );
-                                    let alpha_offset = alpha.exp_u64(offset as u64);
-                                    compressed
-                                        .par_iter()
-                                        .zip(target.par_iter_mut())
-                                        .zip(inv_denoms.get(&point).unwrap().par_iter())
-                                        .for_each(|((&row, output), &inv_denom)| {
-                                            *output += alpha_offset * (reduced_y - row) * inv_denom;
-                                        });
+                                    continue;
                                 }
+                                if !self.mmcs.is_matrix_cuda_resident(data, matrix_index) {
+                                    continue;
+                                }
+                                let log_height = log2_strict_usize(dims.height);
+                                let target = reduced[log_height].get_or_insert_with(|| {
+                                    CudaReducedOpening::new_with_degree(
+                                        device_id,
+                                        dims.height,
+                                        ext_degree,
+                                    )
+                                });
+                                self.mmcs.with_resident_matrix(data, matrix_index, |lde| {
+                                    for ((&point, values), &offset) in
+                                        points.iter().zip(openings).zip(offsets)
+                                    {
+                                        let reduced_y: Challenge = dot_product(
+                                            col_weights.iter().copied(),
+                                            values.iter().copied(),
+                                        );
+                                        let (y_buf, d) = ext_to_goldilocks::<Val, Challenge>(
+                                            reduced_y, ext_degree,
+                                        );
+                                        let (off_buf, _) =
+                                            ext_to_goldilocks::<Val, Challenge>(offset, ext_degree);
+                                        reduction_tasks.push(
+                                            target,
+                                            lde,
+                                            *inv_offsets.get(&point).unwrap(),
+                                            &y_buf[..d],
+                                            &off_buf[..d],
+                                        );
+                                    }
+                                });
                             }
                         }
-                        (reduced, started.elapsed().as_secs_f64())
+                        if !reduction_tasks.is_empty() {
+                            workspace.reduce(&reduction_tasks, &col_weights_flat, ext_w);
+                        }
+                        let gpu_seconds = gpu_started.elapsed().as_secs_f64();
+                        let cpu_reduced = cpu_reduced.join().unwrap();
+                        (cpu_reduced, reduced, gpu_seconds)
                     });
-                    let gpu_started = std::time::Instant::now();
-                    let mut reduced: [Option<CudaReducedOpening>; 33] =
-                        core::array::from_fn(|_| None);
-                    let mut reduction_tasks = Vec::new();
-                    for ((((data, points), round_dimensions), openings_round), offsets_round) in
-                        commitment_data_with_opening_points
-                            .iter()
-                            .zip(dimensions.iter())
-                            .zip(all_opened_values.iter())
-                            .zip(reduction_offsets.iter())
-                    {
-                        for (matrix_index, (((points, dims), openings), offsets)) in points
-                            .iter()
-                            .zip(round_dimensions)
-                            .zip(openings_round)
-                            .zip(offsets_round)
-                            .enumerate()
-                        {
-                            if !self.mmcs.is_matrix_cuda_resident(data, matrix_index) {
-                                continue;
-                            }
-                            if points.is_empty() {
-                                continue;
-                            }
-                            let log_height = log2_strict_usize(dims.height);
-                            let target = reduced[log_height].get_or_insert_with(|| {
-                                CudaReducedOpening::new(device_id, dims.height)
-                            });
-                            self.mmcs.with_resident_matrix(data, matrix_index, |lde| {
-                                reduction_tasks.extend(
-                                    points.iter().zip(openings).zip(offsets).map(
-                                        |((&point, values), &offset)| {
-                                            let reduced_y = dot_product(
-                                                alpha_powers.iter().copied(),
-                                                values.iter().copied(),
-                                            );
-                                            target.reduction_task(
-                                                lde,
-                                                *inv_offsets.get(&point).unwrap(),
-                                                to_pair(reduced_y),
-                                                to_pair(alpha.exp_u64(offset as u64)),
-                                            )
-                                        },
-                                    ),
-                                );
-                            });
-                        }
-                    }
-                    if !reduction_tasks.is_empty() {
-                        workspace.reduce(&reduction_tasks, &alpha_pairs, ext_w);
-                    }
-                    let gpu_seconds = gpu_started.elapsed().as_secs_f64();
-                    let cpu_reduced = cpu_reduced.join().unwrap();
-                    (cpu_reduced, reduced, gpu_seconds)
-                });
-            drop(workspace);
+                drop(workspace);
 
-            for (log_height, cpu_values) in cpu_reduced.into_iter().enumerate() {
-                if let Some(cpu_values) = cpu_values {
-                    let values = cpu_values.into_iter().map(to_pair).collect_vec();
-                    gpu_reduced[log_height]
-                        .get_or_insert_with(|| CudaReducedOpening::new(device_id, values.len()))
-                        .add_host(&values);
+                for (log_height, cpu_values) in cpu_reduced.into_iter().enumerate() {
+                    if let Some(cpu_values) = cpu_values {
+                        let count = cpu_values.len();
+                        let mut flat = Vec::with_capacity(count * ext_degree);
+                        for value in cpu_values {
+                            let (buf, d) = ext_to_goldilocks::<Val, Challenge>(value, ext_degree);
+                            flat.extend_from_slice(&buf[..d]);
+                        }
+                        gpu_reduced[log_height]
+                            .get_or_insert_with(|| {
+                                CudaReducedOpening::new_with_degree(device_id, count, ext_degree)
+                            })
+                            .add_host_flat(&flat);
+                    }
                 }
+                if crate::cuda::memory_diagnostics_enabled() {
+                    eprintln!(
+                        "[multi-stark/cuda] FRI reduction: {:.3}s (CPU {:.3}s, GPU {:.3}s)",
+                        reduction_started.elapsed().as_secs_f64(),
+                        cpu_reduction_seconds,
+                        gpu_reduction_seconds
+                    );
+                }
+                let fri_input = gpu_reduced.into_iter().rev().flatten().collect_vec();
+                let folding_started = std::time::Instant::now();
+                let fri_proof = tracing::info_span!("stark/fri_prove").in_scope(|| {
+                    prove_fri_cuda_resident(
+                        &self.fri,
+                        fri_input,
+                        challenger,
+                        log_global_max_height,
+                        &commitment_data_with_opening_points,
+                        &self.mmcs,
+                        ext_w,
+                        ext_degree,
+                        domain_v6,
+                    )
+                });
+                if crate::cuda::memory_diagnostics_enabled() {
+                    eprintln!(
+                        "[multi-stark/cuda] FRI folding and queries: {:.3}s (streamed total {:.3}s)",
+                        folding_started.elapsed().as_secs_f64(),
+                        phase_started.elapsed().as_secs_f64()
+                    );
+                }
+                return (all_opened_values, fri_proof);
             }
-            if crate::cuda::memory_diagnostics_enabled() {
-                eprintln!(
-                    "[multi-stark/cuda] FRI reduction: {:.3}s (CPU {:.3}s, GPU {:.3}s)",
-                    reduction_started.elapsed().as_secs_f64(),
-                    cpu_reduction_seconds,
-                    gpu_reduction_seconds
-                );
-            }
-            let fri_input = gpu_reduced.into_iter().rev().flatten().collect_vec();
-            let folding_started = std::time::Instant::now();
-            let fri_proof = tracing::info_span!("stark/fri_prove").in_scope(|| {
-                prove_fri_cuda_resident(
-                    &self.fri,
-                    fri_input,
-                    challenger,
-                    log_global_max_height,
-                    &commitment_data_with_opening_points,
-                    &self.mmcs,
-                    ext_w,
-                )
-            });
-            if crate::cuda::memory_diagnostics_enabled() {
-                eprintln!(
-                    "[multi-stark/cuda] FRI folding and queries: {:.3}s (streamed total {:.3}s)",
-                    folding_started.elapsed().as_secs_f64(),
-                    phase_started.elapsed().as_secs_f64()
-                );
-            }
-            return (all_opened_values, fri_proof);
         }
 
-        // Contained in each `Self::ProverData` is a list of matrices which have been committed to.
-        // We extract those matrices to be able to refer to them directly.
-        let mats_and_points = commitment_data_with_opening_points
-            .iter()
-            .map(|(data, points)| {
-                let mats = self
-                    .mmcs
-                    .get_matrices(data)
-                    .into_iter()
-                    .map(|m| m.as_view())
-                    .collect_vec();
-                debug_assert_eq!(
-                    mats.len(),
-                    points.len(),
-                    "each matrix should have a corresponding set of evaluation points"
-                );
-                (mats, points)
-            })
-            .collect_vec();
-
-        // Find the maximum height and the maximum width of matrices in the batch.
-        // These do not need to correspond to the same matrix.
-        let (global_max_height, global_max_width) = mats_and_points
-            .iter()
-            .flat_map(|(mats, _)| mats.iter().map(|m| (m.height(), m.width())))
-            .reduce(|(hmax, wmax), (h, w)| (hmax.max(h), wmax.max(w)))
-            .expect("No Matrices Supplied?");
+        // Streaming CPU fallback (small matrices `height <= 1024` or fully
+        // reserved VRAM): never calls `get_matrices` on disk-spilled entries.
+        let global_max_height = cuda_max_height;
         let log_global_max_height = log2_strict_usize(global_max_height);
-
-        // Get all values of the coset `gH` for the largest necessary subgroup `H`.
-        // We also bit reverse which means that coset has the nice property that
-        // `coset[..2^i]` contains the values of `gK` for `|K| = 2^i`.
         let coset = {
             let coset =
                 TwoAdicMultiplicativeCoset::new(Val::GENERATOR, log_global_max_height).unwrap();
@@ -2051,175 +2769,178 @@ where
             reverse_slice_index_bits(&mut coset_points);
             coset_points
         };
-
-        // For each unique opening point z, we will find the largest degree bound
-        // for that point, and precompute 1/(z - X) for the largest subgroup (in bitrev order).
-        let inv_denoms = compute_inverse_denominators(&mats_and_points, &coset);
-
-        // Convert the inverse denominators into the adjusted barycentric weights expected by
-        // the matrix interpolation API. Reuse them across every matrix opened at each point.
+        let inv_denoms =
+            compute_inverse_denominators_for_dims(&dimensions, &opening_points, &coset);
         let adjusted_weights: LinearMap<Challenge, Vec<Challenge>> = inv_denoms
             .iter()
             .map(|(point, denoms)| (*point, compute_adjusted_weights(*point, denoms)))
             .collect();
 
-        // Evaluate coset representations and write openings to the challenger
-        let all_opened_values = mats_and_points
+        let all_opened_values = commitment_data_with_opening_points
             .iter()
-            .map(|(mats, points)| {
-                // For each collection of matrices
-                izip!(mats.iter(), points.iter())
-                    .map(|(mat, points_for_mat)| {
-                        // TODO: This assumes that every input matrix has a blowup of at least self.fri.log_blowup.
-                        // If the blow_up factor is smaller than self.fri.log_blowup, this will lead to errors.
-                        // If it is bigger, we shouldn't get any errors but it will be slightly slower.
-                        // Ideally, polynomials could be passed in with their blow_up factors known.
-
-                        // The point of this correction is that each column of the matrix corresponds to a low degree polynomial.
-                        // Hence we can save time by restricting the height of the matrix to be the minimal height which
-                        // uniquely identifies the polynomial.
-                        let h = mat.height() >> self.fri.log_blowup;
-
-                        // `subgroup` and `mat` are both in bit-reversed order, so we can truncate.
-                        let (low_coset, _) = mat.split_rows(h);
-
-                        points_for_mat
-                            .iter()
-                            .map(|&point| {
-                                let _guard =
-                                    debug_span!("evaluate matrix", dims = %mat.dimensions())
-                                        .entered();
-
-                                // Use Barycentric interpolation to evaluate each column of the matrix at the given point.
-                                let ys = debug_span!(
-                                    "compute opened values with Lagrange interpolation"
-                                )
-                                .in_scope(|| {
+            .zip(dimensions.iter())
+            .map(|((data, points), round_dims)| {
+                let spilled_mats = self.mmcs.spilled_matrices(data);
+                let mut host_mats_cache: Option<Vec<&RowMajorMatrix<Val>>> = None;
+                points
+                        .iter()
+                        .zip(round_dims.iter())
+                        .zip(spilled_mats.iter())
+                        .enumerate()
+                        .map(|(mat_idx, ((points_for_mat, dims), spilled_mat))| {
+                            if points_for_mat.is_empty() {
+                                return Vec::new();
+                            }
+                            let h = dims.height >> self.fri.log_blowup;
+                            if let Some(spilled) = spilled_mat {
+                                let evals_per_point =
+                                    interpolate_spilled_coset_generic::<Val, Challenge>(
+                                        spilled,
+                                        h,
+                                        points_for_mat,
+                                        &adjusted_weights,
+                                    );
+                                for ys in &evals_per_point {
+                                    challenger.observe_algebra_slice(ys);
+                                }
+                                return evals_per_point;
+                            }
+                            let mats =
+                                host_mats_cache.get_or_insert_with(|| self.mmcs.get_matrices(data));
+                            let mat = mats[mat_idx].as_view();
+                            let (low_coset, _) = mat.split_rows(h);
+                            points_for_mat
+                                .iter()
+                                .map(|&point| {
                                     let adjusted = &adjusted_weights.get(&point).unwrap()[..h];
-                                    low_coset.interpolate_coset_with_precomputation(
+                                    let ys = low_coset.interpolate_coset_with_precomputation(
                                         Val::GENERATOR,
                                         point,
                                         adjusted,
-                                    )
-                                });
-
-                                challenger.observe_algebra_slice(&ys);
-                                ys
-                            })
-                            .collect_vec()
-                    })
-                    .collect_vec()
+                                    );
+                                    challenger.observe_algebra_slice(&ys);
+                                    ys
+                                })
+                                .collect_vec()
+                        })
+                        .collect_vec()
             })
             .collect_vec();
 
-        // Batch combination challenge
+        let schedule = FriBatchingSchedule::<Challenge>::sample(
+            self.batching,
+            opened_max_width,
+            max_openings_per_height,
+            challenger,
+        );
+        let packed_col_weights: Vec<Challenge::ExtensionPacking> = match &schedule {
+            FriBatchingSchedule::Horner { alpha } => {
+                Challenge::ExtensionPacking::packed_ext_powers_capped(*alpha, opened_max_width)
+                    .collect_vec()
+            }
+            FriBatchingSchedule::Tensor { col_weights, .. } => {
+                pack_ext_weights::<Val, Challenge>(col_weights)
+            }
+        };
+        let col_weights: Vec<Challenge> = match &schedule {
+            FriBatchingSchedule::Horner { alpha } => {
+                alpha.powers().take(opened_max_width).collect()
+            }
+            FriBatchingSchedule::Tensor { col_weights, .. } => col_weights.clone(),
+        };
 
-        // Soundness Error:
-        // See the discussion in the doc comment of [`prove_fri`]. Essentially, the soundness error
-        // for this sample is tightly tied to the soundness error of the FRI protocol.
-        // Roughly speaking, at a minimum is it k/|EF| where `k` is the sum of, for each function, the number of
-        // points it needs to be opened at. This comes from the fact that we are taking a large linear combination
-        // of `(f(zeta) - f(x))/(zeta - x)` for each function `f` and all of `f`'s opening points.
-        // In our setup, k is two times the trace width plus the number of quotient polynomials.
-        let alpha: Challenge = challenger.sample_algebra_element();
+        let mut num_reduced = [0usize; 33];
+        let mut opening_idx_by_height = [0usize; 33];
+        let mut reduced_openings: [Option<Vec<Challenge>>; 33] = core::array::from_fn(|_| None);
 
-        // We precompute powers of alpha as we need the same powers for each matrix.
-        // We compute both a vector of unpacked powers and a vector of packed powers.
-        // TODO: It should be possible to refactor this to only use the packed powers but
-        // this is not a bottleneck so is not a priority.
-        let packed_alpha_powers =
-            Challenge::ExtensionPacking::packed_ext_powers_capped(alpha, global_max_width)
-                .collect_vec();
-        let alpha_powers =
-            Challenge::ExtensionPacking::to_ext_iter(packed_alpha_powers.iter().copied())
-                .collect_vec();
-
-        // Now that we have sent the openings to the verifier, it remains to prove
-        // that those openings are correct.
-
-        // Given a low degree polynomial `f(x)` with claimed evaluation `f(zeta)`, we can check
-        // that `f(zeta)` is correct by doing a low degree test on `(f(zeta) - f(x))/(zeta - x)`.
-        // We will use `alpha` to batch together both different claimed openings `zeta` and
-        // different polynomials `f` whose evaluation vectors have the same height.
-
-        // TODO: If we allow different polynomials to have different blow_up factors
-        // we may need to revisit this and to ensure it is safe to batch them together.
-
-        // num_reduced records the number of (function, opening point) pairs for each `log_height`.
-        // TODO: This should really be `[0; Val::TWO_ADICITY]` but that runs into issues with generics.
-        let mut num_reduced = [0; 33];
-
-        // For each `log_height` from 2^1 -> 2^32, reduced_openings will contain either `None`
-        // if there are no matrices of that height, or `Some(vec)` where `vec` is equal to
-        // a weighted sum of `(f(zeta) - f(x))/(zeta - x)` over all `f`'s of that height and
-        // for each `f`, all opening points `zeta`. The sum is weighted by powers of the challenge alpha.
-        let mut reduced_openings: [_; 33] = core::array::from_fn(|_| None);
-
-        for ((mats, points), openings_for_round) in
-            mats_and_points.iter().zip(all_opened_values.iter())
+        for (((data, points), round_dims), openings_for_round) in
+            commitment_data_with_opening_points
+                .iter()
+                .zip(dimensions.iter())
+                .zip(all_opened_values.iter())
         {
-            for (mat, points_for_mat, openings_for_mat) in
-                izip!(mats.iter(), points.iter(), openings_for_round.iter())
+            let spilled_mats = self.mmcs.spilled_matrices(data);
+            let mut host_mats_cache: Option<Vec<&RowMajorMatrix<Val>>> = None;
+            for (mat_idx, (((points_for_mat, dims), openings_for_mat), spilled_mat)) in points
+                .iter()
+                .zip(round_dims.iter())
+                .zip(openings_for_round.iter())
+                .zip(spilled_mats.iter())
+                .enumerate()
             {
-                let _guard =
-                    debug_span!("reduce matrix quotient", dims = %mat.dimensions()).entered();
-
-                let log_height = log2_strict_usize(mat.height());
-
-                // If this is our first matrix at this height, initialise reduced_openings to zero.
-                // Otherwise, get a mutable reference to it.
+                if points_for_mat.is_empty() {
+                    continue;
+                }
+                let log_height = log2_strict_usize(dims.height);
                 let reduced_opening_for_log_height = reduced_openings[log_height]
-                    .get_or_insert_with(|| vec![Challenge::ZERO; mat.height()]);
-                debug_assert_eq!(reduced_opening_for_log_height.len(), mat.height());
-
-                // Treating our matrix M as the evaluations of functions f_0, f_1, ...
-                // Compute the evaluations of `Mred(x) = f_0(x) + alpha*f_1(x) + ...`
-                let mat_compressed = debug_span!("compress mat").in_scope(|| {
-                    // This will be reused for all points z which M is opened at so we collect into a vector.
-                    mat.rowwise_packed_dot_product::<Challenge>(&packed_alpha_powers)
-                        .collect::<Vec<_>>()
-                });
-
+                    .get_or_insert_with(|| vec![Challenge::ZERO; dims.height]);
+                let mut point_params = Vec::with_capacity(points_for_mat.len());
                 for (&point, openings) in points_for_mat.iter().zip(openings_for_mat) {
-                    // If we have multiple matrices at the same height, we need to scale alpha to combine them.
-                    // This means that reduced_openings will contain:
-                    // Mred_0(x) + alpha^{M_0.width()}Mred_1(x) + alpha^{M_0.width() + M_1.width()}Mred_2(x) + ...
-                    // Where M_0, M_1, ... are the matrices of the same height.
-                    let alpha_pow_offset = alpha.exp_u64(num_reduced[log_height] as u64);
-
-                    // As we have all the openings `f_i(z)`, we can combine them using `alpha`
-                    // in an identical way to before to compute `Mred(z)`.
+                    let alpha_pow_offset = match &schedule {
+                        FriBatchingSchedule::Horner { alpha } => {
+                            alpha.exp_u64(num_reduced[log_height] as u64)
+                        }
+                        FriBatchingSchedule::Tensor { open_weights, .. } => {
+                            open_weights[opening_idx_by_height[log_height]]
+                        }
+                    };
                     let reduced_openings: Challenge =
-                        dot_product(alpha_powers.iter().copied(), openings.iter().copied());
-
-                    mat_compressed
-                        .par_iter()
-                        .zip(reduced_opening_for_log_height.par_iter_mut())
-                        // inv_denoms contains `1/(z - x)` for `x` in a coset `gK`.
-                        // If `|K| =/= mat.height()` we actually want a subset of this
-                        // corresponding to the evaluations over `gH` for `|H| = mat.height()`.
-                        // As inv_denoms is bit reversed, the evaluations over `gH` are exactly
-                        // the evaluations over `gK` at the indices `0..mat.height()`.
-                        // So zip will truncate to the desired smaller length.
-                        .zip(inv_denoms.get(&point).unwrap().par_iter())
-                        // Map the function `Mred(x) -> (Mred(z) - Mred(x))/(z - x)`
-                        // across the evaluation vector of `Mred(x)`. Adjust by alpha_pow_offset
-                        // as needed.
-                        .for_each(|((&reduced_row, ro), &inv_denom)| {
-                            *ro += alpha_pow_offset * (reduced_openings - reduced_row) * inv_denom;
-                        });
-                    num_reduced[log_height] += mat.width();
+                        dot_product(col_weights.iter().copied(), openings.iter().copied());
+                    num_reduced[log_height] += dims.width;
+                    opening_idx_by_height[log_height] += 1;
+                    point_params.push((
+                        alpha_pow_offset,
+                        reduced_openings,
+                        inv_denoms.get(&point).unwrap().as_slice(),
+                    ));
+                }
+                if let Some(spilled) = spilled_mat {
+                    let row_bytes = spilled.row_bytes().max(size_of::<u64>());
+                    let chunk_rows = (STREAM_BLOCK_BYTES / row_bytes)
+                        .clamp(1, 1 << 14)
+                        .min(dims.height);
+                    for row_start in (0..dims.height).step_by(chunk_rows) {
+                        let n_rows = (dims.height - row_start).min(chunk_rows);
+                        let row_end = row_start + n_rows;
+                        let chunk = read_spilled_rows_as::<Val>(spilled, row_start, n_rows);
+                        let mat_compressed: Vec<Challenge> = chunk
+                            .as_view()
+                            .rowwise_packed_dot_product::<Challenge>(&packed_col_weights)
+                            .collect();
+                        for &(alpha_pow_offset, reduced_y, inv_denom) in &point_params {
+                            mat_compressed
+                                .par_iter()
+                                .zip(
+                                    reduced_opening_for_log_height[row_start..row_end]
+                                        .par_iter_mut(),
+                                )
+                                .zip(inv_denom[row_start..row_end].par_iter())
+                                .for_each(|((&reduced_row, ro), &inv_d)| {
+                                    *ro += alpha_pow_offset * (reduced_y - reduced_row) * inv_d;
+                                });
+                        }
+                    }
+                } else {
+                    let mats = host_mats_cache.get_or_insert_with(|| self.mmcs.get_matrices(data));
+                    let mat = mats[mat_idx].as_view();
+                    let mat_compressed = mat
+                        .rowwise_packed_dot_product::<Challenge>(&packed_col_weights)
+                        .collect::<Vec<_>>();
+                    for &(alpha_pow_offset, reduced_y, inv_denom) in &point_params {
+                        mat_compressed
+                            .par_iter()
+                            .zip(reduced_opening_for_log_height.par_iter_mut())
+                            .zip(inv_denom.par_iter())
+                            .for_each(|((&reduced_row, ro), &inv_d)| {
+                                *ro += alpha_pow_offset * (reduced_y - reduced_row) * inv_d;
+                            });
+                    }
                 }
             }
         }
 
-        // It remains to prove that all evaluation vectors in reduced_openings correspond to
-        // low degree functions.
         let fri_input = reduced_openings.into_iter().rev().flatten().collect_vec();
-
         let folding: TwoAdicFriFoldingForMmcs<Val, InputMmcs> = TwoAdicFriFolding(PhantomData);
-
-        // Produce the FRI proof.
         let fri_proof = prover::prove_fri(
             &folding,
             &self.fri,
@@ -2242,6 +2963,12 @@ where
         proof: &Self::Proof,
         challenger: &mut Challenger,
     ) -> Result<(), Self::Error> {
+        validate_fri_commitment_caps(
+            &self.fri,
+            proof,
+            &commitments_with_opening_points,
+            &self.mmcs,
+        )?;
         // Write all evaluations to challenger.
         // Need to ensure to do this in the same order as the prover.
         for (_, round) in &commitments_with_opening_points {
@@ -2254,13 +2981,14 @@ where
 
         let folding: TwoAdicFriFoldingForMmcs<Val, InputMmcs> = TwoAdicFriFolding(PhantomData);
 
-        verifier::verify_fri(
+        verify_fri_with_batching(
             &folding,
             &self.fri,
             proof,
             challenger,
             &commitments_with_opening_points,
             &self.mmcs,
+            self.batching,
         )?;
 
         Ok(())
@@ -2281,59 +3009,95 @@ where
     }
 }
 
-/// Compute vectors of inverse denominators for each unique opening point.
-///
-/// Arguments:
-/// - `mats_and_points` is a list of matrices and for each matrix a list of points. We assume that
-///    the total number of distinct points is very small as several methods contained herein are `O(n^2)`
-///    in the number of points.
-/// - `coset` is the set of points `gH` where `H` a two-adic subgroup such that `|H|` is greater
-///     than or equal to the largest height of any matrix in `mats_and_points`. The values
-///     in `coset` must be in bit-reversed order.
-///
-/// For each point `z`, let `M` be the matrix of largest height which opens at `z`.
-/// let `H_z` be the unique subgroup of order `M.height()`. Compute the vector of
-/// `1/(z - x)` for `x` in `gH_z`.
-///
-/// Return a LinearMap which allows us to recover the computed vectors for each `z`.
-#[instrument(skip_all)]
-fn compute_inverse_denominators<F: TwoAdicField, EF: ExtensionField<F>, M: Matrix<F>>(
-    mats_and_points: &[(Vec<M>, &Vec<Vec<EF>>)],
+pub(super) fn read_spilled_rows_as<Val: PrimeField64>(
+    spilled: &SpilledMatrix,
+    start_row: usize,
+    num_rows: usize,
+) -> RowMajorMatrix<Val> {
+    let width = spilled.width();
+    if width == 0 || num_rows == 0 {
+        return RowMajorMatrix::new(Vec::new(), width);
+    }
+    let mut words = vec![0u64; num_rows * width];
+    spilled.read_u64_rows_into(start_row, num_rows, &mut words);
+    let values = if words.len() >= 4096 {
+        words.into_par_iter().map(Val::from_u64).collect()
+    } else {
+        words.into_iter().map(Val::from_u64).collect()
+    };
+    RowMajorMatrix::new(values, width)
+}
+
+pub(super) fn compute_inverse_denominators_for_dims<
+    F: TwoAdicField + PrimeField64,
+    EF: ExtensionField<F>,
+>(
+    dimensions: &[Vec<p3_matrix::Dimensions>],
+    opening_points: &[&Vec<Vec<EF>>],
     coset: &[F],
 ) -> LinearMap<EF, Vec<EF>> {
-    // For each `z`, find the maximal height of any matrix which we need to
-    // open at `z`.
     let mut max_log_height_for_point: LinearMap<EF, usize> = LinearMap::new();
-    for (mats, points) in mats_and_points {
-        for (mat, points_for_mat) in izip!(mats, *points) {
-            let log_height = log2_strict_usize(mat.height());
+    for (round_dims, points) in dimensions.iter().zip(opening_points.iter()) {
+        for (dims, points_for_mat) in round_dims.iter().zip(points.iter()) {
+            let log_height = log2_strict_usize(dims.height);
             for &z in points_for_mat {
                 if let Some(lh) = max_log_height_for_point.get_mut(&z) {
-                    *lh = core::cmp::max(*lh, log_height);
+                    *lh = (*lh).max(log_height);
                 } else {
                     max_log_height_for_point.insert(z, log_height);
                 }
             }
         }
     }
-
-    // Compute the inverse denominators for each point `z`.
     max_log_height_for_point
         .into_iter()
         .map(|(z, log_height)| {
-            (
-                z,
-                batch_multiplicative_inverse(
-                    // As coset is stored in bit-reversed order,
-                    // we can just take the first `2^log_height` elements.
-                    &coset[..(1 << log_height)]
-                        .iter()
-                        .map(|&x| z - x)
-                        .collect_vec(),
-                ),
-            )
+            let count = 1usize << log_height;
+            let diffs: Vec<EF> = coset[..count].par_iter().map(|&x| z - x).collect();
+            (z, batch_multiplicative_inverse(&diffs))
         })
         .collect()
+}
+
+pub(super) fn interpolate_spilled_coset_generic<
+    F: TwoAdicField + PrimeField64,
+    EF: ExtensionField<F>,
+>(
+    spilled: &SpilledMatrix,
+    h: usize,
+    points: &[EF],
+    adjusted_weights: &LinearMap<EF, Vec<EF>>,
+) -> Vec<Vec<EF>> {
+    let width = spilled.width();
+    let mut accumulators: Vec<Vec<EF>> = (0..points.len()).map(|_| EF::zero_vec(width)).collect();
+    let row_bytes = spilled.row_bytes().max(size_of::<u64>());
+    let chunk_rows = (STREAM_BLOCK_BYTES / row_bytes).clamp(1, 1 << 14).min(h);
+
+    for row_start in (0..h).step_by(chunk_rows) {
+        let n_rows = (h - row_start).min(chunk_rows);
+        let chunk = read_spilled_rows_as::<F>(spilled, row_start, n_rows);
+        for (acc, &point) in accumulators.iter_mut().zip(points) {
+            let adj_slice = &adjusted_weights.get(&point).unwrap()[row_start..row_start + n_rows];
+            let partial = chunk.as_view().columnwise_dot_product(adj_slice);
+            for (dst, src) in acc.iter_mut().zip(partial) {
+                *dst += src;
+            }
+        }
+    }
+
+    let log_h = log2_strict_usize(h);
+    let g_pow_n = F::GENERATOR.exp_power_of_2(log_h);
+    let denom_inv = (F::from_usize(h) * g_pow_n).inverse();
+
+    for (evals, &point) in accumulators.iter_mut().zip(points) {
+        let z_pow_n = point.exp_power_of_2(log_h);
+        let scaling_factor = point * (z_pow_n - g_pow_n) * denom_inv;
+        for v in evals.iter_mut() {
+            *v *= scaling_factor;
+        }
+    }
+
+    accumulators
 }
 
 #[cfg(test)]
@@ -2345,7 +3109,7 @@ mod tests {
     #[test]
     #[ignore = "requires a CUDA device"]
     fn concurrent_host_lde_jobs_match_serial_transforms() {
-        let dft = crate::cuda::CudaDft::new(0).with_auxiliary_devices(&[]);
+        let dft = CudaDft::new(0).with_auxiliary_devices(&[]);
         let jobs = (0..32)
             .map(|index| {
                 let log_height = 12 + index % 3;
@@ -2378,7 +3142,7 @@ mod tests {
     #[test]
     #[ignore = "requires two CUDA devices"]
     fn auxiliary_host_ldes_preserve_matrix_order_cosets_and_canonical_words() {
-        let cpu_dft = crate::cuda::CudaDft::new(0).with_auxiliary_devices(&[]);
+        let cpu_dft = CudaDft::new(0).with_auxiliary_devices(&[]);
         let gpu_dft = cpu_dft.clone().with_auxiliary_devices(&[1]);
         let representatives = [
             0,

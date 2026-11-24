@@ -59,15 +59,15 @@ variable (M : StarkModel F EF K) (sys : System F D) (V : Variant F EF D) (θ : �
 against the log, and no hash entry hits a digest in play. -/
 def GoodLog (l : Log (SAns F EF D K slots width)) : Prop :=
   ¬ HasBad (InterpFlips r (sdoomed M sys V θ B) (interp B r)) l ∧
-    ¬ HasBad (Hit (digestsOf B) r) l
+    ¬ HasBad (Hit (fun _ => digestsOf B) r) l
 
 omit [FieldOps F] [FieldOps EF] [TwoAdicOps F] [ExtensionOps F EF] [Field K] [Inhabited D] in
 /-- The reading of the messages is settled by the challenge queries, up to a
 hit. -/
 theorem settles_interp :
     Settles (fun (l : Log (SAns F EF D K slots width)) j m => interp B r l j m)
-      (Hit (digestsOf B) r) := by
-  refine settles_of_committedRow (digestsOf B) r
+      (Hit (fun _ => digestsOf B) r) := by
+  refine settles_of_committedRow (fun _ => digestsOf B) r
     (fun j m c => readMsg B m (if j < r then c else fun _ _ _ _ => none)) ?_ ?_
   · intro j m c c' hj hc
     simp only [hj, ↓reduceIte, readMsg]
@@ -111,11 +111,23 @@ theorem prob_not_goodLog_le [Fintype K] [Fintype D] {εpcs εmax : ℝ} (hεpcs 
   have hflip := prob_hasBad_interpFlips_le (interp := interp B r)
     (rbrSound_sdoomed M sys V θ B hεpcs htwo hslots hcommit hquery hwidth hpcs r)
     (fun i _ => hε i) h0 hc
-  have hhit := prob_hasBad_hit_le (digestsOf := digestsOf (F := F) (EF := EF) B) (r := r)
-    (K := B.shards + 1) (fun m => by
-      unfold digestsOf
-      exact (List.length_take_le _ _)) hc
-  push_cast at hhit
+  have hhit_pot := prob_hasBad_hit_le_potential
+    (digestsOf := fun _ => digestsOf (F := F) (EF := EF) B) (r := r)
+    (M := (B.shards + 1) * r) (fun x => by
+      unfold chalDigests
+      refine (MerkleRO.length_flatMap_zipIdx_le (fun _ => digestsOf B) (fun _ => B.shards + 1)
+        (fun _ m => by unfold digestsOf; exact List.length_take_le _ _) _ 0).trans ?_
+      simp only [Finset.sum_const, Finset.card_range, smul_eq_mul]
+      rw [Nat.mul_comm]
+      exact Nat.mul_le_mul_left _ (List.length_take_le _ _)) hc
+  have hhit : prob (fun _ l => HasBad (Hit (fun _ => digestsOf B) r) l) c []
+      ≤ (((B.shards + 1) * r + 3 : ℝ) * N * (N - 1)) / (2 * Fintype.card D) := by
+    refine hhit_pot.trans ?_
+    have hle := MerkleRO.hitPotential_zero_le_choose ((B.shards + 1) * r) N
+    have hD : (0 : ℝ) ≤ Fintype.card D := Nat.cast_nonneg _
+    have hdiv := div_le_div_of_nonneg_right hle hD
+    push_cast at hdiv
+    simpa only [div_div, mul_comm (2 : ℝ)] using hdiv
   refine le_trans (prob_le_add_of_outcome fun _ l _ hbad => ?_) (add_le_add hflip hhit)
   by_contra hno
   exact hbad ⟨fun h => hno (.inl h), fun h => hno (.inr h)⟩

@@ -1213,7 +1213,7 @@ theorem accepts_liftSpongeOracle_of_spongeAccepts (s₀ : D)
       a.commitments a.points a.values a.proof =
       Fri.transcript (spongeChallenger P bits f m) (SpongeState.init s₀) params shape
       a.commitments a.points a.values a.proof := by
-    unfold Fri.transcript
+    unfold Fri.transcript Fri.transcriptTail
     dsimp only
     rw [hα1, hc1, hc2, hp1, hidx]
   unfold accepts Fri.verify

@@ -270,6 +270,38 @@ theorem hitPotential_zero_le (M Q : ℕ) :
   push_cast
   linarith
 
+/-- Pairwise upper bound on `hitPotential M 0 Q`:
+`hitPotential M 0 Q ≤ (M + 3) * Q * (Q - 1) / 2`. -/
+theorem hitPotential_zero_le_choose (M Q : ℕ) :
+    hitPotential M 0 Q ≤ ((M + 3 : ℕ) : ℝ) * (Q : ℝ) * ((Q : ℝ) - 1) / 2 := by
+  unfold hitPotential
+  refine Finset.sup'_le _ _ fun h hh => ?_
+  have hle : h ≤ Q := Nat.lt_succ_iff.mp (Finset.mem_range.mp hh)
+  rw [Nat.cast_zero, zero_add]
+  rcases Q with _ | _ | q
+  · have : h = 0 := by omega
+    subst this; simp
+  · rcases (by omega : h = 0 ∨ h = 1) with rfl | rfl <;> simp
+  · have hQ2 : (2 : ℝ) ≤ ((q + 2 : ℕ) : ℝ) := by exact_mod_cast (by omega : 2 ≤ q + 2)
+    have hhle : (h : ℝ) ≤ ((q + 2 : ℕ) : ℝ) := Nat.cast_le.mpr hle
+    have hsub : ((q + 2 - h : ℕ) : ℝ) = ((q + 2 : ℕ) : ℝ) - (h : ℝ) := Nat.cast_sub hle
+    have hh1 : ((h - 1 : ℕ) : ℝ) ≤ ((q + 2 : ℕ) : ℝ) - 1 := by
+      have : h - 1 ≤ q + 1 := by omega
+      have h' : ((h - 1 : ℕ) : ℝ) ≤ ((q + 1 : ℕ) : ℝ) := Nat.cast_le.mpr this
+      push_cast at h' ⊢; linarith
+    have hM : (0 : ℝ) ≤ (M : ℝ) := Nat.cast_nonneg M
+    have h1 : (h : ℝ) * (((q + 2 : ℕ) : ℝ) - (h : ℝ)) ≤
+        ((q + 2 : ℕ) : ℝ) * (((q + 2 : ℕ) : ℝ) - 1) / 2 := by
+      have hsq : 0 ≤ (((q + 2 : ℕ) : ℝ) - 2 * (h : ℝ)) ^ 2 := sq_nonneg _
+      nlinarith
+    have h2 : (h : ℝ) * ((h - 1 : ℕ) : ℝ) ≤ ((q + 2 : ℕ) : ℝ) * (((q + 2 : ℕ) : ℝ) - 1) := by
+      have hnn1 : 0 ≤ ((h - 1 : ℕ) : ℝ) := Nat.cast_nonneg _
+      have hnn2 : 0 ≤ ((q + 2 : ℕ) : ℝ) - 1 := by linarith
+      nlinarith
+    rw [hsub]
+    push_cast at h1 h2 ⊢
+    nlinarith
+
 /-- Length of `flatMap` over a `zipIdx` list bounded by a sum of per-index bounds. -/
 theorem length_flatMap_zipIdx_le {α β : Type*} (f : ℕ → α → List β) (bound : ℕ → ℕ)
     (hbound : ∀ j a, (f j a).length ≤ bound j) :

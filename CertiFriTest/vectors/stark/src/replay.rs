@@ -172,7 +172,7 @@ fn check_ood(
 ) -> Result<(), String> {
     let pcs = system.config.pcs();
     let d = EXTENSION_DEGREE;
-    let w = extension_params::<Config>().w;
+    let modulus = extension_params::<Config>().modulus;
     // The second element of the basis of the extension over the base field.
     let x = ExtVal::from_basis_coefficients_fn(|i| if i == 1 { Val::ONE } else { Val::ZERO });
     let embed = |values: [ExtVal; 4]| -> Vec<ExtVal> {
@@ -238,7 +238,7 @@ fn check_ood(
             &publics,
             &delta_scaled,
             view.is_last_row,
-            w,
+            modulus,
             d,
             circuit.lookup_group_size,
             &mut constraint_values,

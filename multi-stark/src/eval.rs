@@ -61,22 +61,30 @@ impl<F: Field> ConstraintGraph<F> {
     }
 
     fn sweep_range<W: Algebra<F>>(&self, values: &VarValues<'_, W>, buf: &mut Vec<W>, len: usize) {
+        // The fields are public, so neither bound below is an invariant of
+        // the type (audit IX-23): a prefix longer than the graph, or a child
+        // not strictly before its parent, panics here rather than reading
+        // out of bounds or uninitialized memory.
+        assert!(len <= self.nodes.len(), "sweep range exceeds the graph");
         buf.clear();
         buf.reserve(len);
         // Raw pointer into the reserved storage; captured by the `child`
         // reader (a `*mut` is `Copy`, so it borrows nothing) and used for the
         // writes, sidestepping the borrow checker in the hot loop.
         let ptr = buf.spare_capacity_mut().as_mut_ptr();
-        // SAFETY throughout: the node vector is topologically ordered — every
-        // child's index is strictly less than its parent's — so when node `i`
-        // is processed, every index it reads (`< i`) has already been written
-        // and initialized; the storage has room for `len` values (reserved,
-        // no realloc); and `W: Copy` means the reads take copies with no drop
-        // obligations. This is the constraint-evaluation hot loop (quotient
-        // domain, per packet), so eliding per-node bounds/capacity checks and
-        // the shared-subexpression recomputation matters.
-        let child = |id: NodeId| unsafe { (*ptr.add(id.index())).assume_init_read() };
+        // SAFETY throughout: `child` reads only indices below the node being
+        // processed (checked), all of which have been written and
+        // initialized; `i < len <= nodes.len()` (checked above); the storage
+        // has room for `len` values (reserved, no realloc); and `W: Copy`
+        // means the reads take copies with no drop obligations. This is the
+        // constraint-evaluation hot loop (quotient domain, per packet), so
+        // eliding the remaining bounds/capacity checks and the
+        // shared-subexpression recomputation matters.
         for i in 0..len {
+            let child = |id: NodeId| {
+                assert!(id.index() < i, "constraint graph is not topologically ordered");
+                unsafe { (*ptr.add(id.index())).assume_init_read() }
+            };
             let node = unsafe { self.nodes.get_unchecked(i) };
             let value = match node {
                 Node::Const(c) => (*c).into(),

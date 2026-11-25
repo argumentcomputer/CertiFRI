@@ -169,6 +169,91 @@ impl<F: Field> Circuit<F> {
     pub fn uses_row(&self, source: Source, offset: RowOffset) -> bool {
         self.graph.uses_row(source, offset)
     }
+
+    /// Checks the structural invariants that evaluation and verification
+    /// index by, which `compile` establishes but the public fields (and a
+    /// deserialized circuit) do not guarantee (audit IX-23): topological node
+    /// order, column, public, root and lookup indices in range, metadata
+    /// consistent with the graph for extension degree `d`, and lookup
+    /// expressions that read only fixed and main columns (as `compile`
+    /// requires; audit IX-14).
+    pub fn check_well_formed(&self, d: usize) -> Result<(), &'static str> {
+        let graph = &self.graph;
+        let len = graph.nodes.len();
+        let prefix = graph.lookup_prefix_len;
+        if prefix > len {
+            return Err("lookup prefix exceeds the graph");
+        }
+        let width = |source: Source| match source {
+            Source::Preprocessed => self.preprocessed_width,
+            Source::Main => self.main_width,
+            Source::Stage2 => self.stage_2_width,
+        };
+        for (i, node) in graph.nodes.iter().enumerate() {
+            let ok = match *node {
+                Node::Add(a, b) | Node::Sub(a, b) | Node::Mul(a, b) => {
+                    a.index() < i && b.index() < i
+                }
+                Node::Neg(a) => a.index() < i,
+                Node::Var(col) => (col.index as usize) < width(col.source),
+                Node::Public(index) => (index as usize) < self.num_publics,
+                Node::Const(_) | Node::IsFirstRow | Node::IsLastRow | Node::IsTransition => true,
+            };
+            if !ok {
+                return Err("node out of topological order or reading out of range");
+            }
+        }
+        if graph.zeros.iter().any(|z| z.index() >= len) {
+            return Err("constraint root out of range");
+        }
+        let mut reached = vec![false; prefix];
+        for lookup in &graph.lookups {
+            for id in std::iter::once(lookup.multiplicity).chain(lookup.args.iter().copied()) {
+                if id.index() >= prefix {
+                    return Err("lookup expression outside the lookup prefix");
+                }
+                reached[id.index()] = true;
+            }
+        }
+        // Children precede parents, so one backward pass marks everything
+        // the lookup expressions read.
+        for i in (0..prefix).rev() {
+            if !reached[i] {
+                continue;
+            }
+            match graph.nodes[i] {
+                Node::Public(_) | Node::IsFirstRow | Node::IsLastRow | Node::IsTransition => {
+                    return Err("lookup expression reads a public value or a row selector");
+                }
+                Node::Var(col) if col.source == Source::Stage2 => {
+                    return Err("lookup expression reads a stage-2 column");
+                }
+                Node::Add(a, b) | Node::Sub(a, b) | Node::Mul(a, b) => {
+                    reached[a.index()] = true;
+                    reached[b.index()] = true;
+                }
+                Node::Neg(a) => reached[a.index()] = true,
+                Node::Var(_) | Node::Const(_) => {}
+            }
+        }
+        let group = self.lookup_group_size;
+        if graph.lookups.len() != self.num_lookups
+            || !(1..=crate::lookup::MAX_LOOKUP_GROUP).contains(&group)
+            || self.stage_2_width != stage2_width(self.num_lookups, group, d)
+            || self.num_publics != num_publics(d)
+            || self.constraint_count
+                != graph.zeros.len() + logup_constraint_count(self.num_lookups, group, d)
+        {
+            return Err("circuit metadata inconsistent with its graph");
+        }
+        if self.max_constraint_degree > u32::MAX as usize {
+            return Err("constraint degree out of range");
+        }
+        if self.preprocessed_height != 0 && !self.preprocessed_height.is_power_of_two() {
+            return Err("preprocessed height is not a power of two");
+        }
+        Ok(())
+    }
 }
 
 /// A multi-circuit STARK system over compiled constraint circuits. Contains
@@ -199,6 +284,28 @@ impl<SC: ProofConfig> System<SC> {
     pub fn opens_next_row(&self, circuit: usize, source: Source) -> bool {
         !self.config.omit_unused_next_row_openings()
             || self.circuits[circuit].uses_row(source, RowOffset::Next)
+    }
+
+    /// [`Circuit::check_well_formed`] for every circuit, and fixed-table
+    /// slots that number the circuits with a fixed table in order. The
+    /// verifier runs this before using the system (audit IX-23).
+    pub fn check_well_formed(&self) -> Result<(), &'static str> {
+        let d = extension_params::<SC>().degree;
+        if self.preprocessed_indices.len() != self.circuits.len() {
+            return Err("preprocessed index table does not match the circuits");
+        }
+        let mut next_slot = 0usize;
+        for (circuit, slot) in self.circuits.iter().zip(&self.preprocessed_indices) {
+            circuit.check_well_formed(d)?;
+            match *slot {
+                Some(slot) if slot == next_slot && circuit.preprocessed_height > 0 => {
+                    next_slot += 1;
+                }
+                None if circuit.preprocessed_height == 0 && circuit.preprocessed_width == 0 => {}
+                _ => return Err("preprocessed slots are not the circuits' fixed tables in order"),
+            }
+        }
+        Ok(())
     }
 
     /// Builds the system from per-circuit inputs.

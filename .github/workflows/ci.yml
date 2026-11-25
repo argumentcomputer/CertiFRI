@@ -1,0 +1,57 @@
+name: CI
+
+# Every check is a step of scripts/ci.sh, which runs the same way outside Actions:
+# the Lean libraries and the proofs built with warnings as errors, a kernel replay
+# (leanchecker) of the proof closure, an axiom check, and multi-stark's tests.
+# Peak memory, measured: about 8 GB (build, replay with one thread, axiom check).
+# The workflows under multi-stark/.github/ came with the import of that repository;
+# GitHub does not run them from there.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  lean:
+    name: Lean build, kernel replay, axioms
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Installs elan and the toolchain of `lean-toolchain` only; the steps below build.
+      - uses: leanprover/lean-action@50fcf42d2e460296f1a34b402e990d1b24f8b596 # v1.6.0
+        with:
+          auto-config: false
+          use-github-cache: false
+          use-mathlib-cache: false
+      - name: Build CertiFri, CertiFriP3, CertiFriTest and the proofs (--wfail)
+        run: scripts/ci.sh lean-build
+      - name: Replay CertiFri, CertiFriP3 and CertiFriProofs in the kernel (leanchecker)
+        run: scripts/ci.sh leanchecker
+      - name: Axiom check
+        run: scripts/ci.sh axioms
+
+  multi-stark:
+    name: multi-stark tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the toolchain of multi-stark/rust-toolchain.toml
+        working-directory: multi-stark
+        run: rustup toolchain install "$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)" --profile minimal
+      - name: Tests
+        run: scripts/ci.sh multi-stark

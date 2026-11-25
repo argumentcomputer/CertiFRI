@@ -100,6 +100,9 @@
 //! The accumulator-based lookup argument uses two random challenges (β, γ) to
 //! compress lookup messages into field elements. For each lookup interaction, the
 //! message `m = β + fingerprint(γ, args)` is affine in β and polynomial in γ.
+//! The fingerprint does not encode the length of `args`, so messages are
+//! compared up to trailing zeros (`[a]`, `[a, 0]` are one message); an
+//! application that needs distinct lengths must fix the arity by a tag.
 //! If the multiset of "pushed" values differs from the multiset of
 //! "pulled" values, the running accumulator `Σ multiplicity_i / m_i` is a nonzero
 //! rational function of the challenges. By Schwartz-Zippel (applied to the

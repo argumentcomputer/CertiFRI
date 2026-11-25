@@ -54,7 +54,8 @@ use crate::expr::{Expr, ExtExpr, RowOffset};
 
 /// A lookup: a multiplicity and a vector of arguments. `E` is a frontend
 /// expression in a [`crate::system::CircuitInputs`] and a node id once
-/// compiled.
+/// compiled. Messages are matched up to trailing zero arguments (the
+/// fingerprint does not encode the length); fix each channel's arity by a tag.
 #[derive(serde::Serialize, serde::Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct Lookup<E> {
     pub multiplicity: E,

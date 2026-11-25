@@ -14,7 +14,7 @@ and `FriBatching::Tensor`:
    * `salted_merkle_binding_of_no_collision`: 16-byte leaf salting (`Salt16`,
      `ZK_LEAF_SALT_BYTES = 16`) preserves collision-resistance Merkle binding
      identically on `(row, salt)` pairs.
-   * `salted_sponge_binding_le`: in the `SpongeCommitted` ROM with leaf domain
+   * `salted_sponge_soundness_le`: in the `SpongeCommitted` ROM with leaf domain
      `T × Salt16`, the incremental sponge binding bound retains the exact
      prefactor `c = 3 / 2` (`3 * N ^ 2 / (2 * |D|)`) with **zero** security
      degradation (`255.71b` classical / `170.7b` BHT / `204.8b` CNS / `256b`

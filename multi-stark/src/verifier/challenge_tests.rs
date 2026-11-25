@@ -96,8 +96,23 @@ impl ProofConfig for ScriptedConfig {
         &self.pcs
     }
 
+    fn protocol_version(&self) -> crate::config::ProtocolVersion {
+        crate::config::ProtocolVersion::V5
+    }
+
     fn initialise_challenger(&self) -> ScriptedTranscript {
         ScriptedTranscript(self.challenges.into())
+    }
+
+    fn initialise_challenger_for_mode(
+        &self,
+        _mode: crate::config::TranscriptMode,
+    ) -> ScriptedTranscript {
+        self.initialise_challenger()
+    }
+
+    fn validate_commitment_cap(&self, _commit: &(), _max_log_lde_height: usize) -> bool {
+        true
     }
 
     fn max_log_degree(&self) -> usize {

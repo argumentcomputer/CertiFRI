@@ -1768,8 +1768,16 @@ impl ProofConfig for GoldilocksBlake3Config {
         &self.pcs
     }
 
+    fn protocol_version(&self) -> ProtocolVersion {
+        ProtocolVersion::V5
+    }
+
     fn initialise_challenger(&self) -> Challenger {
         Challenger::from_hasher(self.challenger_seed.clone(), Blake3)
+    }
+
+    fn initialise_challenger_for_mode(&self, _mode: TranscriptMode) -> Challenger {
+        self.initialise_challenger()
     }
 
     fn max_log_degree(&self) -> usize {

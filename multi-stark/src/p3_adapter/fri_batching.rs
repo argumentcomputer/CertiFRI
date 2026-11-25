@@ -181,6 +181,33 @@ impl<EF: Field> FriBatchingSchedule<EF> {
 
 type FriOpenings<F> = Vec<(usize, F)>;
 
+/// Whether the proof-of-work parameters and witnesses are admissible, checked
+/// before any witness is used.
+///
+/// - A bit count the challenger cannot sample (`>= usize::BITS` or `>=` the
+///   witness field's bit length) is refused instead of reaching the
+///   challenger's `sample_bits` assertion.
+/// - At zero bits the challenger neither checks nor absorbs the witness
+///   (`GrindingChallenger::check_witness`), so it must be zero, the value the
+///   prover's `grind(0)` returns; otherwise a proof would carry free bytes and
+///   distinct encodings of one proof would all verify (audit IX-13).
+pub(crate) fn pow_witnesses_admissible<Challenge, FriMmcs, Witness, InputProof>(
+    params: &FriParameters<FriMmcs>,
+    proof: &FriProof<Challenge, FriMmcs, Witness, InputProof>,
+) -> bool
+where
+    Challenge: Field,
+    FriMmcs: Mmcs<Challenge>,
+    Witness: Field,
+{
+    let max_bits = (usize::BITS as usize).min(Witness::bits());
+    params.commit_proof_of_work_bits < max_bits
+        && params.query_proof_of_work_bits < max_bits
+        && (params.commit_proof_of_work_bits > 0
+            || proof.commit_pow_witnesses.iter().all(Field::is_zero))
+        && (params.query_proof_of_work_bits > 0 || proof.query_pow_witness.is_zero())
+}
+
 /// Verifies a FRI proof under the requested [`FriBatching`] strategy.
 ///
 /// For [`FriBatching::Horner`], delegates directly to stock
@@ -215,6 +242,9 @@ where
         >,
 {
     validate_fri_commitment_caps(params, proof, commitments_with_opening_points, input_mmcs)?;
+    if !pow_witnesses_admissible(params, proof) {
+        return Err(FriError::InvalidPowWitness);
+    }
     match batching {
         FriBatching::Horner => verifier::verify_fri(
             folding,
@@ -272,6 +302,9 @@ where
         >,
 {
     validate_fri_commitment_caps(params, proof, commitments_with_opening_points, input_mmcs)?;
+    if !pow_witnesses_admissible(params, proof) {
+        return Err(FriError::InvalidPowWitness);
+    }
 
     // Derive max_width and max_openings_per_height from the authenticated
     // opening structure before sampling batching challenges.

@@ -1381,6 +1381,93 @@ fn v6_fp3_rejects_merkle_cap_forgery_and_grinding() {
     }
 }
 
+/// Audit IX-13: at zero proof-of-work bits the witness is neither checked nor
+/// absorbed, so the verifier requires it to be zero (what `grind(0)` returns);
+/// a bit count the challenger cannot sample is refused, not a panic.
+#[test]
+fn v6_fp3_rejects_free_pow_witnesses_and_unsamplable_pow_bits() {
+    use multi_stark::verifier::VerificationError;
+    use p3_fri::verifier::FriError;
+
+    let quad_system = |batching: FriBatching, query_pow_bits: usize| {
+        let config = GoldilocksBlake3V6Config::new_with_batching(
+            CommitmentParameters {
+                log_blowup: 2,
+                cap_height: 0,
+            },
+            FriParameters {
+                log_final_poly_len: 0,
+                max_log_arity: 1,
+                num_queries: 16,
+                commit_proof_of_work_bits: 0,
+                query_proof_of_work_bits: query_pow_bits,
+            },
+            batching,
+        );
+        let a = Expr::main(0);
+        let b = Expr::main(1);
+        System::new(
+            config,
+            [CircuitInputs {
+                main_width: 2,
+                preprocessed: None,
+                constraints: vec![a.clone() * a - b],
+                ext_constraints: vec![],
+                lookups: vec![],
+                lookup_group_size: 1,
+            }],
+        )
+    };
+    let pow_rejected = |result: Result<
+        (),
+        VerificationError<multi_stark::config::PcsError<GoldilocksBlake3V6Config>>,
+    >| {
+        matches!(
+            result,
+            Err(VerificationError::InvalidOpeningArgument(
+                FriError::InvalidPowWitness
+            ))
+        )
+    };
+
+    for batching in [FriBatching::Tensor, FriBatching::Horner] {
+        let (system, key) = quad_system(batching, 0);
+        let proof = system.prove_multiple_claims(
+            &key,
+            &[],
+            SystemWitness::from_stage_1(vec![quad_trace_v6(4)], &system),
+        );
+        system.verify_multiple_claims(&[], &proof).unwrap();
+        assert!(!proof.opening_proof.commit_pow_witnesses.is_empty());
+        assert!(
+            proof
+                .opening_proof
+                .commit_pow_witnesses
+                .iter()
+                .all(|w| *w == Val::ZERO)
+                && proof.opening_proof.query_pow_witness == Val::ZERO,
+            "grind(0) returns zero"
+        );
+
+        let mut commit_witness = proof.clone();
+        commit_witness.opening_proof.commit_pow_witnesses[0] = Val::from_u64(0xdead_beef);
+        assert!(pow_rejected(
+            system.verify_multiple_claims(&[], &commit_witness)
+        ));
+
+        let mut query_witness = proof.clone();
+        query_witness.opening_proof.query_pow_witness = Val::ONE;
+        assert!(pow_rejected(
+            system.verify_multiple_claims(&[], &query_witness)
+        ));
+
+        // 64 query bits cannot be sampled from a Goldilocks challenger: the
+        // verifier refuses instead of reaching the `sample_bits` assertion.
+        let (wide_pow, _) = quad_system(batching, 64);
+        assert!(pow_rejected(wide_pow.verify_multiple_claims(&[], &proof)));
+    }
+}
+
 #[test]
 fn v6_fp3_rejects_preprocessed_malleability_and_bad_preamble_dimensions() {
     use multi_stark::verifier::VerificationError;

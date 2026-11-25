@@ -17,10 +17,12 @@ Bridges the executable `FriBatching::Tensor` implementation
      multilinear monomial `tensorWeight (fun b => r.toModel chals[b]) j`.
    * `toModel_tensorWeightExplicit`: executable `Fri.tensorWeightExplicit` refines
      to the exact same `tensorWeight`.
-   * `toModel_tensorColAcc`, `toModel_tensorOpeningTerm`, `toModel_reducedOpeningTensor`:
-     executable `FriBatching::Tensor` opening accumulation refines to the exact
-     2D tensor sum `∑_o w_open[o] * (∑_c w_col[c] * (y_{o,c} - f_{o,c}(x)) / (z_o - x))`
-     governed by `Tensor2DMCA`.
+   * `toModel_tensorColAcc`, `toModel_tensorOpeningTerm`: the executable column
+     accumulation and the term of one opening refine to the exact sums
+     `∑_c w_col[c] * (y_{o,c} - f_{o,c}(x))` and
+     `w_open[o] * (∑_c w_col[c] * (y_{o,c} - f_{o,c}(x))) / (z_o - x)`.
+     No lemma relates the whole reduced opening `Fri.reducedOpeningTensor` to
+     the model, and no verifier or soundness theorem uses `Tensor2DMCA`.
 
 2. **Concrete `GoldilocksExt3` 128-bit Tensor batching soundness (`CertiFri.P3.Exec`):**
    * `goldilocksExt3_tensor2DMCA_ud`: unconditional 2D tensor MCA over `Fp3Model`
@@ -29,7 +31,7 @@ Bridges the executable `FriBatching::Tensor` implementation
      count `M ≤ 2 ^ 16` (up to `2 ^ 32` claims!), ANY domain `|D| ≤ 2 ^ 32`, and
      blowup `4` (`δ = 3 / 8`), the tensor batching error is strictly `≤ (3 / 4) / 2 ^ 128`
      (in fact `< 2 ^ (-153)`), with **zero** unproven assumptions.
-   * `goldilocksExt3_tensor2DMCA_johnson`: Johnson-regime 2D tensor MCA over
+   * `goldilocksExt3_tensor2DMCA_johnson_128`: Johnson-regime 2D tensor MCA over
      `Fp3Model` under `BatchedLineListCA Fp3Model T`, with concrete `≤ (3 / 4) / 2 ^ 128`
      corollary at `θ = 65 / 128` (`logBlowup = 2`).
 -/

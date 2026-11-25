@@ -803,6 +803,9 @@ pub fn compute_lookup_values_range<F: Field>(
     }
 
     let empty: [F; 0] = [];
+    let validated = graph
+        .validated()
+        .expect("constraint graph is not topologically ordered");
     let mut builder = LookupValues::builder(rows.len(), &slot_widths);
     builder
         .par_rows_mut()
@@ -834,7 +837,7 @@ pub fn compute_lookup_values_range<F: Field>(
                     is_last_row: if r == height - 1 { F::ONE } else { F::ZERO },
                     is_transition: if r == height - 1 { F::ZERO } else { F::ONE },
                 };
-                graph.sweep_lookup_prefix(&view, buf);
+                validated.sweep_lookup_prefix(&view, buf);
                 for (slot, lookup) in graph.lookups.iter().enumerate() {
                     let multiplicity = buf[lookup.multiplicity.index()];
                     args.clear();

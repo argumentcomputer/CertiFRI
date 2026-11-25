@@ -1291,6 +1291,10 @@ where
     let mut vec = vec![zero; height * num_slots];
     let mut running = zero;
     let empty: [F; 0] = [];
+    let graph = circuit
+        .graph
+        .validated()
+        .expect("constraint graph is not topologically ordered");
 
     for row_start in (0..height).step_by(chunk_rows) {
         let n_rows = (height - row_start).min(chunk_rows);
@@ -1327,7 +1331,7 @@ where
                     is_last_row: if r == height - 1 { F::ONE } else { F::ZERO },
                     is_transition: if r == height - 1 { F::ZERO } else { F::ONE },
                 };
-                circuit.graph.sweep_lookup_prefix(&view, buf);
+                graph.sweep_lookup_prefix(&view, buf);
                 for (slot, lookup) in circuit.graph.lookups.iter().enumerate() {
                     let mult = buf[lookup.multiplicity.index()];
                     row_mults[slot] = mult;

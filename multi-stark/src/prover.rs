@@ -1311,6 +1311,10 @@ where
         ext_d.min(stage_2_width)
     };
     let node_count = circuit.graph.nodes.len();
+    let graph = circuit
+        .graph
+        .validated()
+        .expect("constraint graph is not topologically ordered");
     let accs_len = if ext_d == 2 || ext_d == 3 { 0 } else { ext_d };
 
     const PACKS_PER_CHUNK: usize = 16;
@@ -1336,6 +1340,7 @@ where
                 let i_start = chunk_start + pack_idx * width;
                 eval_quotient_pack::<SC>(
                     circuit,
+                    graph,
                     &sels,
                     preprocessed_on_quotient_domain,
                     stage_1_on_quotient_domain,
@@ -1382,6 +1387,7 @@ struct QuotientScratch<P> {
 #[inline]
 fn eval_quotient_pack<SC>(
     circuit: &crate::system::Circuit<Val<SC>>,
+    graph: crate::eval::ValidatedGraph<'_, Val<SC>>,
     sels: &LagrangeSelectors<Vec<Val<SC>>>,
     preprocessed_on_quotient_domain: &Option<EvaluationsOnDomain<'_, SC>>,
     stage_1_on_quotient_domain: &EvaluationsOnDomain<'_, SC>,
@@ -1468,7 +1474,7 @@ fn eval_quotient_pack<SC>(
         is_last_row,
         is_transition,
     };
-    circuit.graph.sweep(&view, &mut scratch.buf);
+    graph.sweep(&view, &mut scratch.buf);
 
     // Fuse user-constraint and logUp-constraint α folding directly without
     // allocating a per-pack `constraint_values` vector.

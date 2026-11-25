@@ -177,6 +177,7 @@ fn sweep_panics_on_a_forward_reference() {
         is_last_row: Val::ZERO,
         is_transition: Val::ONE,
     };
+    assert!(graph.validated().is_none());
     let mut buf = Vec::new();
     graph.sweep(&values, &mut buf);
 }
@@ -197,6 +198,7 @@ fn sweep_panics_on_a_prefix_longer_than_the_graph() {
         is_last_row: Val::ZERO,
         is_transition: Val::ONE,
     };
+    assert!(graph.validated().is_none());
     let mut buf = Vec::new();
     graph.sweep_lookup_prefix(&values, &mut buf);
 }

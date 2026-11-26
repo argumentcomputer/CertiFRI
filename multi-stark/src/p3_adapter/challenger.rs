@@ -7,16 +7,13 @@
 
 use core::marker::PhantomData;
 
-use p3_challenger::{
-    CanObserve, CanSample, CanSampleBits, FieldChallenger, GrindingChallenger, HashChallenger,
-    SerializingChallenger64,
-};
+use p3_challenger::{CanObserve, CanSample, CanSampleBits, FieldChallenger, GrindingChallenger};
 use p3_field::{BasedVectorSpace, ExtensionField};
 use p3_symmetric::Hash;
 
-use crate::p3_adapter::domain_blake3::{Blake3Domain, DomainBlake3};
+use crate::p3_adapter::domain_blake3::Blake3Domain;
 use crate::traits::Transcript;
-use crate::types::{Challenger, Commitment, DeterministicPow, ExtVal, Val};
+use crate::types::{Blake3Challenger, Challenger, Commitment, ExtVal, Val};
 
 impl Transcript for Challenger {
     type F = Val;
@@ -58,7 +55,7 @@ impl Transcript for Challenger {
 /// by the challenge extension field `EF` (e.g. `ExtVal3` or `ExtVal2`).
 #[derive(Clone, Debug)]
 pub struct DomainChallenger<EF> {
-    inner: DeterministicPow<SerializingChallenger64<Val, HashChallenger<u8, DomainBlake3, 32>>>,
+    inner: Blake3Challenger,
     _marker: PhantomData<EF>,
 }
 
@@ -67,10 +64,7 @@ impl<EF> DomainChallenger<EF> {
     /// under `domain` (`TranscriptSingle` or `TranscriptBatch`).
     pub fn from_domain(initial_state: Vec<u8>, domain: Blake3Domain) -> Self {
         Self {
-            inner: DeterministicPow(SerializingChallenger64::from_hasher(
-                initial_state,
-                DomainBlake3::new(domain),
-            )),
+            inner: Blake3Challenger::new(initial_state, domain),
             _marker: PhantomData,
         }
     }
@@ -78,8 +72,7 @@ impl<EF> DomainChallenger<EF> {
 
 impl<EF, T> CanObserve<T> for DomainChallenger<EF>
 where
-    DeterministicPow<SerializingChallenger64<Val, HashChallenger<u8, DomainBlake3, 32>>>:
-        CanObserve<T>,
+    Blake3Challenger: CanObserve<T>,
 {
     #[inline]
     fn observe(&mut self, value: T) {
@@ -89,8 +82,7 @@ where
 
 impl<EF, T> CanSample<T> for DomainChallenger<EF>
 where
-    DeterministicPow<SerializingChallenger64<Val, HashChallenger<u8, DomainBlake3, 32>>>:
-        CanSample<T>,
+    Blake3Challenger: CanSample<T>,
 {
     #[inline]
     fn sample(&mut self) -> T {

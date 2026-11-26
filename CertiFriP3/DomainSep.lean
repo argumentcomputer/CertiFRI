@@ -1308,6 +1308,7 @@ def challenger3Xof48 (sep : DomainSep := .standard) :
     | .digest d => s.observeBytes d.toBytes
   sampleExt := ChallengerState.sampleExt3 (blake3TranscriptXof48 sep)
   sampleBits := ChallengerState.sampleBits (blake3TranscriptXof48 sep)
+  ok s := !s.exhausted
 
 /-- `v6-zk` salted Merkle leaf hash (32-byte digest) under `ZkMerkleLeaf`. -/
 def hashSaltedRow (row : Array Goldilocks) (salt : DomainSep.Salt16) : Digest :=
@@ -1774,6 +1775,7 @@ def challenger3Blake2b512 (sep : DomainSepBlake2b512 := .standard) :
     | .digest d => s.observeBytes d.toBytes
   sampleExt := ChallengerState.sampleExt3 (blake2b512Transcript sep)
   sampleBits := ChallengerState.sampleBits (blake2b512Transcript sep)
+  ok s := !s.exhausted
 
 /-- `v6-zk` salted Merkle leaf hash (64-byte `BLAKE2b-512` digest) under `zkMerkleLeaf`. -/
 def hashSaltedRowBlake2b512 (row : Array Goldilocks) (salt : DomainSep.Salt16) : Digest64 :=

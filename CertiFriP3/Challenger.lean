@@ -44,11 +44,14 @@ as an instance of the `Challenger` interface: `challenger`.
 
 ## Totality
 
-Rejection sampling has no bound in Plonky3. Here it stops after `rejectionFuel`
-rejected words in a row and returns zero. For a hash that behaves like a
-random function this has probability below `2^-8192`; it is not reachable in
-practice, and it is not a case in which this challenger agrees with Plonky3,
-which would go on sampling.
+Rejection sampling has no bound in Plonky3. Here `sampleBaseWith` / `sampleBase`
+stop after `rejectionFuel` rejected words in a row and fail closed by returning
+`none`. For the total `Challenger` interface, `sampleExt` / `sampleExt3` record
+exhaustion in `ChallengerState.exhausted` (sticky across further observations
+and samples), causing `Challenger.ok` and `Challenger.checkWitness` — and
+therefore verification — to reject. For a hash that behaves like a random
+function this event has probability below `2^-8192` per sample and is not
+reachable in practice.
 
 Plonky3's `sample_bits` panics unless `bits < 64` and `2^bits < p`. Here it is
 total: from 64 bits on the whole word is returned.
@@ -74,6 +77,9 @@ structure ChallengerState where
   /-- The bytes of the last digest that can still be sampled, the next one to
   be sampled first. Plonky3's `output_buffer`, last byte first. -/
   output : List UInt8
+  /-- Sticky failure bit set when bounded rejection sampling exhausts
+  `rejectionFuel` consecutive rejected words. -/
+  exhausted : Bool := false
   deriving DecidableEq, Inhabited
 
 namespace ChallengerState
@@ -81,12 +87,12 @@ namespace ChallengerState
 /-- The state of `HashChallenger::new(initial, hasher)`: `initial` is the
 input buffer and no output is available. -/
 def new (initial : ByteArray) : ChallengerState :=
-  { input := initial, output := [] }
+  { input := initial, output := [], exhausted := false }
 
 /-- Observe bytes, first to last: they are appended to the input buffer and
-the output buffer is discarded. -/
+the output buffer is discarded. Preserves `exhausted`. -/
 def observeBytes (s : ChallengerState) (bytes : ByteArray) : ChallengerState :=
-  { input := s.input ++ bytes, output := [] }
+  { s with input := s.input ++ bytes, output := [] }
 
 /-- Sample one byte: the last byte of the output buffer, after hashing the
 input buffer if the output buffer is empty. A hash with an empty output, for
@@ -119,38 +125,66 @@ before it gives up. -/
 def rejectionFuel : Nat := 256
 
 /-- Sample a base element by rejection, with at most `fuel` words: the first
-sampled word below the order is the element. If all `fuel` words are rejected
-the result is zero. -/
+sampled word below the order is the element. Fails closed (`none`) if `s` is
+already exhausted or all `fuel` words are rejected. -/
 def sampleBaseWith (hash : ByteArray → ByteArray) :
-    (fuel : Nat) → ChallengerState → Goldilocks × ChallengerState
-  | 0, s => (Goldilocks.zero, s)
+    (fuel : Nat) → ChallengerState → Option (Goldilocks × ChallengerState)
+  | 0, _ => none
   | fuel + 1, s =>
-    let sampled := sampleWord hash s
-    match Goldilocks.ofCanonical? sampled.1 with
-    | some a => (a, sampled.2)
-    | none => sampleBaseWith hash fuel sampled.2
+    if s.exhausted then none
+    else
+      let sampled := sampleWord hash s
+      match Goldilocks.ofCanonical? sampled.1 with
+      | some a => some (a, sampled.2)
+      | none => sampleBaseWith hash fuel sampled.2
 
-/-- Sample a base element: Plonky3's `sample` at the base field, up to
-`rejectionFuel` rejections. -/
+/-- Sample a base element: Plonky3's `sample` at the base field, failing closed
+(`none`) after `rejectionFuel` consecutive rejected words. -/
 def sampleBase (hash : ByteArray → ByteArray) (s : ChallengerState) :
-    Goldilocks × ChallengerState :=
+    Option (Goldilocks × ChallengerState) :=
   sampleBaseWith hash rejectionFuel s
 
+/-- Sample a quadratic-extension element (`c0`, then `c1`), failing closed
+(`none`) if either base coordinate exhausts `rejectionFuel`. -/
+def sampleExt? (hash : ByteArray → ByteArray) (s : ChallengerState) :
+    Option (GoldilocksExt × ChallengerState) :=
+  match sampleBase hash s with
+  | none => none
+  | some (c0, s1) =>
+    match sampleBase hash s1 with
+    | none => none
+    | some (c1, s2) => some (⟨c0, c1⟩, s2)
+
+/-- Sample a cubic-extension element (`c0`, `c1`, `c2`), failing closed (`none`)
+if any base coordinate exhausts `rejectionFuel`. -/
+def sampleExt3? (hash : ByteArray → ByteArray) (s : ChallengerState) :
+    Option (GoldilocksExt3 × ChallengerState) :=
+  match sampleBase hash s with
+  | none => none
+  | some (c0, s1) =>
+    match sampleBase hash s1 with
+    | none => none
+    | some (c1, s2) =>
+      match sampleBase hash s2 with
+      | none => none
+      | some (c2, s3) => some (⟨c0, c1, c2⟩, s3)
+
 /-- Sample an extension element: Plonky3's `sample_algebra_element`, two base
-elements, `c0` then `c1`. -/
+elements, `c0` then `c1`. Marks `exhausted := true` on rejection exhaustion so
+the verifier fails closed. -/
 def sampleExt (hash : ByteArray → ByteArray) (s : ChallengerState) :
     GoldilocksExt × ChallengerState :=
-  let first := sampleBase hash s
-  let second := sampleBase hash first.2
-  (⟨first.1, second.1⟩, second.2)
+  match sampleExt? hash s with
+  | some res => res
+  | none => (0, { s with output := [], exhausted := true })
 
-/-- Sample a cubic-extension element: three base elements, `c0`, `c1`, `c2`. -/
+/-- Sample a cubic-extension element: three base elements, `c0`, `c1`, `c2`.
+Marks `exhausted := true` on rejection exhaustion so the verifier fails closed. -/
 def sampleExt3 (hash : ByteArray → ByteArray) (s : ChallengerState) :
     GoldilocksExt3 × ChallengerState :=
-  let first := sampleBase hash s
-  let second := sampleBase hash first.2
-  let third := sampleBase hash second.2
-  (⟨first.1, second.1, third.1⟩, third.2)
+  match sampleExt3? hash s with
+  | some res => res
+  | none => (0, { s with output := [], exhausted := true })
 
 /-- Sample an integer below `2 ^ bits`: Plonky3's `sample_bits`, the low bits
 of one sampled word. From 64 bits on, the whole word. -/
@@ -183,6 +217,7 @@ def challengerWith (hash : ByteArray → ByteArray) :
   observe := ChallengerState.observe
   sampleExt := ChallengerState.sampleExt hash
   sampleBits := ChallengerState.sampleBits hash
+  ok s := !s.exhausted
 
 /-- The challenger of the BLAKE3 configuration:
 `SerializingChallenger64<Goldilocks, HashChallenger<u8, Blake3, 32>>`. -/
@@ -196,6 +231,7 @@ def challenger3With (hash : ByteArray → ByteArray) :
   observe := ChallengerState.observe3
   sampleExt := ChallengerState.sampleExt3 hash
   sampleBits := ChallengerState.sampleBits hash
+  ok s := !s.exhausted
 
 /-- The BLAKE3 challenger for `Goldilocks` / `GoldilocksExt3`. -/
 def challenger3 : Challenger ChallengerState Goldilocks GoldilocksExt3 Digest :=

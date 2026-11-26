@@ -82,6 +82,92 @@ def allDomains : List Blake3Domain :=
   let digests := allDomains.map fun d => d.hash (v6Pattern 1025)
   digests.eraseDups.length == 11
 
+/-! ## Multi-level `derive_key` parity across all 10 `v6` and `v6-zk` contexts
+
+Each context is tested on the canonical `i % 251` input at lengths spanning
+empty (`0`), single-block (`64`), 1-chunk (`1024`), 2-chunk (`1025`),
+3-chunk unbalanced (`2049`), 5-chunk 3-level (`4097`), and 9-chunk 4-level
+(`8193`) BLAKE3 Merkle trees against `blake3::derive_key`. -/
+
+private def input251 (n : Nat) : ByteArray :=
+  ByteArray.mk (Array.ofFn (n := n) fun i => (i.val % 251).toUInt8)
+
+private def multiLevelDomainVectors : Array (Blake3Domain × Nat × String) := #[
+  (.merkleLeaf, 0, "a6205af23604bdace5d8217b52809fab1922c6f1033c72ce8d5b80055a0cdf6a"),
+  (.merkleLeaf, 64, "84fb68595017ce36f8115560264ca543da724257398e7b5980432f26ac8b1dd4"),
+  (.merkleLeaf, 1024, "54d3cf7f1ab87ae044c967bd6be149eaa7095a38694b2645cb92f0ff392cca3e"),
+  (.merkleLeaf, 1025, "e4ae7be6e15c5cf2bc97126c1b0440ac584c77981528337a8064365ae915e419"),
+  (.merkleLeaf, 2049, "1d9888bc844f399130325de4a2c30142d5ee86596fb5718e5ea8bc2c3e00933d"),
+  (.merkleLeaf, 4097, "ffd20dd7c4a23bb980a2d9c3f5698ed17820bbc634c4335b6e7cc9f568dc3e7d"),
+  (.merkleLeaf, 8193, "6be8ca1b9ad822f514fa35748fb8dcc19e6f468ec85271c5b3823389c0e67a46"),
+  (.merkleCompress, 0, "f3dbd1c88fcc4e67e3aa4f5b8dbdf0febc7b06be403748689d4aaa64310133db"),
+  (.merkleCompress, 64, "8b14c7db6f612da11fa63c6fbec9783e35f74ab3dedf6f382fff8ace42e1b379"),
+  (.merkleCompress, 1024, "85340510c80725b2cf4db65cf57dd4641453e207c43c91d83fadb5e89b3e5a6f"),
+  (.merkleCompress, 1025, "110aa265d508a4ac2458e18d524e7ebc906a145fcc6de568d3d4c206c2d159fe"),
+  (.merkleCompress, 2049, "b6cca4de20a8b516994feea65a2efc85aabe499ec95cb2edd4f4fa2686c0f026"),
+  (.merkleCompress, 4097, "d5f1d8cf1ef4a9f5e1a6620cc928918d9600510a614b237874900376d082e9f0"),
+  (.merkleCompress, 8193, "2ec9735242a25e07a2107cb3bd00bd9ecbe753a403e42153e704977b6dad3901"),
+  (.transcriptSingle, 0, "7cc59d6ab80ef3056cb1cc7da8dbcdf8a4026e0b3531aee245341d6d3a72d9fc"),
+  (.transcriptSingle, 64, "564bfbbd3a13dffeae73bb990fc9be38f41bcde9c9ee34610f80a0eb0275b74f"),
+  (.transcriptSingle, 1024, "3a7b3864ac80349422b57fda6fd93b2efd8cffc0cd1038075fea30f6032bb8c7"),
+  (.transcriptSingle, 1025, "fefa64fee1d7c8547c1dcdf198f31327d2821eaf59b97d005572c875a413d5dc"),
+  (.transcriptSingle, 2049, "229fac00b21e9a8c9cd53028cde501c3998ccaa72526b9aa339083fb04cbdbd6"),
+  (.transcriptSingle, 4097, "87058e365cc75eaca53fb0ff4fb4c25d48f65049257cae5d807b22decb17ffa6"),
+  (.transcriptSingle, 8193, "71f8b57065a7eb3506926ceda42542116cda7acd9bdaf5976be021848756b1e6"),
+  (.transcriptBatch, 0, "2ead4673a0bf6d0aeb83c5f96456bf706afca9c64f3753c2ea42c32f1eb2a437"),
+  (.transcriptBatch, 64, "9ab321067511d9761b1c1728a7c0a7e65711ad39a8d8944fd940ad10af69a068"),
+  (.transcriptBatch, 1024, "354b9eaf62dee90d996b674a794bd176d184a6c9f3b1ff6dbee05571207b7920"),
+  (.transcriptBatch, 1025, "c4d296b7c62f540291093be21d238a19fc94205f4573ee1d97644237f28758c4"),
+  (.transcriptBatch, 2049, "70a661402c14063ade49916ad2eb6c5b59f44ad461ece07935d57c81d4759916"),
+  (.transcriptBatch, 4097, "783dd4f2b8561085c114d353191e2abe8749989a916524b7a7ebd80a334cead6"),
+  (.transcriptBatch, 8193, "f2a343d4b6b553cb33d3f9f74ab1e647fd7691401be910680a553f1bdb10b165"),
+  (.verifyingKey, 0, "1ab08f8c7b0bd06336afe5c9300f5812fce9c0e8ea6fe7f8d04ebf37f5110f96"),
+  (.verifyingKey, 64, "05607faedc09fcf4457ebd86c28fc7c2da344c6a6c73327a264192f9ed121b97"),
+  (.verifyingKey, 1024, "336695dde1cf70cb2b370cb05830560b5bdeb5269ea17a4f130cfed55390298d"),
+  (.verifyingKey, 1025, "8bedc19f8a7772e52f2ce3becac656e352d8a32e265ea643fdb2bb56ae957e51"),
+  (.verifyingKey, 2049, "5711f20789ca11e0a9bd01bd10da9b8e76a28b4a3356eca2fc3e9fe03f88b1bc"),
+  (.verifyingKey, 4097, "b55ace42e477ee08f2a82dbe9f41440a924eb71a03816fa54c2ef69524569f16"),
+  (.verifyingKey, 8193, "fc5fb0c4adba81037775f5ec8d1a892c7c3c0a6b28089860bd61c7718468acb0"),
+  (.zkMerkleLeaf, 0, "022645c31d68cf5cc5d49dfa8bf46060cfaff4d620bf40c2d3d8dce69b651421"),
+  (.zkMerkleLeaf, 64, "4c94869d991764f736f9a071e2f28294ea3302fbea22626c9eedd35b54b2152a"),
+  (.zkMerkleLeaf, 1024, "992112216bc63fc5e8001b9629956de88b86559edc63718de1356a1b1b3b0d74"),
+  (.zkMerkleLeaf, 1025, "d79d112ff18c035c1a7634b691fa67f16a8b15b1249fac0ced58936f799cf77c"),
+  (.zkMerkleLeaf, 2049, "aac0a41c15f64b7ebb707ff5f3040ac98cbe93ca200368db551e4e9c00545a35"),
+  (.zkMerkleLeaf, 4097, "f07beba94fac50b1786047286e314f9004144ac689d559cbff8ba063f70b4da0"),
+  (.zkMerkleLeaf, 8193, "e93507eb46a3448aba804ce5f1d2fecf7ed6cc1880f420e20bdb6bcf5b1cf256"),
+  (.zkMerkleCompress, 0, "533170b759042b54aae33bedeb89b37ae5f09e65af502269fd8c7636d1d5197a"),
+  (.zkMerkleCompress, 64, "a96715eb2d8a0e5c7291bb6b1ab0732f57e960ec084fa706f0a8bc7a89f30786"),
+  (.zkMerkleCompress, 1024, "f4d637709e85b394e0859ee75975a610b50a0f6088e06f8c09abc962fb8af240"),
+  (.zkMerkleCompress, 1025, "63799057ea9b315f407b86a06762c47b061437bd8aa6a198e75f1c87ba6a7284"),
+  (.zkMerkleCompress, 2049, "6d2d110b9b998925f1627896b9a372b5f785d009c50574d5ff754e87331eb21f"),
+  (.zkMerkleCompress, 4097, "1c64104f3f0be649e58120bb5a39e06358e145444a16104fb7807a655fda83e7"),
+  (.zkMerkleCompress, 8193, "40b00f2cf7449e52e9ceacc09e39868951e9c89b36948fd1e86082babb522cc8"),
+  (.zkTranscriptSingle, 0, "869c780196c455c210fb8ec562d26ef029f1c8f6c8559002918e4648bb2833d5"),
+  (.zkTranscriptSingle, 64, "0e24845fd2d4adcb66968668818e8a2f7334bcf4742027dda64edbc5320ed4b2"),
+  (.zkTranscriptSingle, 1024, "47ef043dcba00b79e8edb4202d51ff8778ff2fbc88a095f62fcda54c7b6d8ea7"),
+  (.zkTranscriptSingle, 1025, "baec3db3647179628e87a768ee09dd4eda2737350e47083f502b4e9eee770c0b"),
+  (.zkTranscriptSingle, 2049, "96839147592baffa1c2d07a9f6ae10435c9934aa1ac664b5c82cccb16beb7418"),
+  (.zkTranscriptSingle, 4097, "6217bb97ea04dff48d437371a173c23e655d7b05e604c0103a528178dee60d28"),
+  (.zkTranscriptSingle, 8193, "cb2c27afd865a526bede516cdc968c09ff318697a25cc8e5a6537707663bfce2"),
+  (.zkTranscriptBatch, 0, "a07b3253afe23c893d8f23265a51bc626b2d32cebb646aa7e70aa0fb0b19ce97"),
+  (.zkTranscriptBatch, 64, "df56dca8b83164b920f28f4032a167fe6264e1f8afb9ce40b571a2f5dc7ef775"),
+  (.zkTranscriptBatch, 1024, "0444d6799db425248970e412094ff9c93ef9fe9ba37d47f0830ecc53af0f8fc9"),
+  (.zkTranscriptBatch, 1025, "00c5c9436ff350f6c6c7f990380b260e027a2d8ecbffd79c772d3669cf4bb478"),
+  (.zkTranscriptBatch, 2049, "2e5ad9205a05799c1be87d25bb6f54bf2402ea8a558546aac003f9f60da3920c"),
+  (.zkTranscriptBatch, 4097, "0428a55a420d4fbf74de53bb08c44972cecee40a0e3bd00e185d46b4bc3c3d33"),
+  (.zkTranscriptBatch, 8193, "a790becd177a9e7814bca8307898922dd97f19e4b6823c841104767b5480ae1b"),
+  (.zkVerifyingKey, 0, "6f1402c2a53077ff44d7c4cc8926a7f7b0974b75170d2e2f8b0a7d1158211095"),
+  (.zkVerifyingKey, 64, "edd83a2877624a855e203886b9c8fdc8a217fc12d1e7912bf33a8e2317cc3944"),
+  (.zkVerifyingKey, 1024, "02f4c01bea021aaf8fda9ee9eea91d3592b8910ab6f723dcdc29f93624236e10"),
+  (.zkVerifyingKey, 1025, "e1903e07aa79331ef3018a5e9584c8a810c12c3934b60cd13d93940581e7ecea"),
+  (.zkVerifyingKey, 2049, "4fc672a56434a2ccbc0a00f1fdb7909690fa0c0c2e4b7e56f796c0b25067197b"),
+  (.zkVerifyingKey, 4097, "0e8be6694b3c5e8c7de82de4ada8fb04e7cf76f531218d5f64eaa02dba52b13f"),
+  (.zkVerifyingKey, 8193, "bb6fd10eee6bdadcdef65935a993dc3de0451b2485f31691e1cda5340faef171")]
+
+#guard multiLevelDomainVectors.size = 70
+#guard multiLevelDomainVectors.all fun (dom, n, expected) =>
+  (dom.hash (input251 n)).toHex == expected
+
 -- `v6-zk` salted leaf hashing distinguishes distinct salts on the same row and stays distinct from `v6`.
 #guard
   let row := #[Goldilocks.ofUInt64 10, Goldilocks.ofUInt64 20]

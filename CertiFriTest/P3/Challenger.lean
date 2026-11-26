@@ -337,14 +337,26 @@ def bigEndian (bytes : ByteArray) (start count : Nat) : Nat :=
 def rejecting (_ : ByteArray) : ByteArray :=
   ByteArray.mk (Array.replicate 32 0xFF)
 
--- After `rejectionFuel` rejected words the sampled element is zero. The words
--- were consumed: 256 words are 64 digests.
+-- After `rejectionFuel` rejected words sampling fails closed (`none`) and the
+-- `Challenger` interface marks the state exhausted so witness checks reject
+-- even at zero proof-of-work difficulty.
 #guard ChallengerState.rejectionFuel = 256
+#guard (ChallengerState.sampleBase rejecting (ChallengerState.new ByteArray.empty)).isNone
+#guard (ChallengerState.sampleExt? rejecting (ChallengerState.new ByteArray.empty)).isNone
+#guard (ChallengerState.sampleExt3? rejecting (ChallengerState.new ByteArray.empty)).isNone
+#guard (ChallengerState.sampleBaseWith blake3 0 (ChallengerState.new ByteArray.empty)).isNone
+#guard (ChallengerState.sampleBaseWith blake3 1 (ChallengerState.new ByteArray.empty)).isSome
 #guard
-  let sampled := ChallengerState.sampleBase rejecting (ChallengerState.new ByteArray.empty)
-  sampled.1.val = 0 ∧ sampled.2.output = []
+  let chal := challengerWith rejecting
+  let sampled := chal.sampleExt (ChallengerState.new ByteArray.empty)
+  let afterObs := chal.observe sampled.2 (.base Goldilocks.one)
+  let checked := chal.checkWitness afterObs 0 Goldilocks.zero
+  sampled.2.exhausted && !chal.ok sampled.2 && afterObs.exhausted && !chal.ok afterObs
+    && !checked.1
 #guard
-  let sampled := (challengerWith rejecting).sampleExt (ChallengerState.new ByteArray.empty)
-  sampled.1 = 0
+  let chal := challenger3With rejecting
+  let sampled := chal.sampleExt (ChallengerState.new ByteArray.empty)
+  let checked := chal.checkWitness sampled.2 0 Goldilocks.zero
+  sampled.2.exhausted && !chal.ok sampled.2 && !checked.1
 
 end CertiFriTest.P3.Challenger

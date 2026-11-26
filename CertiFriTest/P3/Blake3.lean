@@ -107,4 +107,88 @@ def sweep (m : Nat) : ByteArray :=
   let right := Blake3.hash (input n)
   Blake3.hashPair left right == Blake3.hash (left.toBytes ++ right.toBytes)
 
+/-! ## Official keyed-hash and `derive_key` test vectors
+
+Reference inputs are the bytes `i % 251` for `i < n`, using the official BLAKE3
+test key `"whats the Elvish word for friend"` and official `derive_key` context
+`"BLAKE3 2019-12-27 16:13:59 test vectors context"`, verified against the Rust
+`blake3` crate across single-block, single-chunk, and multi-level trees up to
+100 chunks (`102,400` bytes). -/
+
+/-- Official BLAKE3 test key (`"whats the Elvish word for friend"`). -/
+def officialKey : Digest :=
+  (Digest.ofBytes? "whats the Elvish word for friend".toUTF8).getD default
+
+/-- Official BLAKE3 `derive_key` test context string. -/
+def officialDeriveKeyContext : String :=
+  "BLAKE3 2019-12-27 16:13:59 test vectors context"
+
+/-- Official `blake3::keyed_hash` test vectors (`(n, hexDigest)`). -/
+def keyedVectors : Array (Nat × String) := #[
+  (0, "92b2b75604ed3c761f9d6f62392c8a9227ad0ea3f09573e783f1498a4ed60d26"),
+  (1, "6d7878dfff2f485635d39013278ae14f1454b8c0a3a2d34bc1ab38228a80c95b"),
+  (2, "5392ddae0e0a69d5f40160462cbd9bd889375082ff224ac9c758802b7a6fd20a"),
+  (3, "39e67b76b5a007d4921969779fe666da67b5213b096084ab674742f0d5ec62b9"),
+  (63, "bb1eb5d4afa793c1ebdd9fb08def6c36d10096986ae0cfe148cd101170ce37ae"),
+  (64, "ba8ced36f327700d213f120b1a207a3b8c04330528586f414d09f2f7d9ccb7e6"),
+  (65, "c0a4edefa2d2accb9277c371ac12fcdbb52988a86edc54f0716e1591b4326e72"),
+  (127, "c64200ae7dfaf35577ac5a9521c47863fb71514a3bcad18819218b818de85818"),
+  (128, "b04fe15577457267ff3b6f3c947d93be581e7e3a4b018679125eaf86f6a628ec"),
+  (129, "d4a64dae6cdccbac1e5287f54f17c5f985105457c1a2ec1878ebd4b57e20d38f"),
+  (1023, "c951ecdf03288d0fcc96ee3413563d8a6d3589547f2c2fb36d9786470f1b9d6e"),
+  (1024, "75c46f6f3d9eb4f55ecaaee480db732e6c2105546f1e675003687c31719c7ba4"),
+  (1025, "357dc55de0c7e382c900fd6e320acc04146be01db6a8ce7210b7189bd664ea69"),
+  (2048, "879cf1fa2ea0e79126cb1063617a05b6ad9d0b696d0d757cf053439f60a99dd1"),
+  (2049, "9f29700902f7c86e514ddc4df1e3049f258b2472b6dd5267f61bf13983b78dd5"),
+  (3072, "044a0e7b172a312dc02a4c9a818c036ffa2776368d7f528268d2e6b5df191770"),
+  (3073, "68dede9bef00ba89e43f31a6825f4cf433389fedae75c04ee9f0cf16a427c95a"),
+  (4096, "befc660aea2f1718884cd8deb9902811d332f4fc4a38cf7c7300d597a081bfc0"),
+  (4097, "00df940cd36bb9fa7cbbc3556744e0dbc8191401afe70520ba292ee3ca80abbc"),
+  (7168, "b42835e40e9d4a7f42ad8cc04f85a963a76e18198377ed84adddeaecacc6f3fc"),
+  (7169, "ed9b1a922c046fdb3d423ae34e143b05ca1bf28b710432857bf738bcedbfa511"),
+  (8192, "dc9637c8845a770b4cbf76b8daec0eebf7dc2eac11498517f08d44c8fc00d58a"),
+  (8193, "954a2a75420c8d6547e3ba5b98d963e6fa6491addc8c023189cc519821b4a1f5"),
+  (16384, "9e9fc4eb7cf081ea7c47d1807790ed211bfec56aa25bb7037784c13c4b707b0d"),
+  (31744, "efa53b389ab67c593dba624d898d0f7353ab99e4ac9d42302ee64cbf9939a419"),
+  (102400, "1c35d1a5811083fd7119f5d5d1ba027b4d01c0c6c49fb6ff2cf75393ea5db4a7")]
+
+/-- Official `blake3::derive_key` test vectors (`(n, hexDigest)`). -/
+def deriveKeyVectors : Array (Nat × String) := #[
+  (0, "98fae6da3c112c3727c06ac7b0e27536718cccd43eedd2c2333463f0c6dae2c6"),
+  (1, "e5e0049fea7713a073bf060745f6ee83f1951c447a450d9418e716254b975457"),
+  (2, "3dd3dbc276690a36a13c5343f7c811e667f70800f9ac1064cf41e929f7a40e2b"),
+  (3, "d4c8020c7512d59585d0f2f3e631ad5118e33b4e8d9efe102688605e943e8898"),
+  (63, "0467d8bbfd691d5d0903480b80821249f3e651ca9e07271b7d64176ca3e59570"),
+  (64, "d0e05f223dc1ad757d64a9268e0b35a1a619e9415216ffb18cf6404801c52d99"),
+  (65, "5ef48660f62efe2bb3ded071c6f35700b0371b843fd52335ec186e21ecc21af7"),
+  (127, "5aef747946c72f9196c1efb1843ead302bb945a7123cb86b72987e0b4d57d46f"),
+  (128, "9a8dfffc79e07a1a7038cdc537218bf9828920b1437911cef02952e2c580c485"),
+  (129, "4fbad266b2616e67d9a0b8b6f53529175260c36ad6d3e096a345afa4cb5205c2"),
+  (1023, "b05f08a60c5a38a6f942ceedf9945afe93324aa1f57377580617f42c906da8f5"),
+  (1024, "284d70facfb1eda96080cffe91a9143dc36ca5812604ac1c87a02c58f06a598a"),
+  (1025, "799fe85dc79b41b3e56bc31dc454e1942a7a425deb2d6ea10c68b1bc8a8dd06b"),
+  (2048, "3e77872aeccc948729251279665ff9e78e3c2647507972160c3685ff4de9be25"),
+  (2049, "548a4fc1805e7fd72cfa9d78f8eb83135e6a65ac447ee7dd003b0ebed841e69d"),
+  (3072, "83c7a53925f9c380e7b1bbc948a9618a8bfe586613fd49408399f2cdaad70306"),
+  (3073, "f2f6935dc3f0a8f761ed9598b217ba7350fe57abf68ea18bb020402e5e66e7e3"),
+  (4096, "6317dbd0b03b0e0d886050efc9142678f7cb903fd4cf71371bf15a091dce8a21"),
+  (4097, "4169134d3efcd89b97e56db1d7206fe4fcd5aa77fe34bfda579c6172b3980160"),
+  (7168, "ec39bef31b7c6ed2d0f6ebb87251fcddb82357fc1c1fc0000696735a93a9dbe5"),
+  (7169, "b66408ea135a1630affe94bfe54cb1278e92230a2b9f04af8568772c346f15f5"),
+  (8192, "a47d8ab169c83a47eb4de03995a0aaf66fb15235caf76b822f274fde7968fc8e"),
+  (8193, "974a7eb4f4fbdcded432d16f7d489801a8a127eef43c7570c7b8ba9948ddcd9a"),
+  (16384, "0e7e1686b0524f90b7d28df8efc6777caec092247d647c1f2f154bb3e2e2a4e4"),
+  (31744, "0e6cde4d03a9cc8550a06b9b3fc4dc730feebc58d77b200dc751f66fdfe293fd"),
+  (102400, "c334f916c9f57c71ef5570c3d41700af9a3a4fd59c9e1b32cff72bfd21c5e314")]
+
+#guard keyedVectors.size = 26
+#guard keyedVectors.all fun (n, digest) => (Blake3.keyedHash officialKey (input n)).toHex == digest
+#guard blake3KeyedHash officialKey (input 64) == (Blake3.keyedHash officialKey (input 64)).toBytes
+
+#guard deriveKeyVectors.size = 26
+#guard deriveKeyVectors.all fun (n, digest) =>
+  (Blake3.deriveKey officialDeriveKeyContext (input n)).toHex == digest
+#guard blake3DeriveKey officialDeriveKeyContext (input 1025)
+  == (Blake3.deriveKey officialDeriveKeyContext (input 1025)).toBytes
+
 end CertiFriTest.P3.Blake3

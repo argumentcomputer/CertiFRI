@@ -8,15 +8,13 @@
 use crate::config::{ProofConfig, ProtocolVersion, TranscriptMode};
 use p3_blake3::Blake3;
 use p3_challenger::{
-    CanObserve, CanSample, CanSampleBits, FieldChallenger, GrindingChallenger, HashChallenger,
-    SerializingChallenger64,
+    CanFinalizeDigest, CanObserve, CanSample, CanSampleBits, CanSampleUniformBits, FieldChallenger,
+    GrindingChallenger, ResamplingError,
 };
 use p3_commit::{ExtensionMmcs, Pcs as PcsTrait};
 use p3_dft::Radix2DitParallel;
-#[cfg(feature = "cuda")]
-use p3_field::BasedVectorSpace;
 use p3_field::{
-    ExtensionField, Field, PrimeCharacteristicRing, PrimeField64, TwoAdicField,
+    BasedVectorSpace, ExtensionField, Field, PrimeCharacteristicRing, PrimeField64, TwoAdicField,
     extension::{BinomialExtensionField, CubicTrinomialExtensionField},
 };
 use p3_fri::FriParameters as InnerFriParameters;
@@ -29,6 +27,7 @@ use p3_maybe_rayon::prelude::*;
 use p3_symmetric::CompressionFunctionFromHasher;
 #[cfg(test)]
 use p3_symmetric::SerializingHasher;
+use p3_symmetric::{Hash, MerkleCap};
 
 #[cfg(feature = "cuda")]
 use crate::cuda::CudaDft;
@@ -47,8 +46,7 @@ pub type ExtVal2 = BinomialExtensionField<Val, 2>;
 pub type ExtVal3 = CubicTrinomialExtensionField<Val>;
 pub type PackedExtVal = <ExtVal as ExtensionField<Val>>::ExtensionPacking;
 pub type PackedExtVal3 = <ExtVal3 as ExtensionField<Val>>::ExtensionPacking;
-pub type Challenger =
-    DeterministicPow<SerializingChallenger64<Val, HashChallenger<u8, Blake3, 32>>>;
+pub type Challenger = Blake3Challenger;
 
 /// Forwarding challenger wrapper that makes proof-of-work grinding
 /// deterministic.
@@ -76,9 +74,219 @@ fn grind_window(bits: usize) -> u64 {
     (1u64 << bits.min(40)).div_ceil(16).clamp(64, 1 << 16)
 }
 
-impl Challenger {
-    pub fn from_hasher(initial_state: Vec<u8>, hasher: Blake3) -> Self {
-        Self(SerializingChallenger64::from_hasher(initial_state, hasher))
+/// Goldilocks byte-serializing Fiat-Shamir challenger backed directly by
+/// streaming BLAKE3 (`Plain` or native `derive_key` domain separation).
+///
+/// Semantically byte-for-byte identical to
+/// `DeterministicPow<SerializingChallenger64<Val, HashChallenger<u8, DomainBlake3, 32>>>`,
+/// while hashing the buffered transcript prefix once into a streaming
+/// [`blake3::Hasher`] before PoW grinding and cloning that hasher state per
+/// candidate witness instead of re-hashing the whole transcript buffer on
+/// every attempt.
+#[derive(Clone, Debug)]
+pub struct Blake3Challenger {
+    input_buffer: Vec<u8>,
+    output_buffer: Vec<u8>,
+    domain: Blake3Domain,
+}
+
+impl Blake3Challenger {
+    /// Creates a challenger initialized with `initial_state` under `domain`.
+    pub fn new(initial_state: Vec<u8>, domain: Blake3Domain) -> Self {
+        Self {
+            input_buffer: initial_state,
+            output_buffer: Vec::new(),
+            domain,
+        }
+    }
+
+    /// Creates a plain BLAKE3 challenger initialized with `initial_state`.
+    pub fn from_hasher(initial_state: Vec<u8>, _hasher: Blake3) -> Self {
+        Self::new(initial_state, Blake3Domain::Plain)
+    }
+
+    #[inline]
+    fn observe_bytes(&mut self, bytes: &[u8]) {
+        self.output_buffer.clear();
+        self.input_buffer.extend_from_slice(bytes);
+    }
+
+    #[inline]
+    fn flush(&mut self) {
+        let output = self.domain.hash_bytes(&self.input_buffer);
+        self.input_buffer.clear();
+        self.input_buffer.extend_from_slice(&output);
+        self.output_buffer.clear();
+        self.output_buffer.extend_from_slice(&output);
+    }
+
+    #[inline]
+    fn sample_byte(&mut self) -> u8 {
+        if self.output_buffer.is_empty() {
+            self.flush();
+        }
+        self.output_buffer
+            .pop()
+            .expect("output buffer should be non-empty")
+    }
+
+    #[inline]
+    fn sample_u64(&mut self) -> u64 {
+        let bytes = core::array::from_fn(|_| self.sample_byte());
+        u64::from_le_bytes(bytes)
+    }
+}
+
+impl CanObserve<Val> for Blake3Challenger {
+    #[inline]
+    fn observe(&mut self, value: Val) {
+        self.observe_bytes(&value.to_unique_u64().to_le_bytes());
+    }
+}
+
+impl<const N: usize> CanObserve<Hash<Val, u8, N>> for Blake3Challenger {
+    #[inline]
+    fn observe(&mut self, values: Hash<Val, u8, N>) {
+        if N > 0 {
+            let bytes: [u8; N] = values.into();
+            self.observe_bytes(&bytes);
+        }
+    }
+}
+
+impl<const N: usize> CanObserve<Hash<Val, u64, N>> for Blake3Challenger {
+    #[inline]
+    fn observe(&mut self, values: Hash<Val, u64, N>) {
+        for value in values {
+            self.observe_bytes(&value.to_le_bytes());
+        }
+    }
+}
+
+impl<const N: usize> CanObserve<&MerkleCap<Val, [u8; N]>> for Blake3Challenger {
+    #[inline]
+    fn observe(&mut self, cap: &MerkleCap<Val, [u8; N]>) {
+        for digest in cap.roots() {
+            if N > 0 {
+                self.observe_bytes(digest);
+            }
+        }
+    }
+}
+
+impl<const N: usize> CanObserve<MerkleCap<Val, [u8; N]>> for Blake3Challenger {
+    #[inline]
+    fn observe(&mut self, cap: MerkleCap<Val, [u8; N]>) {
+        self.observe(&cap);
+    }
+}
+
+impl<const N: usize> CanObserve<&MerkleCap<Val, [u64; N]>> for Blake3Challenger {
+    #[inline]
+    fn observe(&mut self, cap: &MerkleCap<Val, [u64; N]>) {
+        for digest in cap.roots() {
+            for value in digest {
+                self.observe_bytes(&value.to_le_bytes());
+            }
+        }
+    }
+}
+
+impl<const N: usize> CanObserve<MerkleCap<Val, [u64; N]>> for Blake3Challenger {
+    #[inline]
+    fn observe(&mut self, cap: MerkleCap<Val, [u64; N]>) {
+        self.observe(&cap);
+    }
+}
+
+impl<EF: BasedVectorSpace<Val>> CanSample<EF> for Blake3Challenger {
+    fn sample(&mut self) -> EF {
+        let modulus = Val::ORDER_U64;
+        EF::from_basis_coefficients_fn(|_| {
+            loop {
+                let value = self.sample_u64();
+                if value < modulus {
+                    return Val::from_u64(value);
+                }
+            }
+        })
+    }
+}
+
+impl CanSampleBits<usize> for Blake3Challenger {
+    fn sample_bits(&mut self, bits: usize) -> usize {
+        assert!(bits < (usize::BITS as usize));
+        assert!((1u64 << bits) < Val::ORDER_U64);
+        let rand_u64 = self.sample_u64();
+        usize::try_from(rand_u64 & ((1u64 << bits) - 1)).expect("bits < usize::BITS")
+    }
+}
+
+impl CanSampleUniformBits<Val> for Blake3Challenger {
+    fn sample_uniform_bits<const RESAMPLE: bool>(
+        &mut self,
+        bits: usize,
+    ) -> Result<usize, ResamplingError> {
+        Ok(self.sample_bits(bits))
+    }
+}
+
+impl FieldChallenger<Val> for Blake3Challenger {}
+
+impl CanFinalizeDigest for Blake3Challenger {
+    type Digest = [u8; 32];
+
+    fn finalize(mut self) -> Self::Digest {
+        self.flush();
+        self.output_buffer
+            .try_into()
+            .expect("BLAKE3 digest is 32 bytes")
+    }
+}
+
+impl GrindingChallenger for Blake3Challenger {
+    type Witness = Val;
+
+    fn grind(&mut self, bits: usize) -> Self::Witness {
+        assert!(bits < (usize::BITS as usize));
+        assert!((1u64 << bits) < Val::ORDER_U64);
+        if bits == 0 {
+            return Val::ZERO;
+        }
+        let order = Val::ORDER_U64;
+        let mask = (1u64 << bits) - 1;
+        // Hash the buffered transcript prefix once; every candidate witness
+        // only clones this incremental BLAKE3 state and appends its 8 bytes.
+        let mut prefix = self.domain.hasher();
+        prefix.update(&self.input_buffer);
+        let window = grind_window(bits);
+        let mut base = 0u64;
+        let witness = loop {
+            assert!(base < order, "no proof-of-work witness in the field");
+            let end = base.saturating_add(window).min(order);
+            let found = (base..end)
+                .into_par_iter()
+                .filter(|&i| {
+                    let mut h = prefix.clone();
+                    h.update(&i.to_le_bytes());
+                    let digest: [u8; 32] = h.finalize().into();
+                    let word = u64::from_be_bytes([
+                        digest[24], digest[25], digest[26], digest[27], digest[28], digest[29],
+                        digest[30], digest[31],
+                    ]);
+                    (word & mask) == 0
+                })
+                .min();
+            if let Some(i) = found {
+                break Val::from_u64(i);
+            }
+            base = end;
+        };
+        assert!(
+            self.check_witness(bits, witness),
+            "grind witness fails its own check"
+        );
+        witness
     }
 }
 
@@ -142,7 +350,7 @@ where
 #[cfg(test)]
 mod grind_tests {
     use super::*;
-    use p3_challenger::GrindingChallenger;
+    use p3_challenger::{GrindingChallenger, HashChallenger, SerializingChallenger64};
 
     fn challenger(seed: u8) -> Challenger {
         Challenger::from_hasher(vec![seed; 4], Blake3)
@@ -189,6 +397,61 @@ mod grind_tests {
         assert!(witness.as_canonical_u64() >= grind_window(bits));
         for i in 0..witness.as_canonical_u64() {
             assert!(!challenger(0).check_witness(bits, Val::from_u64(i)));
+        }
+    }
+
+    #[test]
+    fn blake3_challenger_matches_reference_serializing_challenger() {
+        // Compare Blake3Challenger byte-for-byte against Plonky3's
+        // DeterministicPow<SerializingChallenger64<Val, HashChallenger<u8, DomainBlake3, 32>>>
+        // across plain and keyed derive_key domains, short and multi-chunk
+        // (6+ KiB, matching lfp = 8 final polynomials) transcript buffers,
+        // and both empty and partially drained output buffers before grinding.
+        let domains = [
+            Blake3Domain::Plain,
+            Blake3Domain::TranscriptSingle,
+            Blake3Domain::TranscriptBatch,
+            Blake3Domain::ZkTranscriptSingle,
+        ];
+        for domain in domains {
+            for &extra_elems in &[0usize, 7, 768] {
+                for &presample in &[false, true] {
+                    let seed = b"pow-prefix-hasher-parity-seed".to_vec();
+                    let mut fast = Blake3Challenger::new(seed.clone(), domain);
+                    let mut reference = DeterministicPow(SerializingChallenger64::<
+                        Val,
+                        HashChallenger<u8, DomainBlake3, 32>,
+                    >::from_hasher(
+                        seed, DomainBlake3::new(domain)
+                    ));
+                    for k in 0..extra_elems {
+                        let v = Val::from_u64(u64::try_from(k * 97 + 13).unwrap());
+                        fast.observe(v);
+                        reference.observe(v);
+                    }
+                    if presample {
+                        let a: ExtVal3 = fast.sample();
+                        let b: ExtVal3 = reference.sample();
+                        assert_eq!(a, b);
+                    }
+                    for &bits in &[0usize, 1, 9, 13] {
+                        let mut f = fast.clone();
+                        let mut r = reference.clone();
+                        let wf = f.grind(bits);
+                        let wr = r.grind(bits);
+                        assert_eq!(
+                            wf, wr,
+                            "witness mismatch for domain={domain:?}, extra={extra_elems}, presample={presample}, bits={bits}"
+                        );
+                        for _ in 0..8 {
+                            let sf: ExtVal3 = f.sample();
+                            let sr: ExtVal3 = r.sample();
+                            assert_eq!(sf, sr);
+                        }
+                        assert_eq!(f.sample_bits(17), r.sample_bits(17));
+                    }
+                }
+            }
         }
     }
 }

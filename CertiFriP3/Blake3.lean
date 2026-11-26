@@ -30,11 +30,12 @@ The message is read through a function that gives the block at an index, as 16
 little-endian words (`hashBlocks`). The Merkle hashers use this to hash field
 elements and digests without first writing them as bytes.
 
-Nothing is proved here. The function is tested against the vectors of the
-BLAKE3 reference (`CertiFriTest/P3/Blake3.lean`).
+Nothing is proved here. Plain, keyed, and `derive_key` modes are tested against
+the official BLAKE3 test vectors and `multi-stark` context keys
+(`CertiFriTest/P3/Blake3.lean`, `CertiFriTest/P3/DomainSep.lean`).
 
-Not covered: the keyed mode, key derivation, outputs longer than 32 bytes, and
-hashing a message in several updates.
+Not covered: outputs longer than 48 bytes and hashing a message in several
+incremental updates.
 -/
 
 namespace CertiFri.P3
@@ -360,6 +361,14 @@ def hashBlocksWithXof48 (key : Digest) (flags : UInt32) (len : Nat) (block : Nat
     Digest48 :=
   (rootNodeWith key flags len block).rootDigest48
 
+/-- 32-byte BLAKE3 keyed hash (`flagKeyedHash`) from a 32-byte key and block reader. -/
+def keyedHashBlocks (key : Digest) (len : Nat) (block : Nat → Block) : Digest :=
+  hashBlocksWith key flagKeyedHash len block
+
+/-- 32-byte BLAKE3 keyed hash (`blake3::keyed_hash`) of `bytes` under 32-byte `key`. -/
+def keyedHash (key : Digest) (bytes : ByteArray) : Digest :=
+  keyedHashBlocks key bytes.size (bytesBlock bytes)
+
 /-- Precompute the 8-word BLAKE3 `derive_key` context key for a UTF-8 context string
 using `iv` and `flagDeriveKeyContext` (`1 << 5`). Matches `blake3::derive_key` and
 `multi-stark`'s `derive_context_key` for every context string. -/
@@ -431,6 +440,10 @@ end Blake3
 /-- BLAKE3 in its plain mode: the 32-byte digest of a message of any length. -/
 def blake3 (bytes : ByteArray) : ByteArray :=
   (Blake3.hash bytes).toBytes
+
+/-- BLAKE3 in its keyed hash mode: the 32-byte MAC/digest under 32-byte `key`. -/
+def blake3KeyedHash (key : Digest) (bytes : ByteArray) : ByteArray :=
+  (Blake3.keyedHash key bytes).toBytes
 
 /-- BLAKE3 in its native `derive_key` mode: the 32-byte digest under context `ctx`. -/
 def blake3DeriveKey (ctx : String) (bytes : ByteArray) : ByteArray :=

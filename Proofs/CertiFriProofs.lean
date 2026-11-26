@@ -102,6 +102,8 @@ import CertiFriProofs.Theory.Oracle.SpongeCommitted
 import CertiFriProofs.Exec.SoundnessSponge
 import CertiFriProofs.Theory.ProximityGap.TensorMCA
 import CertiFriProofs.Theory.PcsRbrTensor
+import CertiFriProofs.Theory.Compiled.Tensor
+import CertiFriProofs.Exec.TensorExec
 import CertiFriProofs.Exec.SoundnessTensor
 import CertiFriProofs.Exec.SoundnessZk
 import CertiFriProofs.Audit128

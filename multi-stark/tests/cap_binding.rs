@@ -84,7 +84,10 @@ fn probe<M: Mmcs<Val, Error = MerkleTreeError>>(name: &str, mk: impl Fn(usize) -
                         "{ctx} index={index}: unbound commitment accepted: {honest:?}"
                     );
                 } else {
-                    assert!(honest.is_ok(), "{ctx} index={index}: honest rejected: {honest:?}");
+                    assert!(
+                        honest.is_ok(),
+                        "{ctx} index={index}: honest rejected: {honest:?}"
+                    );
                 }
             }
             let indices = [3usize, 7, 19];
@@ -105,7 +108,10 @@ fn probe<M: Mmcs<Val, Error = MerkleTreeError>>(name: &str, mk: impl Fn(usize) -
                     "{ctx}: unbound multi-batch commitment accepted: {honest:?}"
                 );
             } else {
-                assert!(honest.is_ok(), "{ctx}: honest multi-batch rejected: {honest:?}");
+                assert!(
+                    honest.is_ok(),
+                    "{ctx}: honest multi-batch rejected: {honest:?}"
+                );
             }
         }
     }
@@ -129,7 +135,10 @@ fn f(v: u32) -> Val {
 
 fn forgery_system(
     cap_height: usize,
-) -> (System<GoldilocksBlake3V6Config>, ProverKey<GoldilocksBlake3V6Config>) {
+) -> (
+    System<GoldilocksBlake3V6Config>,
+    ProverKey<GoldilocksBlake3V6Config>,
+) {
     let a = CircuitInputs {
         main_width: 2,
         preprocessed: None,
@@ -189,7 +198,10 @@ fn audit_o7_forged_proofs_of_a_false_claim_are_rejected() {
     // `(77, 3, 10)` is false for circuit B: 3·3 ≠ 10.
     let false_claim = [f(CH), f(3), f(10)];
     for (cap, bytes) in [
-        (4usize, &include_bytes!("fixtures/o7-forged-cap4-rows2.bin")[..]),
+        (
+            4usize,
+            &include_bytes!("fixtures/o7-forged-cap4-rows2.bin")[..],
+        ),
         (5, &include_bytes!("fixtures/o7-forged-cap5-rows4.bin")[..]),
     ] {
         let (system, _) = forgery_system(cap);
@@ -215,20 +227,14 @@ fn honest_proofs_verify_when_every_matrix_reaches_the_cap_layer() {
     // rows (LDE 8) the verifier refuses the commitment instead of trusting it.
     let true_claim = [f(CH), f(3), f(9)];
     let (system, key) = forgery_system(4);
-    let proof = system.prove_multiple_claims(
-        &key,
-        &[&true_claim[..]],
-        forgery_witness(&system, 4, 3, 9),
-    );
+    let proof =
+        system.prove_multiple_claims(&key, &[&true_claim[..]], forgery_witness(&system, 4, 3, 9));
     system
         .verify_multiple_claims(&[&true_claim[..]], &proof)
         .expect("honest proof whose matrices all reach the cap layer");
 
-    let short = system.prove_multiple_claims(
-        &key,
-        &[&true_claim[..]],
-        forgery_witness(&system, 2, 3, 9),
-    );
+    let short =
+        system.prove_multiple_claims(&key, &[&true_claim[..]], forgery_witness(&system, 2, 3, 9));
     assert!(matches!(
         system.verify_multiple_claims(&[&true_claim[..]], &short),
         Err(VerificationError::InvalidOpeningArgument(

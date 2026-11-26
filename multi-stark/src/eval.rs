@@ -63,7 +63,8 @@ impl<'a, F: Field> ValidatedGraph<'a, F> {
 
     /// [`ConstraintGraph::sweep`] without per-node order checks.
     pub fn sweep<W: Algebra<F>>(&self, values: &VarValues<'_, W>, buf: &mut Vec<W>) {
-        self.0.sweep_range::<false, W>(values, buf, self.0.nodes.len());
+        self.0
+            .sweep_range::<false, W>(values, buf, self.0.nodes.len());
     }
 
     /// [`ConstraintGraph::sweep_lookup_prefix`] without per-node order checks.
@@ -125,7 +126,10 @@ impl<F: Field> ConstraintGraph<F> {
         for i in 0..len {
             let child = |id: NodeId| {
                 if CHECKED {
-                    assert!(id.index() < i, "constraint graph is not topologically ordered");
+                    assert!(
+                        id.index() < i,
+                        "constraint graph is not topologically ordered"
+                    );
                 }
                 unsafe { (*ptr.add(id.index())).assume_init_read() }
             };

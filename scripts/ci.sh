@@ -7,7 +7,7 @@
 #                               in the kernel (needs lean-build)
 #   scripts/ci.sh axioms        every constant of those libraries depends only on propext,
 #                               Classical.choice and Quot.sound (needs lean-build)
-#   scripts/ci.sh multi-stark   multi-stark's tests and doc tests
+#   scripts/ci.sh multi-stark   multi-stark's rustfmt, clippy, cargo-deny, tests and doc tests
 #
 # Lean comes from `lean-toolchain` (through elan, or a toolchain already on PATH); Rust from
 # `multi-stark/rust-toolchain.toml`.
@@ -40,6 +40,9 @@ step() {
       ;;
     multi-stark)
       cd "$root/multi-stark"
+      cargo fmt --all --check
+      cargo clippy --release --locked --all-targets --features parallel -- -D warnings
+      cargo deny check
       cargo test --locked --profile dev-ci --features parallel
       ;;
     *)

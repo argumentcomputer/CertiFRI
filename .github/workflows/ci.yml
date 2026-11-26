@@ -2,7 +2,8 @@ name: CI
 
 # Every check is a step of scripts/ci.sh, which runs the same way outside Actions:
 # the Lean libraries and the proofs built with warnings as errors, a kernel replay
-# (leanchecker) of the proof closure, an axiom check, and multi-stark's tests.
+# (leanchecker) of the proof closure, an axiom check, and multi-stark's rustfmt,
+# clippy, cargo-deny, and tests.
 # Peak memory, measured: about 8 GB (build, replay with one thread, axiom check).
 # The workflows under multi-stark/.github/ came with the import of that repository;
 # GitHub does not run them from there.
@@ -43,7 +44,7 @@ jobs:
         run: scripts/ci.sh axioms
 
   multi-stark:
-    name: multi-stark tests
+    name: multi-stark lint, deny & tests
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
@@ -52,6 +53,10 @@ jobs:
           persist-credentials: false
       - name: Install the toolchain of multi-stark/rust-toolchain.toml
         working-directory: multi-stark
-        run: rustup toolchain install "$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)" --profile minimal
-      - name: Tests
+        run: rustup toolchain install "$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)"
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
+        with:
+          tool: cargo-deny
+      - name: Rustfmt, clippy, cargo-deny & tests
         run: scripts/ci.sh multi-stark

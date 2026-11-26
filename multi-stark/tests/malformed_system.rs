@@ -5,6 +5,7 @@
 //! public evaluation API panics instead of reading out of bounds or
 //! uninitialized memory.
 
+use multi_stark::batch::{BatchProof, ShardInput};
 use multi_stark::eval::VarValues;
 use multi_stark::expr::{ColRef, Expr, RowOffset, Source};
 use multi_stark::graph::{Node, NodeId};
@@ -23,7 +24,10 @@ fn f(v: u32) -> Val {
 }
 
 /// Circuit 0: `x·x = y` pulling the claim `(77, x, y)`; circuit 1: `a·a = b`.
-fn build() -> (Sys, multi_stark::system::ProverKey<GoldilocksBlake3V6Config>) {
+fn build() -> (
+    Sys,
+    multi_stark::system::ProverKey<GoldilocksBlake3V6Config>,
+) {
     let pulls = CircuitInputs {
         main_width: 3,
         preprocessed: None,
@@ -86,6 +90,41 @@ fn system_and_proof() -> (Sys, Vec<Val>, Proof<GoldilocksBlake3V6Config>) {
 fn rejected(system: &Sys, claim: &[Val], proof: &Proof<GoldilocksBlake3V6Config>) -> bool {
     matches!(
         system.verify_multiple_claims(&[claim], proof),
+        Err(VerificationError::InvalidSystem)
+    )
+}
+
+fn system_and_batch_proof() -> (Sys, BatchProof<GoldilocksBlake3V6Config>) {
+    let (system, key) = build();
+    let mut pull_trace = vec![Val::ZERO; 3 * 4];
+    pull_trace[..3].copy_from_slice(&[f(3), f(9), Val::ONE]);
+    let square_trace: Vec<Val> = (1..=8u32).flat_map(|i| [f(i), f(i * i)]).collect();
+    let witness = SystemWitness::from_stage_1(
+        vec![
+            RowMajorMatrix::new(pull_trace, 3),
+            RowMajorMatrix::new(square_trace, 2),
+        ],
+        &system,
+    );
+    let claim = vec![f(77), f(3), f(9)];
+    let batch = system.prove_batch(
+        &key,
+        vec![ShardInput {
+            claims: vec![claim],
+            witness,
+        }],
+        vec![],
+    );
+    system.verify_batch(&batch).expect("honest batch proof");
+    (system, batch)
+}
+
+fn batch_rejected(system: &Sys, batch: &BatchProof<GoldilocksBlake3V6Config>) -> bool {
+    matches!(
+        system.verify_batch(batch),
+        Err(VerificationError::InvalidSystem)
+    ) && matches!(
+        system.verify_batch_shard(&batch.preamble, 0, &batch.proofs[0]),
         Err(VerificationError::InvalidSystem)
     )
 }
@@ -158,6 +197,56 @@ fn verifier_refuses_malformed_systems() {
     let mut s = build_system();
     s.preprocessed_indices.push(None);
     assert!(rejected(&s, &claim, &proof));
+    let mut s = build_system();
+    s.circuits[0].graph.degrees.pop();
+    assert!(rejected(&s, &claim, &proof));
+    let mut s = build_system();
+    s.circuits[0].max_constraint_degree = ((u32::MAX as usize) >> 2) + 1;
+    assert!(rejected(&s, &claim, &proof));
+    let mut s = build_system();
+    s.circuits[0].preprocessed_height = 4;
+    s.circuits[0].preprocessed_width = 0;
+    s.preprocessed_indices[0] = Some(0);
+    assert!(rejected(&s, &claim, &proof));
+}
+
+#[test]
+fn batch_verifier_refuses_malformed_systems() {
+    let (system, batch) = system_and_batch_proof();
+    assert!(system.check_well_formed().is_ok());
+
+    // Huge `max_constraint_degree` previously panicked inside
+    // `verify_preamble_headers` (`next_power_of_two()` overflow) before
+    // reaching `verify_shape`.
+    for bad_degree in [usize::MAX, ((u32::MAX as usize) >> 2) + 1] {
+        let mut s = build_system();
+        s.circuits[0].max_constraint_degree = bad_degree;
+        assert!(batch_rejected(&s, &batch));
+    }
+
+    // Mismatched `preprocessed_indices.len()`.
+    let mut s = build_system();
+    s.preprocessed_indices.push(None);
+    assert!(batch_rejected(&s, &batch));
+
+    // Mismatched `graph.degrees.len()`.
+    let mut s = build_system();
+    s.circuits[0].graph.degrees.pop();
+    assert!(batch_rejected(&s, &batch));
+
+    // Preprocessed slot with zero width.
+    let mut s = build_system();
+    s.circuits[0].preprocessed_height = 4;
+    s.circuits[0].preprocessed_width = 0;
+    s.preprocessed_indices[0] = Some(0);
+    assert!(batch_rejected(&s, &batch));
+
+    // Non-topological constraint graph.
+    let mut s = build_system();
+    let graph = &mut s.circuits[1].graph;
+    let i = first_binary_node(&graph.nodes);
+    graph.nodes[i] = Node::Mul(NodeId(u32::try_from(i).unwrap()), NodeId(0));
+    assert!(batch_rejected(&s, &batch));
 }
 
 #[test]

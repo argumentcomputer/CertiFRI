@@ -180,6 +180,9 @@ impl<F: Field> Circuit<F> {
     pub fn check_well_formed(&self, d: usize) -> Result<(), &'static str> {
         let graph = &self.graph;
         let len = graph.nodes.len();
+        if graph.degrees.len() != len {
+            return Err("node degree table does not match the graph");
+        }
         let prefix = graph.lookup_prefix_len;
         if prefix > len {
             return Err("lookup prefix exceeds the graph");
@@ -246,7 +249,9 @@ impl<F: Field> Circuit<F> {
         {
             return Err("circuit metadata inconsistent with its graph");
         }
-        if self.max_constraint_degree > u32::MAX as usize {
+        // Keep `quotient_degree_for(is_zk)` (`next_power_of_two()` and its 2×
+        // ZK slice count) free of overflow even on 32-bit targets.
+        if self.max_constraint_degree > (u32::MAX as usize) >> 2 {
             return Err("constraint degree out of range");
         }
         if self.preprocessed_height != 0 && !self.preprocessed_height.is_power_of_two() {
@@ -298,7 +303,11 @@ impl<SC: ProofConfig> System<SC> {
         for (circuit, slot) in self.circuits.iter().zip(&self.preprocessed_indices) {
             circuit.check_well_formed(d)?;
             match *slot {
-                Some(slot) if slot == next_slot && circuit.preprocessed_height > 0 => {
+                Some(slot)
+                    if slot == next_slot
+                        && circuit.preprocessed_height > 0
+                        && circuit.preprocessed_width > 0 =>
+                {
                     next_slot += 1;
                 }
                 None if circuit.preprocessed_height == 0 && circuit.preprocessed_width == 0 => {}

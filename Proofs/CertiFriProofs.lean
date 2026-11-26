@@ -105,5 +105,6 @@ import CertiFriProofs.Theory.PcsRbrTensor
 import CertiFriProofs.Theory.Compiled.Tensor
 import CertiFriProofs.Exec.TensorExec
 import CertiFriProofs.Exec.SoundnessTensor
+import CertiFriProofs.Exec.SoundnessTensorSponge
 import CertiFriProofs.Exec.SoundnessZk
 import CertiFriProofs.Audit128

@@ -1381,9 +1381,9 @@ fn v6_fp3_rejects_merkle_cap_forgery_and_grinding() {
     }
 }
 
-/// Audit IX-13: at zero proof-of-work bits the witness is neither checked nor
-/// absorbed, so the verifier requires it to be zero (what `grind(0)` returns);
-/// a bit count the challenger cannot sample is refused, not a panic.
+/// At zero proof-of-work bits the witness is neither checked nor absorbed, so
+/// the verifier requires it to be zero (what `grind(0)` returns); a bit count
+/// the challenger cannot sample is refused rather than panicking.
 #[test]
 fn v6_fp3_rejects_free_pow_witnesses_and_unsamplable_pow_bits() {
     use multi_stark::verifier::VerificationError;

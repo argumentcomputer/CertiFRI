@@ -19,7 +19,7 @@ Mechanically pins (via `#guard_msgs` on `#check` and `#print axioms`) the
    16-byte `personal` domain separation (`Blake2b512Domain`), `255.71b`
    classical BCS collision resistance (`c = 3 / 2`, keeping the classical
    collision term `≤ N / (4 * 2 ^ 128)` for `N ≤ 2 ^ 128`), plus arithmetic
-   cardinality-ratio inequalities (`DigestCard.lean`). *Note (audit IX-53):*
+   cardinality-ratio inequalities (`DigestCard.lean`). *Note:*
    all soundness proofs are in the **classical** ROM and do not certify 128-bit
    post-quantum protocol soundness (QROM Fiat–Shamir and Grover search on FRI
    queries/PoW are not formalized).

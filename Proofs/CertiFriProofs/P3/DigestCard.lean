@@ -24,7 +24,7 @@ bits, 64-byte RFC 7693 `BLAKE2b-512`), and legacy `CertiFri.P3.Digest48` with
   because `BLAKE3-XOF48`/`BLAKE3-XOF64` retain a 256-bit internal chaining
   value `cv`.)*
 
-**Scope note (audit IX-53):** A 64-byte (`2 ^ 512`) digest gives classical BCS
+**Scope note:** A 64-byte (`2 ^ 512`) digest gives classical BCS
 collision resistance (`3 * N ^ 2 / (2 * 2 ^ 512)`) in the classical ROM, **not**
 certified 128-bit post-quantum soundness for the STARK/FRI protocol (Grover
 search against FRI queries/PoW and QROM Fiat–Shamir are not formalized here).

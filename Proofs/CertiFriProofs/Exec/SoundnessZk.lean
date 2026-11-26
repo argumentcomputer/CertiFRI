@@ -5,7 +5,7 @@ import CertiFriProofs.Exec.SoundnessTensor
 /-!
 # Algebraic Lemmas, Parameter Guardrails, and Horner-FRI Soundness Corollaries for `multi-stark/v6-zk`
 
-**Scope notice (audit IX-16):** This module does **not** certify the
+**Scope notice:** This module does **not** certify the
 `multi-stark/v6-zk` zero-knowledge hiding-PCS end-to-end, and it proves **no**
 hiding or zero-knowledge property (no HVZK simulator or transcript
 indistinguishability theorem). In particular, the executable soundness theorems

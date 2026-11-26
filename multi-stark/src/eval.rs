@@ -104,7 +104,7 @@ impl<F: Field> ConstraintGraph<F> {
         len: usize,
     ) {
         // The fields are public, so neither bound below is an invariant of
-        // the type (audit IX-23): on an unvalidated graph a prefix longer
+        // the type: on an unvalidated graph a prefix longer
         // than the graph, or a child not strictly before its parent, panics
         // here rather than reading out of bounds or uninitialized memory.
         assert!(len <= self.nodes.len(), "sweep range exceeds the graph");

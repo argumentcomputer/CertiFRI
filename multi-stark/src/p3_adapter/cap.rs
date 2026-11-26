@@ -49,7 +49,7 @@ pub(crate) fn verify_merkle_cap_len_for_log_height<F, W>(
 /// A matrix is injected into the digest layer whose width matches its height,
 /// so one shorter than the cap layer (`log2_ceil(height) < effective cap
 /// height`) would be injected above the cap: the cap would not depend on it
-/// and its opened rows would pass unauthenticated (audit IX-3). Such
+/// and its opened rows would pass unauthenticated. Such
 /// dimensions are rejected with `CapMismatch`.
 #[inline]
 pub(crate) fn verify_merkle_cap_len<F, W>(

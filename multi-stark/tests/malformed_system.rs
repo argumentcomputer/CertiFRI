@@ -1,4 +1,4 @@
-//! Regression tests for audit findings IX-23 and IX-14 (multi-stark part):
+//! Regression tests for malformed systems and constraint graphs:
 //! `System` and `ConstraintGraph` have public fields (and derive
 //! `Deserialize`), so the verifier cannot assume the invariants `compile`
 //! establishes. A malformed system is refused with `InvalidSystem`, and the

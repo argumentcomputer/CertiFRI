@@ -172,11 +172,11 @@ impl<F: Field> Circuit<F> {
 
     /// Checks the structural invariants that evaluation and verification
     /// index by, which `compile` establishes but the public fields (and a
-    /// deserialized circuit) do not guarantee (audit IX-23): topological node
+    /// deserialized circuit) do not guarantee: topological node
     /// order, column, public, root and lookup indices in range, metadata
     /// consistent with the graph for extension degree `d`, and lookup
     /// expressions that read only fixed and main columns (as `compile`
-    /// requires; audit IX-14).
+    /// requires).
     pub fn check_well_formed(&self, d: usize) -> Result<(), &'static str> {
         let graph = &self.graph;
         let len = graph.nodes.len();
@@ -293,7 +293,7 @@ impl<SC: ProofConfig> System<SC> {
 
     /// [`Circuit::check_well_formed`] for every circuit, and fixed-table
     /// slots that number the circuits with a fixed table in order. The
-    /// verifier runs this before using the system (audit IX-23).
+    /// verifier runs this before using the system.
     pub fn check_well_formed(&self) -> Result<(), &'static str> {
         let d = extension_params::<SC>().degree;
         if self.preprocessed_indices.len() != self.circuits.len() {

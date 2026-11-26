@@ -57,7 +57,7 @@ batch's messages must add up to zero.
 
 ## Differences from multi-stark
 
-* **Protocol `v6` / `v6-zk` is not ported here (audit IX-27):** this verifier
+* **Protocol `v6` / `v6-zk` is not ported here:** this verifier
   ports legacy `multi-stark` at revision `3515632` (Horner FRI batching,
   quadratic `Fp^2` instantiation, plain unkeyed hashing, `shapeMessage` without
   `vk_digest`). Protocol `v6` features — multilinear tensor FRI batching

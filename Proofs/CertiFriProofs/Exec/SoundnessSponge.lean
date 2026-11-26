@@ -39,7 +39,7 @@ collision bound **`3 * N ^ 2 / (2 * Fintype.card D)`**.
   state) instantiation in the **classical** random oracle model, giving
   `N * εmax + 3 * N ^ 2 / (2 * 2 ^ 512)` (`255.71`-bit classical BCS collision
   bound, so the classical collision term stays `≤ N / (4 * 2 ^ 128)` up to
-  `N ≤ 2 ^ 128`). Note (audit IX-53): this proves **classical ROM** soundness,
+  `N ≤ 2 ^ 128`). Note: this proves **classical ROM** soundness,
   not 128-bit post-quantum soundness — QROM Fiat–Shamir and Grover search
   against FRI queries/PoW are not formalized here.
   *(Replaces legacy `BLAKE3-XOF48`/`BLAKE3-XOF64`, whose 256-bit internal `cv`
@@ -2033,7 +2033,7 @@ theorem goldilocksExt3_soundness_sponge_uniqueDecoding
 in the **classical** random oracle model (`|Digest64| = 2 ^ 512`).
 Gives `3 * N ^ 2 / (2 * 2 ^ 512)` classical BCS collision resistance (`255.71b`
 classical threshold, keeping the classical collision term `≤ N / (4 * 2 ^ 128)`
-for `N ≤ 2 ^ 128`). **Scope note (audit IX-53):** a 64-byte digest provides
+for `N ≤ 2 ^ 128`). **Scope note:** a 64-byte digest provides
 classical collision resistance in the classical ROM, **not** certified 128-bit
 post-quantum protocol soundness (QROM Fiat–Shamir and Grover search against FRI
 queries/PoW are not formalized here; the `DigestCard.lean` lemmas

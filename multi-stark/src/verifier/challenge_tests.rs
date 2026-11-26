@@ -31,6 +31,9 @@ impl Transcript for ScriptedTranscript {
     }
 }
 
+/// Verifier-only test stub PCS with unit commitments and proofs, used by
+/// `challenge_tests` to isolate Fiat-Shamir challenge ordering and constraint
+/// checks without running FRI/Merkle verification.
 struct ScriptedPcs;
 
 impl Pcs for ScriptedPcs {
@@ -78,6 +81,8 @@ impl Pcs for ScriptedPcs {
         _: &(),
         _: &mut ScriptedTranscript,
     ) -> Result<(), ()> {
+        // Test-only stub: these tests check challenge-sampling and constraint
+        // failures under a mocked PCS whose opening proof is unit `()`.
         Ok(())
     }
 }
@@ -112,6 +117,8 @@ impl ProofConfig for ScriptedConfig {
     }
 
     fn validate_commitment_cap(&self, _commit: &(), _max_log_lde_height: usize) -> bool {
+        // `ScriptedPcs::Commitment` is unit `()`, which carries no Merkle cap
+        // roots to validate in this test fixture.
         true
     }
 

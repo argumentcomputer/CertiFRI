@@ -77,7 +77,7 @@ private def rustChallenges5 : Array GoldilocksExt3 :=
     (List.range 3).all fun c =>
       wOpen.getD o 0 * wCol.getD c 0 == wJoint.getD (c + 4 * o) 0
 
--- Pinned Rust-computed weight vectors (audit IX-67), produced by
+-- Pinned Rust-computed weight vectors, produced by
 -- `multi_stark::p3_adapter::fri_batching::tensor_weights` over
 -- `CubicTrinomialExtensionField<Goldilocks>` (`X^3 - X - 1`).
 

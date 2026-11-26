@@ -190,7 +190,7 @@ type FriOpenings<F> = Vec<(usize, F)>;
 /// - At zero bits the challenger neither checks nor absorbs the witness
 ///   (`GrindingChallenger::check_witness`), so it must be zero, the value the
 ///   prover's `grind(0)` returns; otherwise a proof would carry free bytes and
-///   distinct encodings of one proof would all verify (audit IX-13).
+///   distinct encodings of one proof would all verify.
 pub(crate) fn pow_witnesses_admissible<Challenge, FriMmcs, Witness, InputProof>(
     params: &FriParameters<FriMmcs>,
     proof: &FriProof<Challenge, FriMmcs, Witness, InputProof>,

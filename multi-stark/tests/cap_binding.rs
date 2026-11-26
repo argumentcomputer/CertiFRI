@@ -1,11 +1,10 @@
-//! Regression tests for audit finding IX-3 (lanes F4-1, O7-1, Z2): with
-//! `cap_height > 0`, a Merkle cap did not bind a committed matrix shorter
-//! than the cap layer, and a prover could forge a proof of a false claim.
+//! Regression tests for Merkle cap binding: with `cap_height > 0`, a Merkle
+//! cap did not bind a committed matrix shorter than the cap layer, allowing a
+//! prover to forge a proof of a false claim.
 //!
 //! The verifier now rejects every opening of a commitment that holds such a
-//! matrix. The forged proofs in `tests/fixtures/` were produced by the audit
-//! (lane O7, job O7-3) against the unmodified verifier at CertiFRI `9543110`,
-//! which accepted them.
+//! matrix. The forged proofs in `tests/fixtures/` were produced against the
+//! unmodified verifier at `9543110`, which accepted them.
 #![cfg(not(feature = "cuda"))]
 
 use multi_stark::expr::Expr;
@@ -32,10 +31,10 @@ fn mat(h: usize, w: usize, seed: u64) -> RowMajorMatrix<Val> {
     )
 }
 
-/// MMCS level (the audit's `poc/O7/f4-1/o7_cap.rs`, inverted): commit a
-/// 64-row matrix and a short one. When the short matrix lies below the cap
-/// layer every opening is rejected, honest or tampered; otherwise honest
-/// openings verify and tampering with either matrix is rejected.
+/// MMCS level: commit a 64-row matrix and a short one. When the short matrix
+/// lies below the cap layer every opening is rejected, honest or tampered;
+/// otherwise honest openings verify and tampering with either matrix is
+/// rejected.
 fn probe<M: Mmcs<Val, Error = MerkleTreeError>>(name: &str, mk: impl Fn(usize) -> M) {
     const TALL: usize = 64;
     for cap in 0..=6usize {
@@ -123,7 +122,7 @@ fn mmcs_rejects_matrices_shorter_than_the_cap_layer() {
     probe("v6-zk-hiding", HidingSpillableMmcs::new_v6_zk);
 }
 
-// STARK level: the audit's forgery system (`poc/O7/forge/o7_forge_common.rs`).
+// STARK level forgery system.
 // Circuit A: 64 rows, `a·a = b`, no lookups. Circuit B: 2 or 4 rows,
 // `x·x = y`, pulling the claim `(77, x, y)` with multiplicity column 2.
 
@@ -194,19 +193,19 @@ fn forgery_witness(
 }
 
 #[test]
-fn audit_o7_forged_proofs_of_a_false_claim_are_rejected() {
+fn forged_cap_proofs_of_a_false_claim_are_rejected() {
     // `(77, 3, 10)` is false for circuit B: 3·3 ≠ 10.
     let false_claim = [f(CH), f(3), f(10)];
     for (cap, bytes) in [
         (
             4usize,
-            &include_bytes!("fixtures/o7-forged-cap4-rows2.bin")[..],
+            &include_bytes!("fixtures/forged-cap4-rows2.bin")[..],
         ),
-        (5, &include_bytes!("fixtures/o7-forged-cap5-rows4.bin")[..]),
+        (5, &include_bytes!("fixtures/forged-cap5-rows4.bin")[..]),
     ] {
         let (system, _) = forgery_system(cap);
         let proof = Proof::<GoldilocksBlake3V6Config>::from_bytes(bytes)
-            .expect("the audit's forged proof decodes");
+            .expect("forged fixture proof decodes");
         let result = system.verify_multiple_claims(&[&false_claim[..]], &proof);
         assert!(
             matches!(

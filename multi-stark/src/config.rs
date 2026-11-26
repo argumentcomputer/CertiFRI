@@ -130,11 +130,10 @@ pub trait ProofConfig {
     fn pcs(&self) -> &Self::Pcs;
 
     /// Protocol specification version governing transcript & hash domain
-    /// separation. Defaults to [`ProtocolVersion::V5`] for backwards
-    /// compatibility with existing configurations.
-    fn protocol_version(&self) -> ProtocolVersion {
-        ProtocolVersion::V5
-    }
+    /// separation. Required: under [`ProtocolVersion::V5`] the transcript does
+    /// not bind the constraint graphs (`vk_digest`), so a configuration must
+    /// choose it explicitly.
+    fn protocol_version(&self) -> ProtocolVersion;
 
     /// Returns `true` when zero-knowledge mode (`ProtocolVersion::V6Zk`) is
     /// enabled. Non-ZK `v5` and `v6` configurations return `false` with zero
@@ -189,12 +188,10 @@ pub trait ProofConfig {
     fn initialise_challenger(&self) -> Self::Challenger;
 
     /// Returns a fresh challenger domain-separated for `mode` (single proof
-    /// vs batch proof). Legacy `v5` configurations fall back to
-    /// [`Self::initialise_challenger`]; `v6` configurations use distinct
-    /// BLAKE3 `derive_key` contexts for `Single` and `Batch`.
-    fn initialise_challenger_for_mode(&self, _mode: TranscriptMode) -> Self::Challenger {
-        self.initialise_challenger()
-    }
+    /// vs batch proof). Legacy `v5` configurations return
+    /// [`Self::initialise_challenger`] (no separation); `v6` configurations use
+    /// distinct BLAKE3 `derive_key` contexts for `Single` and `Batch`.
+    fn initialise_challenger_for_mode(&self, mode: TranscriptMode) -> Self::Challenger;
 
     /// Largest log2 length of a committed polynomial.
     fn max_log_degree(&self) -> usize;
@@ -251,9 +248,9 @@ pub trait ProofConfig {
     /// Called by the verifier before observing any commitment into the
     /// Fiat-Shamir transcript so variable-length caps cannot collide with
     /// subsequent transcript fields or enable free challenge grinding.
-    fn validate_commitment_cap(&self, _commit: &Com<Self>, _max_log_lde_height: usize) -> bool {
-        true
-    }
+    /// Required: only a configuration whose commitments have a fixed size may
+    /// return `true` unconditionally.
+    fn validate_commitment_cap(&self, commit: &Com<Self>, max_log_lde_height: usize) -> bool;
 
     /// The stage-one trace at `index` of `data`, rebuilt on its trace domain
     /// of size `degree` from the committed low-degree extension. Host prover

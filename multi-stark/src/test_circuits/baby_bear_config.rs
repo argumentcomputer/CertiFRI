@@ -202,6 +202,14 @@ impl ProofConfig for BabyBearPoseidon2Config {
         &self.pcs
     }
 
+    fn protocol_version(&self) -> crate::config::ProtocolVersion {
+        crate::config::ProtocolVersion::V5
+    }
+
+    fn initialise_challenger_for_mode(&self, _mode: crate::config::TranscriptMode) -> Challenger {
+        self.initialise_challenger()
+    }
+
     fn initialise_challenger(&self) -> Challenger {
         let mut challenger = Challenger::new(self.perm.clone());
         for value in &self.challenger_seed {

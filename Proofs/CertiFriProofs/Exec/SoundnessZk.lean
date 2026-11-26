@@ -3,24 +3,32 @@ import CertiFriProofs.Exec.SoundnessSponge
 import CertiFriProofs.Exec.SoundnessTensor
 
 /-!
-# Formal 128-Bit Soundness of `multi-stark/v6-zk` Hiding-PCS
+# Algebraic Lemmas, Parameter Guardrails, and Horner-FRI Soundness Corollaries for `multi-stark/v6-zk`
 
-Certifies the `multi-stark/v6-zk` zero-knowledge hiding-PCS extension over
-`GoldilocksExt3` (`Fp3Model`, `p^3 ≈ 2^192`) with 64-byte RFC 7693 `BLAKE2b-512`
-(`Digest64`, true 512-bit internal state), incremental sponge chaining (`c = 3 / 2`),
-and `FriBatching::Tensor`:
+**Scope notice:** This module does **not** certify the
+`multi-stark/v6-zk` zero-knowledge hiding-PCS end-to-end, and it proves **no**
+hiding or zero-knowledge property (no HVZK simulator or transcript
+indistinguishability theorem). In particular, the executable soundness theorems
+in Section 5 (`goldilocksExt3_v6Zk_soundness_blake2b512_*`) call the non-ZK
+Horner-batching `spongeAccepts` verifier (`SoundnessSponge.lean`) conditioned
+on `ZkGuardrailsOk` parameter bounds — they do not run a salted-leaf or
+tensor-batched executable verifier, and they are proved in the **classical**
+random oracle model (not QROM).
 
-1. **Salted Merkle leaf binding & ROM soundness preservation:**
+What this module proves over `GoldilocksExt3` (`Fp3Model`, `p^3 ≈ 2^192`) and
+64-byte RFC 7693 `BLAKE2b-512` (`Digest64`):
+
+1. **Salted Merkle leaf binding & classical ROM soundness preservation:**
    * `salted_merkle_binding_of_no_collision`: 16-byte leaf salting (`Salt16`,
      `ZK_LEAF_SALT_BYTES = 16`) preserves collision-resistance Merkle binding
      identically on `(row, salt)` pairs.
-   * `salted_sponge_binding_le`: in the `SpongeCommitted` ROM with leaf domain
-     `T × Salt16`, the incremental sponge binding bound retains the exact
-     prefactor `c = 3 / 2` (`3 * N ^ 2 / (2 * |D|)`) with **zero** security
-     degradation (`255.71b` classical / `170.7b` BHT / `204.8b` CNS / `256b`
-     Grover for `Digest64`; `127.71b` classical for 32-byte `BLAKE3-256`).
-   * `v6Zk_saltedLeaf_injective_and_disjoint` (32-byte `BLAKE3-256` classical) and
-     `v6Zk_saltedLeaf_blake2b512_injective_and_disjoint` (64-byte `BLAKE2b-512` PQ):
+   * `salted_sponge_soundness_le`: in the classical `SpongeCommitted` ROM with
+     leaf domain `T × Salt16`, the incremental sponge binding bound retains the
+     exact prefactor `c = 3 / 2` (`3 * N ^ 2 / (2 * |D|)`) with **zero**
+     classical collision-bound degradation (`255.71b` classical for `Digest64`;
+     `127.71b` classical for 32-byte `BLAKE3-256`).
+   * `v6Zk_saltedLeaf_injective_and_disjoint` (32-byte `BLAKE3-256`) and
+     `v6Zk_saltedLeaf_blake2b512_injective_and_disjoint` (64-byte `BLAKE2b-512`):
      `v6-zk` salted leaves, internal 2-to-1 nodes, and transcripts are jointly
      injective and pairwise disjoint from one another, from plain, and from all
      non-ZK `v6` domains.
@@ -47,14 +55,17 @@ and `FriBatching::Tensor`:
      `≤ 2 / p^2 < 1 / 2^126` for `W_R = 4`.
    * `negControl_fp3_tensor3_span_failure_ge`: constructive negative control
      proving that `W_R = 3` (`(1, r₀, r₁)`) fails to span `Fp3Model` with
-     probability `≥ 1 / p > 1 / 2^64` (explaining why `W_R ≥ 4` is mandatory).
+     probability `≥ 1 / p > 1 / 2^64` (explaining why `W_R ≥ 4` is required for
+     randomizer span).
    * `goldilocksExt3_zk_tensor2DMCA_ud_128`: merging `W_R` base-field randomizer
      columns of degree `< 2N` into the quotient MMCS and batching via
      `FriBatching::Tensor` preserves unconditional `≤ (3 / 4) / 2 ^ 128`
      RS proximity (`Tensor2DMCA`).
    * `goldilocksExt3_v6Zk_soundness_blake2b512_ud_128` &
      `goldilocksExt3_v6Zk_soundness_blake2b512_johnson_*`: literal `≤ N / 2 ^ 128`
-     executable `Fri.verify` soundness for `v6-zk` under 64B RFC 7693 `BLAKE2b-512`.
+     classical-ROM soundness corollaries for the Horner-batching `spongeAccepts`
+     verifier (`SoundnessSponge.lean`) conditioned on `ZkGuardrailsOk` parameter
+     bounds under 64-byte `Digest64`.
 
 4. **Checked predicates & constructive negative controls for all 4 `v6-zk` guardrails:**
    * Trap 1: `N ≥ next_pow2(2Q + 2D)` (`minZkLogDegree`),
@@ -896,19 +907,16 @@ theorem negControl_zk_trap4_v6_domain_rejected :
   have h4 := h.2.2.2.2.2.1
   cases h4
 
-/-! ## Section 5: Executable `v6-zk` Literal `≤ N / 2 ^ 128` Soundness (UD & Johnson) -/
+/-! ## Section 5: Horner-FRI (`spongeAccepts`) Literal `≤ N / 2 ^ 128` Soundness Corollaries under `ZkGuardrailsOk` -/
 
-/-- **Executable `multi-stark/v6-zk` 128-Bit Unconditional UD Soundness (`≤ N / 2 ^ 128`):**
-for any valid `v6-zk` configuration (`ZkGuardrailsOk cfg`) with
-`(logBlowup = 2, numQueries = 160, queryPowBits = 20)` over `GoldilocksExt3`
-using 64-byte RFC 7693 `BLAKE2b-512` (`Digest64`, true 512-bit internal state),
-incremental sponge chaining (`c = 3 / 2`), salted Merkle leaves (`Salt16` under
-`zkMerkleLeaf`), 2× odd-coset blinding, and `W_R ≥ 4` randomizer columns merged
-into the quotient claim shape:
-1. Executable `Fri.verify` soundness error is literally `≤ N / 2 ^ 128` for all `N ≤ 2 ^ 128`;
-2. Concrete PQ collision security is `170.7b` BHT (`+42.7b` headroom above 128b),
-   `204.8b` CNS, and `256b` Grover preimage;
-3. All `v6-zk` domains are strictly separated from non-ZK `v6` and `plain`. -/
+/-- **Horner-FRI (`spongeAccepts`) 128-bit classical-ROM UD soundness corollary
+(`≤ N / 2 ^ 128`) conditioned on `ZkGuardrailsOk cfg`:**
+given `(logBlowup = 2, numQueries = 160, queryPowBits = 20)` over `GoldilocksExt3`
+and 64-byte `Digest64` (`|D| = 2 ^ 512`), delegates directly to
+`goldilocksExt3_soundness_sponge_blake2b512_uniqueDecoding_128` for the non-ZK
+Horner-batching `spongeAccepts` verifier in the classical ROM. Does **not**
+verify salted leaves or tensor batching, and proves **no** hiding or
+zero-knowledge property (nor QROM soundness). -/
 theorem goldilocksExt3_v6Zk_soundness_blake2b512_ud_128
     (cfg : ZkConfig) (hcfg : ZkGuardrailsOk cfg)
     (params : FriParams) (shape : ClaimShape)
@@ -947,9 +955,11 @@ theorem goldilocksExt3_v6Zk_soundness_blake2b512_ud_128
     (hbl.trans hbl2) (hqn.trans hqn160) hqpow (hmax.trans hcfg.2.1) hheight hclaims s₀
     hadv hN attempt
 
-/-- **Executable `multi-stark/v6-zk` 128-Bit Johnson Soundness (`≤ N / 2 ^ 128`):**
-same 64-byte RFC 7693 `BLAKE2b-512` `v6-zk` hiding-PCS soundness theorem in the
-Johnson regime `(logBlowup = 2, numQueries ≥ 118, queryPowBits = 20)` under `CurveListCA`. -/
+/-- **Horner-FRI (`spongeAccepts`) 128-bit classical-ROM Johnson soundness corollary
+(`≤ N / 2 ^ 128`) conditioned on `ZkGuardrailsOk cfg`:**
+delegates to `goldilocksExt3_soundness_sponge_blake2b512_johnson_128` in the
+Johnson regime `(logBlowup = 2, numQueries ≥ 118, queryPowBits = 20)` under
+`CurveListCA`. Proves no hiding/ZK property. -/
 theorem goldilocksExt3_v6Zk_soundness_blake2b512_johnson_128
     (cfg : ZkConfig) (hcfg : ZkGuardrailsOk cfg)
     (params : FriParams) (shape : ClaimShape)
@@ -996,11 +1006,12 @@ theorem goldilocksExt3_v6Zk_soundness_blake2b512_johnson_128
     (hbl.trans hbl2) (hqn.symm ▸ hqn118) hqpow (hmax.trans hcfg.2.1) hheight s₀
     hca hcT0 hT hα_budget hβ_budget hadv hN attempt
 
-/-- **100% UNCONDITIONAL `multi-stark/v6-zk` 128-Bit Johnson Soundness (`lb = 2, q ≥ 128`):**
-ZERO `CurveListCA` hypothesis! Literal `≤ N / 2 ^ 128` executable `Fri.verify` soundness
-for `v6-zk` at `θ = 71 / 128` (`logBlowup = 2, numQueries ≥ 128, queryPowBits = 20`)
-under 64B RFC 7693 `BLAKE2b-512` (`Digest64`), incremental sponge chaining (`c = 3 / 2`),
-and `ZkGuardrailsOk cfg`. -/
+/-- **Unconditional Horner-FRI (`spongeAccepts`) 128-bit classical-ROM Johnson
+soundness corollary (`lb = 2, q ≥ 128`) conditioned on `ZkGuardrailsOk cfg`:**
+ZERO `CurveListCA` hypothesis; delegates to
+`goldilocksExt3_soundness_sponge_blake2b512_johnson_128_unconditional` at
+`θ = 71 / 128` (`logBlowup = 2, numQueries ≥ 128, queryPowBits = 20`, `Digest64`).
+Proves no hiding/ZK property. -/
 theorem goldilocksExt3_v6Zk_soundness_blake2b512_johnson_128_unconditional
     (cfg : ZkConfig) (hcfg : ZkGuardrailsOk cfg)
     (params : FriParams) (shape : ClaimShape)
@@ -1039,9 +1050,12 @@ theorem goldilocksExt3_v6Zk_soundness_blake2b512_johnson_128_unconditional
     (hbl.trans hbl2) (hqn.symm ▸ hqn128) hqpow (hmax.trans hcfg.2.1) hheight hclaims s₀
     hadv hN attempt
 
-/-- **100% UNCONDITIONAL `multi-stark/v6-zk` Native STARK Shrinker Johnson Soundness
-(`lb = 3, q ≥ 78, queryPow = 20`, `BLAKE2b-512`):**
-ZERO `CurveListCA` hypothesis! Literal `≤ N / 2 ^ 128` at `θ = 19 / 50`. -/
+/-- **Unconditional Horner-FRI (`spongeAccepts`) 128-bit classical-ROM Johnson
+soundness corollary (`lb = 3, q ≥ 78, queryPow = 20`, `Digest64`) conditioned on
+`ZkGuardrailsOk cfg`:**
+ZERO `CurveListCA` hypothesis; delegates to
+`goldilocksExt3_soundness_sponge_blake2b512_johnson_lb3_78_128_unconditional` at
+`θ = 19 / 50`. Proves no hiding/ZK property. -/
 theorem goldilocksExt3_v6Zk_soundness_blake2b512_johnson_lb3_78_128_unconditional
     (cfg : ZkConfig) (hcfg : ZkGuardrailsOk cfg)
     (params : FriParams) (shape : ClaimShape)
@@ -1080,9 +1094,12 @@ theorem goldilocksExt3_v6Zk_soundness_blake2b512_johnson_lb3_78_128_unconditiona
   exact goldilocksExt3_soundness_sponge_blake2b512_johnson_lb3_78_128_unconditional params shape
     (hbl.trans hbl3) (hqn.symm ▸ hqn78) hqpow hmax hheight hclaims s₀ hadv hN attempt
 
-/-- **100% UNCONDITIONAL `multi-stark/v6-zk` Native STARK Shrinker Johnson Soundness
-(`lb = 4, q ≥ 58, queryPow = 20`, `BLAKE2b-512`):**
-ZERO `CurveListCA` hypothesis! Literal `≤ N / 2 ^ 128` at `θ = 35 / 128`. -/
+/-- **Unconditional Horner-FRI (`spongeAccepts`) 128-bit classical-ROM Johnson
+soundness corollary (`lb = 4, q ≥ 58, queryPow = 20`, `Digest64`) conditioned on
+`ZkGuardrailsOk cfg`:**
+ZERO `CurveListCA` hypothesis; delegates to
+`goldilocksExt3_soundness_sponge_blake2b512_johnson_lb4_58_128_unconditional` at
+`θ = 35 / 128`. Proves no hiding/ZK property. -/
 theorem goldilocksExt3_v6Zk_soundness_blake2b512_johnson_lb4_58_128_unconditional
     (cfg : ZkConfig) (hcfg : ZkGuardrailsOk cfg)
     (params : FriParams) (shape : ClaimShape)

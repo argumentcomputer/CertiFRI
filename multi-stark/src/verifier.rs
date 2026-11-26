@@ -100,6 +100,9 @@
 //! The accumulator-based lookup argument uses two random challenges (β, γ) to
 //! compress lookup messages into field elements. For each lookup interaction, the
 //! message `m = β + fingerprint(γ, args)` is affine in β and polynomial in γ.
+//! The fingerprint does not encode the length of `args`, so messages are
+//! compared up to trailing zeros (`[a]`, `[a, 0]` are one message); an
+//! application that needs distinct lengths must fix the arity by a tag.
 //! If the multiset of "pushed" values differs from the multiset of
 //! "pulled" values, the running accumulator `Σ multiplicity_i / m_i` is a nonzero
 //! rational function of the challenges. By Schwartz-Zippel (applied to the
@@ -679,6 +682,10 @@ impl<SC: ProofConfig> System<SC> {
             num_circuits,
             "system has no circuits"
         );
+        if let Err(reason) = self.check_well_formed() {
+            tracing::debug!(reason, "malformed system");
+            return Err(VerificationError::InvalidSystem);
+        }
         if is_zk {
             crate::ensure!(
                 self.config.zk_randomizer_width() >= crate::p3_adapter::zk::ZK_RANDOMIZER_WIDTH

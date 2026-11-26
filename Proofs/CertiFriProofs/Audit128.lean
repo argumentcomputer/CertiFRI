@@ -13,20 +13,25 @@ Mechanically pins (via `#guard_msgs` on `#check` and `#print axioms`) the
 1. **Production 128-bit classical instantiation:** native BLAKE3 `derive_key`
    alignment with `multi-stark` `v6`/`v6-zk` and 32-byte `BLAKE3-256` (`Digest`,
    `2^256`, `127.71b` classical BCS `c = 3 / 2`).
-2. **Certified 128-bit post-quantum instantiation:** pure-Lean RFC 7693
-   `BLAKE2b-512` (`Digest64`, `8 × UInt64`, true 512-bit internal state,
-   128-byte block = 1-block 2-to-1 compression) with kernel-checked RFC 7693
-   KATs, 16-byte `personal` domain separation (`Blake2b512Domain`), `255.71b`
-   classical BCS collision resistance (`c = 3 / 2`), `170.7b` BHT quantum
-   collision resistance (`+42.7b` headroom above 128b: `Q ≤ 2^128 → Q^3/2^512 ≤ 1/2^128`),
-   `204.8b` CNS quantum collision resistance, and `256b` Grover preimage.
+2. **64-byte RFC 7693 `BLAKE2b-512` classical-ROM instantiation:** pure-Lean
+   `BLAKE2b-512` (`Digest64`, `8 × UInt64`, 512-bit internal state, 128-byte
+   block = 1-block 2-to-1 compression) with kernel-checked RFC 7693 KATs,
+   16-byte `personal` domain separation (`Blake2b512Domain`), `255.71b`
+   classical BCS collision resistance (`c = 3 / 2`, keeping the classical
+   collision term `≤ N / (4 * 2 ^ 128)` for `N ≤ 2 ^ 128`), plus arithmetic
+   cardinality-ratio inequalities (`DigestCard.lean`). *Note:*
+   all soundness proofs are in the **classical** ROM and do not certify 128-bit
+   post-quantum protocol soundness (QROM Fiat–Shamir and Grover search on FRI
+   queries/PoW are not formalized).
    *(Replaces legacy `BLAKE3-XOF48`/`BLAKE3-XOF64`, whose 256-bit internal `cv`
-   caps concrete BHT collision resistance at `85.3b` on every `> 64`-byte input.)*
-3. Executable `Fri.verify` literal `≤ N / 2 ^ 128` soundness over
-   `GoldilocksExt3` (`Fp3Model`, `p^3 ≈ 2^192`) with `BLAKE2b-512` (`Digest64`) for:
+   limits generic hash-output cardinality.)*
+3. Executable Horner-FRI (`spongeAccepts`) literal `≤ N / 2 ^ 128` classical-ROM
+   soundness over `GoldilocksExt3` (`Fp3Model`, `p^3 ≈ 2^192`) with `Digest64` for:
    * Unconditional unique decoding `(logBlowup = 2, numQueries = 160, queryPowBits = 20)`;
-   * 100% unconditional Johnson regime (`lb = 2, 3, 4`, zero `CurveListCA` hypothesis)
-     for both `v6` and `v6-zk`.
+   * 100% unconditional Johnson regime (`lb = 2, 3, 4`, zero `CurveListCA` hypothesis),
+     together with `ZkGuardrailsOk`-conditioned Horner-FRI corollaries in
+     `SoundnessZk.lean` (note: `SoundnessZk.lean` proves no hiding/ZK property
+     and does not run a salted-leaf or tensor-batched executable verifier).
 4. `FriBatching::Tensor` (`col_weights ⊗ open_weights`) executable refinement
    and unconditional `Tensor2DMCA` soundness (`≤ (3 / 4) / 2 ^ 128` for up to
    `2 ^ 16 × 2 ^ 16 = 2 ^ 32` claims over `GoldilocksExt3`).
@@ -432,7 +437,7 @@ info: 'CertiFri.Audit128.negControl_digest32_fails_bht_at_86' depends on axioms:
 #guard_msgs in
 #print axioms negControl_digest32_fails_bht_at_86
 
-/-! ## `multi-stark/v6-zk` Hiding-PCS Audit (`#guard_msgs` + `#print axioms`) -/
+/-! ## `multi-stark/v6-zk` Lemmas, Guardrails & Horner-FRI Soundness Corollaries Audit (`#guard_msgs` + `#print axioms`) -/
 
 /-- info: v6ZkMerkleLeafKey_eq : Blake3.deriveContextKey v6ZkMerkleLeafContext = v6ZkMerkleLeafKey -/
 #guard_msgs in

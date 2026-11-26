@@ -29,8 +29,16 @@ the item matters.
   "Differences from multi-stark"): the two `omit_*` options are off, the
   opening proof folds by two only, and the theorems are stated for one Merkle
   path per query (a pruned proof of Plonky3 is unpacked and then checked,
-  `P3.prunedMmcs_accepts`). The production configuration is inside the
-  restriction; another configuration would not be.
+  `P3.prunedMmcs_accepts`). The configuration ix ships is outside the
+  restriction: multi-stark v6 batches the opening claims with tensor weights
+  (`FriBatching::Tensor`, which ix's keys require), while the port and every
+  theorem here batch by powers of one challenge; v6 also absorbs the extension
+  degree, a modulus tag and the verifying-key digest into its transcript and
+  works over the cubic extension of Goldilocks, for which there is no
+  `StarkModel`. No theorem here covers a v6 proof. `CertiFri/TensorBatching.lean`
+  and `Exec/SoundnessTensor.lean` hold the tensor weights and a proximity
+  property of them (`Tensor2DMCA`), which no verifier and no soundness theorem
+  uses.
 - [ ] **There is no decoder for multi-stark's proof format.** The tests read
   proofs from JSON files written by Rust programs of this repository
   (`CertiFriTest/vectors`). Running the Lean verifier on production proofs
@@ -66,13 +74,19 @@ The rest of this section can be proved.
   determines the messages (the encoding of the transcript is injective for the
   model's messages, `Exec/Stark/Encode.lean`, but not proved for the bytes).
 - [ ] **BLAKE3** (`CertiFriP3/Blake3.lean`) is tested against reference
-  vectors. There is no specification of BLAKE3 in Lean to prove it against.
+  vectors here. ix proves the plain hash equal to the specification
+  `Blake3.Pure.digest` (`blake3_eq_pure`, ix's
+  `Ix/Cert/MultiStark/Blake3Parity.lean`). The keyed `derive_key` modes that
+  multi-stark v6 hashes with (`CertiFriP3/DomainSep.lean`) have no such
+  theorem: their context keys are kernel-checked, and they are tested against
+  vectors.
 
 ## 3. The statement of soundness
 
-- [ ] **The proved error is for the unique-decoding radius.** The production
-  parameters (blowup 4, 100 queries, 20 proof-of-work bits) are chosen for the
-  conjectured security of FRI; inside the unique-decoding radius the proved
+- [ ] **The proved error is for the unique-decoding radius.** The parameters
+  of multi-stark's v5 configuration (blowup 4, 100 queries, 20 proof-of-work
+  bits; ix's v6 default has 128 queries) are chosen for the conjectured
+  security of FRI; inside the unique-decoding radius the proved
   query error is about `2 ^ -88`, and the batching error is larger (README,
   "What is proved"). For the opening
   proof alone, a larger radius can be supplied as a hypothesis about
@@ -160,4 +174,7 @@ the generators of the two-adic subgroups are primitive roots.
 - [ ] **The verifier written in Aiur** is a third copy of the multi-stark
   verifier. It is out of scope by decision.
 - **Zero knowledge** is out of scope by decision: the protocol is not
-  zero-knowledge.
+  zero-knowledge. multi-stark's v6-zk mode is not modelled: no theorem here
+  states hiding, and the `…_v6Zk_soundness_…` theorems of
+  `Exec/SoundnessZk.lean` are the soundness theorems of the unsalted,
+  Horner-batched `Fri.verify`.

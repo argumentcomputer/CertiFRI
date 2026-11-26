@@ -6,9 +6,17 @@ Only the verifier is certified. The prover is an ordinary Rust program.
 The protocol is Plonky3's `TwoAdicFriPcs` at revision `3152b14a`, the revision
 the Rust prover pins, with folding by two. The theorems are about the
 commitment scheme and about the verifier of the STARK built on it, multi-stark
-(`CertiFri/Stark/`): see
+in its v5 protocol (`CertiFri/Stark/`): see
 [The multi-stark verifier](#the-multi-stark-verifier). The protocol is not
 zero-knowledge.
+
+No theorem here covers the protocol ix ships, multi-stark v6. v6 batches the
+opening claims with tensor weights (`FriBatching::Tensor`, which ix's keys
+require), while `Fri.verify` and the port batch by powers of one challenge; its
+transcript also absorbs the extension degree, a modulus tag and the
+verifying-key digest, which the port's does not; and it works over the cubic
+extension of Goldilocks, while the STARK theorems are stated over the
+quadratic one. See [TODO.md](TODO.md), section 1.
 
 ## Status
 
@@ -39,8 +47,8 @@ zero-knowledge.
   BN254; see [The fields](#the-fields).
 - **The multi-stark verifier** (`Stark.verify`, `Stark.verifyBatch` in
   `CertiFri/Stark/`) is a port of the STARK verifier that runs on this
-  commitment scheme. It accepts proofs made by multi-stark and derives the
-  same challenges (`CertiFriTest/Stark/MultiStark.lean`). **It is proved
+  commitment scheme, in multi-stark's v5 protocol. It accepts proofs made by
+  multi-stark in that protocol and derives the same challenges (`CertiFriTest/Stark/MultiStark.lean`). **It is proved
   sound** in the random-oracle model (`Exec.Stark.soundness_verify_ud`,
   `Exec.Stark.soundness_verifyBatch_ud`): except with small probability, an
   accepted proof has committed columns that decode to base-field traces which
@@ -219,7 +227,8 @@ evaluation of the final polynomial (`Proofs/CertiFriProofs/Poly.lean`).
 - An efficient extractor, binding for two openings of different shapes, and
   knowledge soundness or binding for columns on cosets too small for the
   margin above.
-- Zero knowledge. The protocol is not zero-knowledge.
+- Zero knowledge. The protocol is not zero-knowledge, and multi-stark's
+  v6-zk mode is not modelled.
 - That the verifier accepts exactly what Plonky3's accepts. The tests compare
   the two on a few proofs.
 - The honest degree bound: an accepted claim is about a polynomial of degree at
@@ -232,7 +241,10 @@ evaluation of the final polynomial (`Proofs/CertiFriProofs/Poly.lean`).
 `CertiFri/Stark/` is a port of the verifier of
 [multi-stark](https://github.com/argumentcomputer/multi-stark) at revision
 `3515632`: a STARK for systems of several circuits connected by lookups, over
-Plonky3's FRI. That revision is the crate `multi-stark/` of this repository.
+Plonky3's FRI. That revision was imported as the crate `multi-stark/` of this
+repository; the crate has since gained the v6 and v6-zk protocols
+(`ProtocolVersion` in `multi-stark/src/config.rs`), which the port does not
+implement.
 
 ```lean
 Stark.verify      inputMmcs friMmcs chal init sys claims proof : Bool   -- System::verify_multiple_claims
@@ -444,8 +456,9 @@ They run as part of the build: a failing `#guard` fails the build.
 - `CertiFriTest/Merkle.lean`: the Merkle tree layout against openings produced
   by Plonky3.
 - `CertiFriTest/Stark/MultiStark.lean`: `Stark.verify` on three proofs and
-  `Stark.verifyBatch` on a batch of two shards, all made by multi-stark in its
-  production configuration (`CertiFriTest/vectors/stark`, a Rust program that
+  `Stark.verifyBatch` on a batch of two shards, all made by multi-stark at
+  revision `3515632` in its v5 configuration, `GoldilocksBlake3Config`
+  (`CertiFriTest/vectors/stark`, a Rust program that
   also checks each proof with multi-stark's verifier). Between them the
   systems have circuits of different heights, fixed traces, an inactive
   circuit with and without a fixed trace, lookups in groups, extension
@@ -488,7 +501,7 @@ claimed value; Plonky3 inverts one per opening point, in a batch.
 | `CertiFriP3/` | The Plonky3 instantiation: the fields (Goldilocks, BabyBear, the scalar field of BN254, and extensions), BLAKE3, the challenger, pruned Merkle proofs. The fields are proved in `Proofs/CertiFriProofs/P3/`; the rest is tested. |
 | `CertiFriTest/` | Executable checks against reference code and against Plonky3, and the generators of their vectors. |
 | `Proofs/` | A separate Lake package that depends on Mathlib and on `CertiFri`: the security theory, and the refinement of the executable verifier to it. |
-| `multi-stark/` | The Rust crate multi-stark, prover and verifier, with its CPU and CUDA backends: revision `3515632` of `argumentcomputer/multi-stark`, imported with its history. Its license files are in the directory. The STARK test vectors are made with it. |
+| `multi-stark/` | The Rust crate multi-stark, prover and verifier, with its CPU and CUDA backends: revision `3515632` of `argumentcomputer/multi-stark`, imported with its history, and since extended with the v6 and v6-zk protocols. Its license files are in the directory. The STARK test vectors are made with its v5 configuration. |
 | `plonky3/` | Submodule: Plonky3 at `3152b14a`, the revision multi-stark builds on. The generator of the field vectors (`CertiFriTest/vectors/fields`) builds from it. |
 
 Mathlib is confined to `Proofs/` so that a project can depend on the verifier

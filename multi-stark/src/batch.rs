@@ -338,6 +338,10 @@ impl<SC: StarkGenericConfig> System<SC> {
             VerificationError::InvalidSystem;
             "system has no circuits"
         );
+        if let Err(reason) = self.check_well_formed() {
+            tracing::debug!(reason, "malformed system");
+            return Err(VerificationError::InvalidSystem);
+        }
         if is_zk {
             ensure!(
                 self.config.zk_randomizer_width() >= crate::p3_adapter::zk::ZK_RANDOMIZER_WIDTH
@@ -562,6 +566,11 @@ impl<SC: StarkGenericConfig> System<SC> {
 
     /// Verifies a batch: header/proof agreement, every shard under the shared
     /// challenges, and the residual sum against the preamble's messages.
+    ///
+    /// The claims and messages are read from `batch.preamble`, i.e. from the
+    /// proof: an accepted batch proves only the statement its preamble states.
+    /// The caller must compare the headers' claims (and the messages) with the
+    /// ones it expects.
     pub fn verify_batch(
         &self,
         batch: &BatchProof<SC>,

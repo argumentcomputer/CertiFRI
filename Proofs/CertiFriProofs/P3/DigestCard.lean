@@ -15,24 +15,30 @@ import CertiFriP3.Digest
 
 This module equips `CertiFri.P3.Digest` (`8 × UInt32` = 256 bits, production
 128-bit **classical** `BLAKE3-256`), `CertiFri.P3.Digest64` (`8 × UInt64` = 512
-bits, certified 128-bit **post-quantum** RFC 7693 `BLAKE2b-512`), and legacy
-`CertiFri.P3.Digest48` with `Fintype` instances and proves their exact
-cardinalities in Lean's kernel:
+bits, 64-byte RFC 7693 `BLAKE2b-512`), and legacy `CertiFri.P3.Digest48` with
+`Fintype` instances and proves their exact cardinalities in Lean's kernel:
 
 * `card_digest : Fintype.card Digest = 2 ^ 256`
 * `card_digest64 : Fintype.card Digest64 = 2 ^ 512`
 * `card_digest48 : Fintype.card Digest48 = 2 ^ 384` *(ROM-only legacy; retired
-  for concrete PQ because `BLAKE3-XOF48`/`BLAKE3-XOF64` retain a 256-bit
-  internal chaining value `cv` capping concrete BHT at `85.3` bits!)*
+  because `BLAKE3-XOF48`/`BLAKE3-XOF64` retain a 256-bit internal chaining
+  value `cv`.)*
 
-For RFC 7693 `BLAKE2b-512` (`Digest64`, true 512-bit internal state), it proves:
-* Classical BCS collision bound (`c = 3 / 2`): `≤ 3 / 8` up to `N ≤ 2 ^ 255`
+**Scope note:** A 64-byte (`2 ^ 512`) digest gives classical BCS
+collision resistance (`3 * N ^ 2 / (2 * 2 ^ 512)`) in the classical ROM, **not**
+certified 128-bit post-quantum soundness for the STARK/FRI protocol (Grover
+search against FRI queries/PoW and QROM Fiat–Shamir are not formalized here).
+
+For `Digest64` (`|Digest64| = 2 ^ 512`), this module proves the following
+arithmetic cardinality inequalities:
+* Classical BCS collision term (`c = 3 / 2`): `≤ 3 / 8` up to `N ≤ 2 ^ 255`
   (`255.71b` threshold) and `≤ N / (4 * 2 ^ 128)` for all `N ≤ 2 ^ 128`;
-* BHT quantum collision bound (`Q ^ 3 / 2 ^ 512`): `≤ 1 / 2 ^ 128` at
-  `Q ≤ 2 ^ 128` (`+42.7b` headroom!) and `≤ 1 / 4` at `Q ≤ 2 ^ 170` (`170.7b`);
-* CNS quantum collision bound (`Q ^ 5 / (2 ^ 512) ^ 2`): `≤ 1 / 16` at
-  `Q ≤ 2 ^ 204` (`204.8b`);
-* Grover quantum preimage bound (`Q ^ 2 / 2 ^ 512 = (Q / 2 ^ 256) ^ 2`, `256b`).
+* Arithmetic ratio `Q ^ 3 / 2 ^ 512` (the generic BHT collision formula):
+  `≤ 1 / 2 ^ 128` at `Q ≤ 2 ^ 128` and `≤ 1 / 4` at `Q ≤ 2 ^ 170`;
+* Arithmetic ratio `Q ^ 5 / (2 ^ 512) ^ 2` (the generic CNS collision formula):
+  `≤ 1 / 16` at `Q ≤ 2 ^ 204`;
+* Arithmetic identity `Q ^ 2 / 2 ^ 512 = (Q / 2 ^ 256) ^ 2` (generic Grover
+  preimage formula on a 512-bit output space, not a protocol-level QROM bound).
 -/
 
 namespace CertiFri.P3
@@ -124,7 +130,8 @@ noncomputable instance : Fintype Digest64 :=
 instance : Nonempty Digest64 := ⟨default⟩
 
 /-- Exact cardinality of 64-byte RFC 7693 `BLAKE2b-512` digests: `2 ^ 512`
-(certified 128-bit post-quantum instantiation with true 512-bit internal state). -/
+(512-bit digest space for classical BCS collision bounds; does not by itself
+certify 128-bit post-quantum protocol soundness). -/
 theorem card_digest64 : Fintype.card Digest64 = 2 ^ 512 := by
   rw [Fintype.card_congr digest64EquivFun, Fintype.card_fun, Fintype.card_fin, card_uint64,
     ← pow_mul]
@@ -209,7 +216,7 @@ theorem digest_bht_quantum_collision_fails_at_86 :
   rw [h258, mul_div_cancel_right₀ _ hpos.ne']
   norm_num
 
-/-! ## Certified 128-bit post-quantum (`Digest64`, RFC 7693 `BLAKE2b-512`) bounds -/
+/-! ## 64-byte digest (`Digest64`, RFC 7693 `BLAKE2b-512`) classical collision and cardinality-ratio bounds -/
 
 /-- For 64-byte RFC 7693 `BLAKE2b-512` (`Digest64`, true 512-bit internal state)
 under incremental sponge chaining (`c = 3 / 2`), the classical collision bound
@@ -255,8 +262,11 @@ theorem digest64_sponge_collision_le_quarter_128 {N : ℕ} (hN : N ≤ 2 ^ 128) 
     _ ≤ (N : ℝ) * (1 / (4 * (2 : ℝ) ^ 128)) := mul_le_mul_of_nonneg_left hstep hN0
     _ = (N : ℝ) / (4 * (2 : ℝ) ^ 128) := by ring
 
-/-- **BHT / Zhandry QROM collision bound at `Q ≤ 2 ^ 128` for `BLAKE2b-512` (`Digest64`):**
-`Q ^ 3 / 2 ^ 512 ≤ 1 / 2 ^ 128` (`+42.7` bits headroom above 128-bit PQ!). -/
+/-- Arithmetic inequality on the generic BHT collision-ratio expression for a
+512-bit digest space (`|Digest64| = 2 ^ 512`): `Q ^ 3 / 2 ^ 512 ≤ 1 / 2 ^ 128`
+when `Q ≤ 2 ^ 128`. This is a pure cardinality-ratio inequality, **not** a QROM
+security proof and **not** a 128-bit post-quantum protocol certificate (Grover
+search against FRI queries/PoW is unaffected by digest width). -/
 theorem digest64_bht_quantum_collision_at_128 {Q : ℕ} (hQ : Q ≤ 2 ^ 128) :
     (Q : ℝ) ^ 3 / Fintype.card Digest64 ≤ 1 / (2 : ℝ) ^ 128 := by
   rw [card_digest64, Nat.cast_pow, Nat.cast_ofNat]
@@ -271,9 +281,9 @@ theorem digest64_bht_quantum_collision_at_128 {Q : ℕ} (hQ : Q ≤ 2 ^ 128) :
     _ = ((2 : ℝ) ^ 128) ^ 3 / (((2 : ℝ) ^ 128) ^ 3 * (2 : ℝ) ^ 128) := by rw [h512]
     _ = 1 / (2 : ℝ) ^ 128 := by field_simp
 
-/-- **BHT / Zhandry QROM collision threshold for `BLAKE2b-512` (`Digest64`):**
-for all `Q ≤ 2 ^ 170`, `Q ^ 3 / 2 ^ 512 ≤ 1 / 4 < 1` (**`170.7` bits** BHT quantum
-collision resistance: `2 ^ (512 / 3) ≈ 2 ^ 170.67`). -/
+/-- Arithmetic inequality on the generic BHT collision-ratio expression for
+`|Digest64| = 2 ^ 512`: for all `Q ≤ 2 ^ 170`, `Q ^ 3 / 2 ^ 512 ≤ 1 / 4 < 1`
+(a pure arithmetic ratio bound, not a QROM proof). -/
 theorem digest64_bht_quantum_collision_at_170 {Q : ℕ} (hQ : Q ≤ 2 ^ 170) :
     (Q : ℝ) ^ 3 / Fintype.card Digest64 ≤ 1 / 4 := by
   rw [card_digest64, Nat.cast_pow, Nat.cast_ofNat]
@@ -288,9 +298,9 @@ theorem digest64_bht_quantum_collision_at_170 {Q : ℕ} (hQ : Q ≤ 2 ^ 170) :
     _ = ((2 : ℝ) ^ 170) ^ 3 / (4 * ((2 : ℝ) ^ 170) ^ 3) := by rw [h512]
     _ = 1 / 4 := by field_simp
 
-/-- **CNS (non-qRAM) quantum collision threshold for `BLAKE2b-512` (`Digest64`):**
-for all `Q ≤ 2 ^ 204`, `Q ^ 5 / (2 ^ 512) ^ 2 ≤ 1 / 16 < 1` (**`204.8` bits** CNS
-quantum collision resistance: `2 ^ (2 * 512 / 5) = 2 ^ 204.8`). -/
+/-- Arithmetic inequality on the generic CNS (non-qRAM) collision-ratio
+expression for `|Digest64| = 2 ^ 512`: for all `Q ≤ 2 ^ 204`,
+`Q ^ 5 / (2 ^ 512) ^ 2 ≤ 1 / 16 < 1` (pure arithmetic, not a QROM proof). -/
 theorem digest64_cns_quantum_collision_at_204 {Q : ℕ} (hQ : Q ≤ 2 ^ 204) :
     (Q : ℝ) ^ 5 / (Fintype.card Digest64 : ℝ) ^ 2 ≤ 1 / 16 := by
   rw [card_digest64, Nat.cast_pow, Nat.cast_ofNat]
@@ -305,15 +315,16 @@ theorem digest64_cns_quantum_collision_at_204 {Q : ℕ} (hQ : Q ≤ 2 ^ 204) :
     _ = ((2 : ℝ) ^ 204) ^ 5 / (16 * ((2 : ℝ) ^ 204) ^ 5) := by rw [h1024]
     _ = 1 / 16 := by field_simp
 
-/-- **Grover quantum preimage bound for `BLAKE2b-512` (`Digest64`):**
-`Q ^ 2 / |Digest64| = (Q / 2 ^ 256) ^ 2` (**`256` bits** Grover preimage security). -/
+/-- Arithmetic identity for the generic Grover preimage ratio on a 512-bit
+digest space: `Q ^ 2 / |Digest64| = (Q / 2 ^ 256) ^ 2` (pure arithmetic on
+hash output cardinality; does not bound Grover attacks on FRI queries/PoW). -/
 theorem digest64_grover_preimage (Q : ℕ) :
     (Q : ℝ) ^ 2 / Fintype.card Digest64 = ((Q : ℝ) / 2 ^ 256) ^ 2 := by
   rw [card_digest64, Nat.cast_pow, Nat.cast_ofNat]
   have h512 : (2 : ℝ) ^ 512 = ((2 : ℝ) ^ 256) ^ 2 := by rw [← pow_mul]
   rw [h512, div_pow]
 
-/-- `BLAKE2b-512` Grover quantum preimage bound stays `≤ 1` for all `Q ≤ 2 ^ 256`. -/
+/-- Arithmetic corollary: `Q ^ 2 / |Digest64| ≤ 1` for all `Q ≤ 2 ^ 256`. -/
 theorem digest64_grover_preimage_le_one {Q : ℕ} (hQ : Q ≤ 2 ^ 256) :
     (Q : ℝ) ^ 2 / Fintype.card Digest64 ≤ 1 := by
   rw [digest64_grover_preimage]

@@ -35,12 +35,15 @@ collision bound **`3 * N ^ 2 / (2 * Fintype.card D)`**.
   incremental sponge bound `N * εmax + 3 * N ^ 2 / (2 * 2 ^ 256)` (`127.71`-bit
   classical BCS collision bound, improving over `126.52` bits with zero prover cost).
 * `CertiFri.P3.Exec.goldilocksExt3_soundness_sponge_blake2b512_uniqueDecoding`:
-  certified 128-bit **post-quantum** 64-byte RFC 7693 `BLAKE2b-512` (`Digest64`,
-  `|D| = 2 ^ 512`, true 512-bit internal state) bound
+  64-byte RFC 7693 `BLAKE2b-512` (`Digest64`, `|D| = 2 ^ 512`, 512-bit internal
+  state) instantiation in the **classical** random oracle model, giving
   `N * εmax + 3 * N ^ 2 / (2 * 2 ^ 512)` (`255.71`-bit classical BCS collision
-  bound; `170.7b` BHT / `204.8b` CNS / `256b` Grover via `DigestCard.lean`).
+  bound, so the classical collision term stays `≤ N / (4 * 2 ^ 128)` up to
+  `N ≤ 2 ^ 128`). Note: this proves **classical ROM** soundness,
+  not 128-bit post-quantum soundness — QROM Fiat–Shamir and Grover search
+  against FRI queries/PoW are not formalized here.
   *(Replaces legacy `BLAKE3-XOF48`/`BLAKE3-XOF64`, whose 256-bit internal `cv`
-  caps concrete BHT collision resistance at `85.3b` on every `> 64`-byte input.)*
+  limits generic hash-output cardinality.)*
 * `CertiFri.P3.Exec.goldilocksExt3_soundness_sponge_blake2b512_uniqueDecoding_128`:
   literal `≤ N / 2 ^ 128` soundness even at `N = 2 ^ 128` for unconditional UD
   parameters `(logBlowup = 2, numQueries = 160, commitPowBits = 0, queryPowBits = 20)`
@@ -1978,7 +1981,7 @@ end ExecSponge
 
 end CertiFri.Exec
 
-/-! ## Concrete `GoldilocksExt3` instantiations (32B `BLAKE3-256` classical & 64B `BLAKE2b-512` PQ) -/
+/-! ## Concrete `GoldilocksExt3` instantiations (32B `BLAKE3-256` & 64B `BLAKE2b-512`, classical ROM) -/
 
 namespace CertiFri.P3.Exec
 
@@ -2027,11 +2030,16 @@ theorem goldilocksExt3_soundness_sponge_uniqueDecoding
     (by rwa [hcard]) (by rwa [hcard]) hq hadv attempt
 
 /-- **64-byte (512-bit) RFC 7693 `BLAKE2b-512` unconditional UD soundness over `GoldilocksExt3`**
-(certified 128-bit **post-quantum** instantiation with true 512-bit internal state).
-Gives `3 * N ^ 2 / (2 * 2 ^ 512)` classical collision term (`255.71b` classical BCS)
-alongside `170.7b` BHT (`+42.7b` headroom above 128b), `204.8b` CNS, and `256b` Grover
-(`digest64_bht_quantum_collision_at_128`, `digest64_bht_quantum_collision_at_170`,
-`digest64_cns_quantum_collision_at_204`, `digest64_grover_preimage`). -/
+in the **classical** random oracle model (`|Digest64| = 2 ^ 512`).
+Gives `3 * N ^ 2 / (2 * 2 ^ 512)` classical BCS collision resistance (`255.71b`
+classical threshold, keeping the classical collision term `≤ N / (4 * 2 ^ 128)`
+for `N ≤ 2 ^ 128`). **Scope note:** a 64-byte digest provides
+classical collision resistance in the classical ROM, **not** certified 128-bit
+post-quantum protocol soundness (QROM Fiat–Shamir and Grover search against FRI
+queries/PoW are not formalized here; the `DigestCard.lean` lemmas
+`digest64_bht_quantum_collision_at_128`, `digest64_bht_quantum_collision_at_170`,
+`digest64_cns_quantum_collision_at_204`, `digest64_grover_preimage` are pure
+arithmetic inequalities on `|Digest64| = 2 ^ 512`). -/
 theorem goldilocksExt3_soundness_sponge_blake2b512_uniqueDecoding
     (params : FriParams) (shape : ClaimShape)
     (hmax : Fri.logMaxHeight params.logBlowup shape ≤ 32)

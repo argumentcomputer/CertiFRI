@@ -12,7 +12,47 @@ concrete `GoldilocksExt3` (`Fp3Model`) 128-bit `Tensor2DMCA` bounds.
 
 Incremental-sponge (`c = 3 / 2`) executable `Fri.verifyTensor` soundness for
 both 32-byte `BLAKE3-256` (`Digest`) and 64-byte `BLAKE2b-512` (`Digest64`) is
-proved in `Proofs/CertiFriProofs/Exec/SoundnessTensorSponge.lean`.
+proved in `Proofs/CertiFriProofs/Exec/SoundnessTensorSponge.lean` — both
+unconditionally in the unique-decoding regime (for all `W ≤ 2 ^ 16`, `M ≤ 2 ^ 16`,
+`logMaxHeight ≤ 32`) and unconditionally in the Johnson regime (`lb = 2, 3, 4`)
+via the union-bound reduction `tensor2DMCA_of_curveMCA_two` from `curveListCA_fp3`.
+
+## Technical note: `CurveListCA` constant vs. `M`-independent `BatchedLineListCA`
+
+Two distinct bounds govern Johnson-regime tensor batching over `GoldilocksExt3`
+(`|Fp3Model| = p ^ 3 ≈ 2 ^ 192`):
+
+1. **Unconditional discharge via `CurveListCA` (`m = 2`) union bound (proved in
+   `TensorMCA.lean` / `SoundnessTensorSponge.lean`):**
+   Applying `curveListCA_fp3` at `m = 2` to each of the `2 ^ i` parallel lines
+   in halving round `i` gives `Tensor2DMCA` with error `(2 ^ (kCol + kOpen) - 1) * ε_line`
+   (zero unproven assumptions). In `CurveListCA.lean`, the leading term in
+   `curveListCoeff n d A` is `L_Y * B3 ≈ 2 * (r + 1) * L_Y ^ 5 * d`, coming from
+   the cleared-denominator Hensel residual `henselResidualCoeff` (`D₀ ^ (2 * d * ℓ)`
+   with `deg_Z(D₀) = ((ℓ + 1) * t + 3 * ℓ + 1) * D_Z` in `HenselLift.lean`),
+   whereas the Hasse-multiplicity double-counting term `L_Y * B4 ≈ L_Y * (r + 2) * L_Y * n`
+   is 8.8–10.7 bits smaller:
+
+   * `lb = 2, θ = 71 / 128` (`r = 9, L_Y = 28`): `curveListCoeff / n ≤ 2 ^ 26.58`
+     (`PowExp = 27`, `B4`-only `2 ^ 17.83`, gap `8.75` bits). Unconditionally
+     discharges `2 ^ (kCol + kOpen) * 2 ^ H ≤ 2 ^ 36` (e.g. `d ≤ 2 ^ 23`,
+     `H = 25`, up to `2048` tensor claims).
+   * `lb = 2, θ = 135 / 256` (`r = 18, L_Y = 50`): `2 ^ 31.59` vs `B4`-only `2 ^ 21.22` (`10.37` bits).
+   * `lb = 3, θ = 19 / 50` (`r = 13, L_Y = 51`): `2 ^ 30.29` vs `B4`-only `2 ^ 19.90` (`10.39` bits).
+   * `lb = 4, θ = 35 / 128` (`r = 11, L_Y = 58`): `2 ^ 29.98` vs `B4`-only `2 ^ 19.27` (`10.71` bits).
+
+   Closing this ~9–11 bit gap in `CurveListCA` requires avoiding the linear-in-`d`
+   denominator growth `D₀ ^ (2 * d)` in `HenselLift.lean` (reducing `D₀` alone to
+   `2 * L_Y * D_Z` saves only ~3.7–4.6 bits).
+
+2. **`M`-independent `BatchedLineListCA Fp3Model T` (`(kCol + kOpen) * ε_line`):**
+   Eliminating the exponential `2 ^ (kCol + kOpen)` union-bound factor to achieve
+   `(kCol + kOpen)` logarithmic scaling for arbitrary `W, M ≤ 2 ^ 16` across all
+   rates (`lb = 2, 3, 4` at `d ≤ 2 ^ 23`) requires an interleaved-word Johnson
+   peeling proof (discharging `BatchedLineListCA` simultaneously across `M`
+   parallel lines sharing one challenge `β` over a common extension field
+   `E = F(Z)[T] / (H)` of degree `≤ L_Y`, rather than taking a union bound over
+   `M` independent single-line calls).
 -/
 
 /-! ## Concrete `GoldilocksExt3` 128-bit Tensor batching soundness -/

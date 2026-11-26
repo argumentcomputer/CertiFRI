@@ -1876,6 +1876,163 @@ theorem soundnessTensor_sponge_uniqueDecoding (s₀ : D)
   exact soundnessTensor_sponge m params shape wf s₀ hθ hmca hε₀ hstep hα (fun _ _ => hβ) hq hadv
     attempt
 
+/-- **Johnson-regime soundness of executable `Fri.verifyTensor` under incremental
+sponge chaining (`c = 3 / 2`) from `CurveListCA K T` alone** (no
+`BatchedLineListCA` assumption needed). Applies `tensor2DMCA_of_curveMCA_two`
+(union bound across the `2 ^ (kCol + kOpen) - 1` single-line halvings), yielding
+single-level max batching error
+`(2 ^ (kCol + kOpen) - 1) * (cT + L_J * (1 - θ) * 2 ^ n) / |K|`. -/
+theorem soundnessTensor_sponge_johnson_of_curveListCA (s₀ : D) {T : ℕ → ℕ → ℕ → ℕ → ℕ}
+    (hca : CurveListCA K T)
+    (hheight : params.logFinalHeight ≤ logMaxHeight params.logBlowup shape)
+    {θ cT : ℝ} (hθ0 : 0 < θ) (hθ1 : θ ≤ 1)
+    (hgap : (1 / 2 : ℝ) ^ params.logBlowup < θ ^ 2)
+    (hcT0 : 0 ≤ cT)
+    (hT : ∀ (j k : ℕ), j ≤ numRounds params shape → 2 ≤ k →
+      (T (2 ^ (logMaxHeight params.logBlowup shape - j))
+        (2 ^ (numRounds params shape - j) * 2 ^ params.logFinalPolyLen)
+        ⌈θ * (2 : ℝ) ^ (logMaxHeight params.logBlowup shape - j)⌉₊ k : ℝ) ≤
+        ((k - 1 : ℕ) : ℝ) * cT)
+    {εmax : ℝ}
+    (hα : ((2 ^ (tensorNumChallenges (maxWidth shape) +
+          tensorNumChallenges (maxOpeningsPerHeight params.logBlowup shape)) : ℕ) : ℝ) *
+        (cT + ((θ - (1 / 2 : ℝ) ^ params.logBlowup) /
+            (θ ^ 2 - (1 / 2 : ℝ) ^ params.logBlowup)) *
+          ((1 - θ) * (2 : ℝ) ^ logMaxHeight params.logBlowup shape)) /
+        Fintype.card K ≤ εmax)
+    (hβ : (2 * cT + ((θ - (1 / 2 : ℝ) ^ params.logBlowup) /
+            (θ ^ 2 - (1 / 2 : ℝ) ^ params.logBlowup)) *
+          ((1 - θ) * (2 : ℝ) ^ logMaxHeight params.logBlowup shape)) /
+        Fintype.card K / 2 ^ params.commitPowBits ≤ εmax)
+    (hq : θ ^ params.numQueries / 2 ^ params.queryPowBits ≤ εmax) {A : Type*}
+    {adv : OracleComp (SpongeTensorOracleAnswer (D := D) m params shape wf) A} {Q : ℕ}
+    (hadv : adv.QueryBound Q) (attempt : A → Attempt F EF D) :
+    prob (fun res l =>
+        (∃ f : ∀ x, SpongeTensorOracleAnswer (D := D) m params shape wf x,
+          (∀ x y, l.dlookup x = some y → f x = y) ∧
+            spongeAcceptsTensor m params shape wf s₀ f (attempt res.1) = true) ∧
+        ClaimsFail (modelParams m params shape wf).ldt (modelParams m params shape wf).shift θ
+          ((modelParams m params shape wf).claims
+            (view m params shape (firstMessage (attempt res.1).commitments
+              (attempt res.1).points (attempt res.1).values)) (spongeCommittedRow l)))
+      (spongeExperimentTensor m params shape wf s₀ adv attempt) [] ≤
+      (Q + ((modelParams m params shape wf).batches +
+            ((modelParams m params shape wf).rounds + 2)) +
+          (modelParams m params shape wf).verifierQueries) * εmax +
+        3 * ((Q : ℝ) + ((modelParams m params shape wf).batches +
+            ((modelParams m params shape wf).rounds + 2)) +
+          (modelParams m params shape wf).verifierQueries) ^ 2 / (2 * Fintype.card D) := by
+  let P := modelParams m params shape wf
+  let W := maxWidth shape
+  let M := maxOpeningsPerHeight params.logBlowup shape
+  let ρ : ℝ := (1 / 2 : ℝ) ^ params.logBlowup
+  let LJ : ℝ := (θ - ρ) / (θ ^ 2 - ρ)
+  have hn : P.n = P.rounds + params.logBlowup + params.logFinalPolyLen := by
+    show logMaxHeight params.logBlowup shape =
+      numRounds params shape + params.logBlowup + params.logFinalPolyLen
+    unfold numRounds FriParams.logFinalHeight at *
+    omega
+  have hfinal : P.finalDegree = 2 ^ params.logFinalPolyLen := rfl
+  have hLJ_nn : 0 ≤ LJ := by
+    have hden : 0 < θ ^ 2 - ρ := sub_pos.mpr hgap
+    have hnum : 0 ≤ θ - ρ := by nlinarith
+    exact div_nonneg hnum hden.le
+  have h1θ : 0 ≤ 1 - θ := sub_nonneg.mpr hθ1
+  have hdeg_le : ∀ j ≤ P.rounds,
+      ((2 ^ (P.rounds - j) * P.finalDegree : ℕ) : ℝ) ≤
+        ρ * ((twoAdicDomain P.ω P.n j).card : ℝ) := by
+    intro j hj
+    rw [hfinal, Compose.card_twoAdicDomain_eq_mul_degree hn P.prim hj]
+    push_cast
+    have h1 : ρ * (2 : ℝ) ^ params.logBlowup = 1 := by
+      dsimp only [ρ]; rw [← mul_pow]; norm_num
+    rw [← mul_assoc, h1, one_mul]
+  have hcard_dom : ∀ j ≤ P.rounds, (twoAdicDomain P.ω P.n j).card = 2 ^ (P.n - j) :=
+    fun j hj => card_twoAdicDomain P.prim (by omega)
+  let εline : ℝ := (cT + LJ * ((1 - θ) * (2 : ℝ) ^ P.n)) / Fintype.card K
+  let εβ : ℕ → ℝ := fun _ => (2 * cT + LJ * ((1 - θ) * (2 : ℝ) ^ P.n)) / Fintype.card K
+  have hline_nn : 0 ≤ εline := by
+    dsimp only [εline]; positivity
+  have hmca : ∀ j ≤ P.rounds,
+      Tensor2DMCA ((twoAdicDomain P.ω P.n j).image (P.shift * ·))
+        (2 ^ (P.rounds - j) * P.finalDegree) W M θ
+        (((2 ^ (tensorNumChallenges W + tensorNumChallenges M) - 1 : ℕ) : ℝ) * εline) := by
+    intro j hj
+    have hcard_img : ((twoAdicDomain P.ω P.n j).image (P.shift * ·)).card = 2 ^ (P.n - j) := by
+      rw [Finset.card_image_of_injective _ (mul_right_injective₀ P.shift_ne), hcard_dom j hj]
+    have hcard_le : (((twoAdicDomain P.ω P.n j).image (P.shift * ·)).card : ℝ) ≤ (2 : ℝ) ^ P.n := by
+      rw [hcard_img]
+      exact_mod_cast Nat.pow_le_pow_right (by decide : 0 < 2) (Nat.sub_le P.n j)
+    have hd_img : ((2 ^ (P.rounds - j) * P.finalDegree : ℕ) : ℝ) ≤
+        ρ * (((twoAdicDomain P.ω P.n j).image (P.shift * ·)).card : ℝ) := by
+      rw [Finset.card_image_of_injective _ (mul_right_injective₀ P.shift_ne)]
+      exact hdeg_le j hj
+    have hTj : (T ((twoAdicDomain P.ω P.n j).image (P.shift * ·)).card
+        (2 ^ (P.rounds - j) * P.finalDegree)
+        ⌈θ * (((twoAdicDomain P.ω P.n j).image (P.shift * ·)).card : ℝ)⌉₊ 2 : ℝ) ≤
+        ((2 - 1 : ℕ) : ℝ) * cT := by
+      rw [hcard_img, hfinal]
+      push_cast
+      have h := hT j 2 hj le_rfl
+      norm_num at h
+      simpa [P, modelParams] using h
+    have hcurve := curveMCA_of_curveListCA_of_card_le hca
+      ((twoAdicDomain P.ω P.n j).image (P.shift * ·))
+      (2 ^ (P.rounds - j) * P.finalDegree) 2
+      hθ0 hθ1 hd_img hgap (by positivity) hTj hcard_le
+    have hcurve' : CurveMCA ((twoAdicDomain P.ω P.n j).image (P.shift * ·))
+        (2 ^ (P.rounds - j) * P.finalDegree) 2 θ εline := by
+      refine ProximityGap.curveMCA_mono hcurve le_rfl ?_
+      dsimp only [εline, LJ, ρ]
+      exact le_of_eq (by norm_num)
+    exact tensor2DMCA_of_curveMCA_two hcurve'
+  have hε₀ : ∀ j ≤ P.rounds,
+      ((2 ^ (tensorNumChallenges W + tensorNumChallenges M) - 1 : ℕ) : ℝ) * εline ≤
+        ((2 ^ (tensorNumChallenges W + tensorNumChallenges M) : ℕ) : ℝ) *
+          (cT + LJ * ((1 - θ) * (2 : ℝ) ^ P.n)) / Fintype.card K := by
+    intro _ _
+    have hsub_le : ((2 ^ (tensorNumChallenges W + tensorNumChallenges M) - 1 : ℕ) : ℝ) ≤
+        ((2 ^ (tensorNumChallenges W + tensorNumChallenges M) : ℕ) : ℝ) := by
+      exact_mod_cast Nat.sub_le _ 1
+    calc ((2 ^ (tensorNumChallenges W + tensorNumChallenges M) - 1 : ℕ) : ℝ) * εline
+        ≤ ((2 ^ (tensorNumChallenges W + tensorNumChallenges M) : ℕ) : ℝ) * εline :=
+          mul_le_mul_of_nonneg_right hsub_le hline_nn
+      _ = ((2 ^ (tensorNumChallenges W + tensorNumChallenges M) : ℕ) : ℝ) *
+            (cT + LJ * ((1 - θ) * (2 : ℝ) ^ P.n)) / Fintype.card K := by
+          dsimp only [εline]; ring
+  have hstep : ∀ i < P.rounds,
+      StepMCA (twoAdicDomain P.ω P.n i) (twoAdicDomain P.ω P.n (i + 1))
+        (2 ^ (P.rounds - (i + 1)) * P.finalDegree) θ (εβ i) := by
+    intro i hi
+    have hi1 : i + 1 ≤ P.rounds := hi
+    have hn1 : 1 ≤ P.n := by omega
+    have hcard_i1 : (twoAdicDomain P.ω P.n (i + 1)).card = 2 ^ (P.n - (i + 1)) :=
+      hcard_dom (i + 1) hi1
+    have hcard_le : ((twoAdicDomain P.ω P.n (i + 1)).card : ℝ) ≤ (2 : ℝ) ^ (P.n - 1) := by
+      rw [hcard_i1]
+      exact_mod_cast Nat.pow_le_pow_right (by decide : 0 < 2) (by omega)
+    have hTi : (T (twoAdicDomain P.ω P.n (i + 1)).card
+        (2 ^ (P.rounds - (i + 1)) * P.finalDegree)
+        ⌈θ * ((twoAdicDomain P.ω P.n (i + 1)).card : ℝ)⌉₊ 3 : ℝ) ≤ 2 * cT := by
+      rw [hcard_i1, hfinal]
+      push_cast
+      have h := hT (i + 1) 3 hi1 (by omega)
+      norm_num at h
+      exact h
+    have hst := stepMCA_of_curveListCA_of_card_le hca (P.ldt.step i hi)
+      (2 ^ (P.rounds - (i + 1)) * P.finalDegree)
+      hθ0 hθ1 (hdeg_le (i + 1) hi1) hgap (by positivity) hTi hcard_le
+    have h2pow : 2 * (2 : ℝ) ^ (P.n - 1) = (2 : ℝ) ^ P.n := by
+      conv_rhs => rw [← Nat.sub_add_cancel hn1, pow_succ']
+    have heq : (2 * cT + 2 * (LJ * ((1 - θ) * (2 : ℝ) ^ (P.n - 1)))) / Fintype.card K = εβ i := by
+      dsimp only [εβ]
+      have : 2 * (LJ * ((1 - θ) * (2 : ℝ) ^ (P.n - 1))) =
+          LJ * ((1 - θ) * (2 * (2 : ℝ) ^ (P.n - 1))) := by ring
+      rw [this, h2pow]
+    rwa [heq] at hst
+  exact soundnessTensor_sponge m params shape wf s₀ hθ0.le hmca hε₀ hstep hα (fun _ _ => hβ) hq
+    hadv attempt
+
 end ExecSpongeTensor
 
 end CertiFri.Exec
@@ -2140,5 +2297,515 @@ theorem goldilocksExt3_soundnessTensor_sponge_blake2b512_uniqueDecoding_128
       ≤ (N : ℝ) * ((3 / 4 : ℝ) / (2 : ℝ) ^ 128) + (N : ℝ) / (4 * (2 : ℝ) ^ 128) :=
         add_le_add le_rfl hcol
     _ = (N : ℝ) / (2 : ℝ) ^ 128 := by ring
+
+/-! ### Unconditional 128-Bit Johnson-Regime Soundness for Executable `Fri.verifyTensor` -/
+
+/-- Shared arithmetic core for unconditional Johnson-regime `Fri.verifyTensor`
+soundness over `GoldilocksExt3` (discharging `CurveListCA` internally via
+`curveListCA_fp3`, with zero unproven proximity assumptions). -/
+private theorem goldilocksExt3_soundnessTensor_sponge_johnson_of_profile_aux
+    (D : Type) [Fintype D] [Nonempty D] [DecidableEq D] [Inhabited D]
+    (lb p q Rmax Lmax LJ_ub PowExp Hmax ClaimExp : ℕ)
+    (params : FriParams) (shape : ClaimShape)
+    (hbl : params.logBlowup = lb) (hlb : 1 ≤ lb)
+    (hmax : Fri.logMaxHeight params.logBlowup shape ≤ Hmax) (hmax32 : Hmax ≤ 32)
+    (hheight : params.logFinalHeight ≤ Fri.logMaxHeight params.logBlowup shape)
+    (htensor : 2 ^ (Fri.tensorNumChallenges (Fri.maxWidth shape) +
+        Fri.tensorNumChallenges (Fri.maxOpeningsPerHeight params.logBlowup shape)) *
+        2 ^ Fri.logMaxHeight params.logBlowup shape ≤ 2 ^ ClaimExp)
+    (hq : ((p : ℝ) / q) ^ params.numQueries / 2 ^ params.queryPowBits ≤ (3 / 4 : ℝ) / (2 : ℝ) ^ 128)
+    (hq_pos : 0 < q) (hpq : p ≤ q) (hgap_nat : q ^ 2 < 2 ^ lb * p ^ 2)
+    (hR : (2 * q ^ 2) / (2 ^ lb * p ^ 2 - q ^ 2) + 1 ≤ Rmax)
+    (hL : (2 * q ^ 2 * p * 2 ^ lb + q ^ 3 + 2 * (2 ^ lb * p ^ 2 - q ^ 2) * p * 2 ^ lb) /
+      ((2 ^ lb * p ^ 2 - q ^ 2) * q) ≤ Lmax)
+    (hLJ : (((p : ℝ) / q - (1 / 2 : ℝ) ^ lb) /
+        (((p : ℝ) / q) ^ 2 - (1 / 2 : ℝ) ^ lb)) * (1 - (p : ℝ) / q) ≤ LJ_ub)
+    (hCd : curveListRatioBound (2 ^ lb) Rmax Lmax + 2 ^ lb * LJ_ub ≤ 2 ^ lb * 2 ^ PowExp)
+    (hClaimExp : ClaimExp + PowExp ≤ 63)
+    (hHmax : Hmax + PowExp + 1 ≤ 63)
+    (s₀ : D) {A : Type*}
+    {adv : OracleComp (SpongeTensorOracleAnswer (D := D) goldilocksExt3_fieldModel params shape
+      (goldilocksExt3_wellFormed params shape (hmax.trans hmax32))) A}
+    {Q : ℕ} (hadv : adv.QueryBound Q) (attempt : A → Attempt Goldilocks GoldilocksExt3 D) :
+    let wf := goldilocksExt3_wellFormed params shape (hmax.trans hmax32)
+    let P := modelParams goldilocksExt3_fieldModel params shape wf
+    let N : ℕ := Q + (P.batches + (P.rounds + 2)) + P.verifierQueries
+    prob (fun res l =>
+        (∃ f : ∀ x, SpongeTensorOracleAnswer (D := D) goldilocksExt3_fieldModel params shape wf x,
+          (∀ x y, l.dlookup x = some y → f x = y) ∧
+            spongeAcceptsTensor goldilocksExt3_fieldModel params shape wf s₀ f (attempt res.1) = true) ∧
+        ClaimsFail P.ldt P.shift ((p : ℝ) / q)
+          (P.claims (view goldilocksExt3_fieldModel params shape
+            (Fri.firstMessage (attempt res.1).commitments
+              (attempt res.1).points (attempt res.1).values)) (spongeCommittedRow l)))
+      (spongeExperimentTensor goldilocksExt3_fieldModel params shape wf s₀ adv attempt) [] ≤
+      (N : ℝ) * ((3 / 4 : ℝ) / (2 : ℝ) ^ 128) + 3 * (N : ℝ) ^ 2 / (2 * Fintype.card D) := by
+  intro wf P N
+  set H := Fri.logMaxHeight params.logBlowup shape
+  set B : ℕ := 2 ^ lb
+  have hB2 : 2 ≤ B := by
+    calc 2 = 2 ^ 1 := by decide
+      _ ≤ 2 ^ lb := Nat.pow_le_pow_right two_pos hlb
+  have hp_pos : 0 < p := by
+    by_contra hp0
+    have hpz : p = 0 := by omega
+    subst hpz
+    have hq2_pos : 0 < q ^ 2 := pow_pos hq_pos 2
+    simp at hgap_nat
+  have hθ0 : (0 : ℝ) < (p : ℝ) / q := div_pos (Nat.cast_pos.mpr hp_pos) (Nat.cast_pos.mpr hq_pos)
+  have hθ1 : (p : ℝ) / q ≤ 1 := by
+    rw [div_le_one (Nat.cast_pos.mpr hq_pos)]
+    exact_mod_cast hpq
+  have hgap : (1 / 2 : ℝ) ^ params.logBlowup < ((p : ℝ) / q) ^ 2 := by
+    rw [hbl, div_pow, one_pow, div_pow]
+    have hgap_r : ((q : ℝ) ^ 2) < (2 : ℝ) ^ lb * (p : ℝ) ^ 2 := by exact_mod_cast hgap_nat
+    rw [div_lt_div_iff₀ (by positivity) (by positivity), one_mul, mul_comm ((p : ℝ) ^ 2)]
+    exact hgap_r
+  set Cd := curveListRatioBound B Rmax Lmax
+  set cT : ℝ := ((Cd : ℝ) / (B : ℝ)) * (2 : ℝ) ^ H
+  have hcT0 : 0 ≤ cT := by positivity
+  have hT : ∀ (j k : ℕ), j ≤ Fri.numRounds params shape → 2 ≤ k →
+      (CurveListCAProof.curveListThreshold (2 ^ (H - j))
+        (2 ^ (Fri.numRounds params shape - j) * 2 ^ params.logFinalPolyLen)
+        ⌈((p : ℝ) / q) * (2 : ℝ) ^ (H - j)⌉₊ k : ℝ) ≤ ((k - 1 : ℕ) : ℝ) * cT := by
+    intro j k hj hk
+    set nj : ℕ := 2 ^ (H - j)
+    set dj : ℕ := 2 ^ (Fri.numRounds params shape - j) * 2 ^ params.logFinalPolyLen
+    set Aj : ℕ := ⌈((p : ℝ) / q) * (nj : ℝ)⌉₊
+    have hH_eq : H = Fri.numRounds params shape + lb + params.logFinalPolyLen := by
+      have h1 : Fri.numRounds params shape = H - params.logFinalHeight := rfl
+      have h2 : params.logFinalHeight ≤ H := hheight
+      unfold FriParams.logFinalHeight at h1 h2
+      rw [hbl] at h1 h2
+      omega
+    have hnj_eq : nj = B * dj := by
+      dsimp only [nj, dj, B]
+      rw [← pow_add, ← pow_add]
+      congr 1
+      omega
+    have hdj_pos : 1 ≤ dj := Nat.mul_pos (pow_pos two_pos _) (pow_pos two_pos _)
+    have hnj_pos : 0 < nj := pow_pos two_pos _
+    have hprod_pos : (0 : ℝ) < ((p : ℝ) / q) * (nj : ℝ) :=
+      mul_pos hθ0 (Nat.cast_pos.mpr hnj_pos)
+    have hAj_pos : 1 ≤ Aj := Nat.ceil_pos.mpr hprod_pos
+    have hAj_le : Aj ≤ nj := by
+      apply Nat.ceil_le.mpr
+      calc ((p : ℝ) / q) * (nj : ℝ) ≤ 1 * (nj : ℝ) :=
+            mul_le_mul_of_nonneg_right hθ1 (Nat.cast_nonneg _)
+        _ = (nj : ℝ) := one_mul _
+    have hAj_lo : p * nj ≤ q * Aj := by
+      have h1 : ((p : ℝ) / q) * (nj : ℝ) ≤ (Aj : ℝ) := Nat.le_ceil _
+      have hq_r : (0 : ℝ) < (q : ℝ) := Nat.cast_pos.mpr hq_pos
+      have h2 : (p : ℝ) * (nj : ℝ) ≤ (q : ℝ) * (Aj : ℝ) := by
+        have := mul_le_mul_of_nonneg_left h1 hq_r.le
+        field_simp [hq_r.ne'] at this
+        linarith
+      exact_mod_cast h2
+    have hAj_hi : q * (Aj - 1) < p * nj := by
+      have h1 : (Aj : ℝ) < ((p : ℝ) / q) * (nj : ℝ) + 1 := Nat.ceil_lt_add_one hprod_pos.le
+      have hq_r : (0 : ℝ) < (q : ℝ) := Nat.cast_pos.mpr hq_pos
+      have h2 : (q : ℝ) * ((Aj - 1 : ℕ) : ℝ) < (p : ℝ) * (nj : ℝ) := by
+        rw [Nat.cast_sub hAj_pos, Nat.cast_one]
+        have hsub : (Aj : ℝ) - 1 < ((p : ℝ) / q) * (nj : ℝ) := by linarith
+        have := mul_lt_mul_of_pos_left hsub hq_r
+        field_simp [hq_r.ne'] at this
+        linarith
+      exact_mod_cast h2
+    have hnat1 : CurveListCAProof.curveListThreshold nj dj Aj k ≤
+        (k - 1) * CurveListCAProof.curveListCoeff nj dj Aj :=
+      CurveListCAProof.curveListThreshold_le_mul_coeff nj dj Aj k hk
+    have hnat2 : CurveListCAProof.curveListCoeff nj dj Aj ≤ Cd * dj :=
+      curveListCoeff_le_of_ratio hdj_pos hB2 hnj_eq hq_pos hgap_nat hAj_lo hAj_hi hAj_le hAj_pos hR hL
+    have hnat : CurveListCAProof.curveListThreshold nj dj Aj k ≤ (k - 1) * (Cd * dj) :=
+      hnat1.trans (Nat.mul_le_mul_left (k - 1) hnat2)
+    have hdj_le : (dj : ℝ) ≤ (2 : ℝ) ^ H / (B : ℝ) := by
+      have hBdj : B * dj ≤ 2 ^ H := by
+        rw [← hnj_eq]
+        exact Nat.pow_le_pow_right two_pos (Nat.sub_le H j)
+      have hBdj_r : (B : ℝ) * (dj : ℝ) ≤ (2 : ℝ) ^ H := by exact_mod_cast hBdj
+      rw [le_div_iff₀ (by positivity)]
+      linarith
+    have hcast : ((CurveListCAProof.curveListThreshold nj dj Aj k : ℕ) : ℝ) ≤
+        ((k - 1 : ℕ) : ℝ) * ((Cd : ℝ) * (dj : ℝ)) := by
+      exact_mod_cast hnat
+    have hnj_cast : ((nj : ℕ) : ℝ) = (2 : ℝ) ^ (H - j) := by
+      dsimp only [nj]; push_cast; rfl
+    rw [← hnj_cast]
+    refine hcast.trans ?_
+    dsimp only [cT]
+    have hstep : (Cd : ℝ) * (dj : ℝ) ≤ ((Cd : ℝ) / (B : ℝ)) * (2 : ℝ) ^ H := by
+      calc (Cd : ℝ) * (dj : ℝ) ≤ (Cd : ℝ) * ((2 : ℝ) ^ H / (B : ℝ)) :=
+            mul_le_mul_of_nonneg_left hdj_le (Nat.cast_nonneg _)
+        _ = ((Cd : ℝ) / (B : ℝ)) * (2 : ℝ) ^ H := by ring
+    exact mul_le_mul_of_nonneg_left hstep (Nat.cast_nonneg _)
+  have h63 : (2 : ℝ) ^ 63 / ((Goldilocks.order : ℝ) ^ 3) ≤ (3 / 4 : ℝ) / (2 : ℝ) ^ 128 := by
+    refine (div_le_div_of_nonneg_left (by positivity) (by positivity)
+      ninetyNine_hundredths_two_pow_192_le_goldilocks_cube).trans ?_
+    rw [show (2 : ℝ) ^ 192 = (2 : ℝ) ^ 64 * (2 : ℝ) ^ 128 by rw [← pow_add],
+      show (2 : ℝ) ^ 64 = 2 * (2 : ℝ) ^ 63 by rw [show (64 : ℕ) = 63 + 1 by decide, pow_succ'],
+      div_le_div_iff₀ (by positivity) (by positivity)]
+    nlinarith [show (0 : ℝ) < (2 : ℝ) ^ 63 * (2 : ℝ) ^ 128 by positivity]
+  have hcomb : cT + (((p : ℝ) / q - (1 / 2 : ℝ) ^ params.logBlowup) /
+        (((p : ℝ) / q) ^ 2 - (1 / 2 : ℝ) ^ params.logBlowup)) *
+        ((1 - (p : ℝ) / q) * (2 : ℝ) ^ H) ≤ (2 : ℝ) ^ PowExp * (2 : ℝ) ^ H := by
+    have hCd_r : (Cd : ℝ) + (B : ℝ) * (LJ_ub : ℝ) ≤ (B : ℝ) * (2 : ℝ) ^ PowExp := by
+      exact_mod_cast hCd
+    have hfrac : (Cd : ℝ) / (B : ℝ) + (LJ_ub : ℝ) ≤ (2 : ℝ) ^ PowExp := by
+      have hBpos : (0 : ℝ) < (B : ℝ) := by positivity
+      rw [div_add' _ _ _ hBpos.ne', div_le_iff₀ hBpos]
+      linarith
+    have hLJ' : (((p : ℝ) / q - (1 / 2 : ℝ) ^ params.logBlowup) /
+        (((p : ℝ) / q) ^ 2 - (1 / 2 : ℝ) ^ params.logBlowup)) *
+        ((1 - (p : ℝ) / q) * (2 : ℝ) ^ H) ≤ (LJ_ub : ℝ) * (2 : ℝ) ^ H := by
+      rw [hbl, ← mul_assoc]
+      exact mul_le_mul_of_nonneg_right hLJ (by positivity)
+    calc cT + (((p : ℝ) / q - (1 / 2 : ℝ) ^ params.logBlowup) /
+            (((p : ℝ) / q) ^ 2 - (1 / 2 : ℝ) ^ params.logBlowup)) *
+            ((1 - (p : ℝ) / q) * (2 : ℝ) ^ H)
+        ≤ ((Cd : ℝ) / (B : ℝ)) * (2 : ℝ) ^ H + (LJ_ub : ℝ) * (2 : ℝ) ^ H :=
+          add_le_add le_rfl hLJ'
+      _ = ((Cd : ℝ) / (B : ℝ) + (LJ_ub : ℝ)) * (2 : ℝ) ^ H := by ring
+      _ ≤ (2 : ℝ) ^ PowExp * (2 : ℝ) ^ H :=
+          mul_le_mul_of_nonneg_right hfrac (by positivity)
+  have hcard : (Fintype.card Fp3Model : ℝ) = (Goldilocks.order : ℝ) ^ 3 := by
+    rw [Fp3Model.card_fp3Model, Nat.cast_pow]
+  have hεα : ((2 ^ (Fri.tensorNumChallenges (Fri.maxWidth shape) +
+        Fri.tensorNumChallenges (Fri.maxOpeningsPerHeight params.logBlowup shape)) : ℕ) : ℝ) *
+      (cT + (((p : ℝ) / q - (1 / 2 : ℝ) ^ params.logBlowup) /
+          (((p : ℝ) / q) ^ 2 - (1 / 2 : ℝ) ^ params.logBlowup)) *
+        ((1 - (p : ℝ) / q) * (2 : ℝ) ^ H)) /
+      Fintype.card Fp3Model ≤ (3 / 4 : ℝ) / (2 : ℝ) ^ 128 := by
+    rw [hcard]
+    have hcr : ((2 ^ (Fri.tensorNumChallenges (Fri.maxWidth shape) +
+        Fri.tensorNumChallenges (Fri.maxOpeningsPerHeight params.logBlowup shape)) : ℕ) : ℝ) *
+        (2 : ℝ) ^ H ≤ (2 : ℝ) ^ ClaimExp := by exact_mod_cast htensor
+    have hpow63 : (2 : ℝ) ^ (ClaimExp + PowExp) ≤ (2 : ℝ) ^ 63 := by
+      exact_mod_cast Nat.pow_le_pow_right two_pos hClaimExp
+    have hnum : ((2 ^ (Fri.tensorNumChallenges (Fri.maxWidth shape) +
+          Fri.tensorNumChallenges (Fri.maxOpeningsPerHeight params.logBlowup shape)) : ℕ) : ℝ) *
+        (cT + (((p : ℝ) / q - (1 / 2 : ℝ) ^ params.logBlowup) /
+            (((p : ℝ) / q) ^ 2 - (1 / 2 : ℝ) ^ params.logBlowup)) *
+          ((1 - (p : ℝ) / q) * (2 : ℝ) ^ H)) ≤ (2 : ℝ) ^ 63 := by
+      calc _ ≤ ((2 ^ (Fri.tensorNumChallenges (Fri.maxWidth shape) +
+              Fri.tensorNumChallenges (Fri.maxOpeningsPerHeight params.logBlowup shape)) : ℕ) : ℝ) *
+            ((2 : ℝ) ^ PowExp * (2 : ℝ) ^ H) :=
+            mul_le_mul_of_nonneg_left hcomb (Nat.cast_nonneg _)
+        _ = (((2 ^ (Fri.tensorNumChallenges (Fri.maxWidth shape) +
+              Fri.tensorNumChallenges (Fri.maxOpeningsPerHeight params.logBlowup shape)) : ℕ) : ℝ) *
+            (2 : ℝ) ^ H) * (2 : ℝ) ^ PowExp := by ring
+        _ ≤ (2 : ℝ) ^ ClaimExp * (2 : ℝ) ^ PowExp :=
+            mul_le_mul_of_nonneg_right hcr (by positivity)
+        _ = (2 : ℝ) ^ (ClaimExp + PowExp) := (pow_add _ _ _).symm
+        _ ≤ (2 : ℝ) ^ 63 := hpow63
+    exact (div_le_div_of_nonneg_right hnum (pow_nonneg (Nat.cast_nonneg _) 3)).trans h63
+  have hεβ : (2 * cT + (((p : ℝ) / q - (1 / 2 : ℝ) ^ params.logBlowup) /
+          (((p : ℝ) / q) ^ 2 - (1 / 2 : ℝ) ^ params.logBlowup)) *
+        ((1 - (p : ℝ) / q) * (2 : ℝ) ^ H)) /
+      Fintype.card Fp3Model / 2 ^ params.commitPowBits ≤ (3 / 4 : ℝ) / (2 : ℝ) ^ 128 := by
+    rw [hcard]
+    have hLJ_nn : 0 ≤ (((p : ℝ) / q - (1 / 2 : ℝ) ^ params.logBlowup) /
+        (((p : ℝ) / q) ^ 2 - (1 / 2 : ℝ) ^ params.logBlowup)) *
+        ((1 - (p : ℝ) / q) * (2 : ℝ) ^ H) := by
+      have hnum_nn : 0 ≤ (p : ℝ) / q - (1 / 2 : ℝ) ^ params.logBlowup := by
+        have h1 : ((p : ℝ) / q) ^ 2 ≤ (p : ℝ) / q := by nlinarith
+        linarith
+      have hden_pos : 0 < ((p : ℝ) / q) ^ 2 - (1 / 2 : ℝ) ^ params.logBlowup := sub_pos.mpr hgap
+      have h1m : 0 ≤ 1 - (p : ℝ) / q := sub_nonneg.mpr hθ1
+      positivity
+    have hnum : 2 * cT + (((p : ℝ) / q - (1 / 2 : ℝ) ^ params.logBlowup) /
+        (((p : ℝ) / q) ^ 2 - (1 / 2 : ℝ) ^ params.logBlowup)) *
+        ((1 - (p : ℝ) / q) * (2 : ℝ) ^ H) ≤ (2 : ℝ) ^ 63 := by
+      have h2H : (2 : ℝ) ^ (H + PowExp + 1) ≤ (2 : ℝ) ^ 63 := by
+        exact_mod_cast Nat.pow_le_pow_right two_pos (show H + PowExp + 1 ≤ 63 by omega)
+      calc 2 * cT + (((p : ℝ) / q - (1 / 2 : ℝ) ^ params.logBlowup) /
+              (((p : ℝ) / q) ^ 2 - (1 / 2 : ℝ) ^ params.logBlowup)) *
+              ((1 - (p : ℝ) / q) * (2 : ℝ) ^ H)
+          ≤ 2 * (cT + (((p : ℝ) / q - (1 / 2 : ℝ) ^ params.logBlowup) /
+              (((p : ℝ) / q) ^ 2 - (1 / 2 : ℝ) ^ params.logBlowup)) *
+              ((1 - (p : ℝ) / q) * (2 : ℝ) ^ H)) := by linarith
+        _ ≤ 2 * ((2 : ℝ) ^ PowExp * (2 : ℝ) ^ H) := mul_le_mul_of_nonneg_left hcomb (by norm_num)
+        _ = (2 : ℝ) ^ (H + PowExp + 1) := by rw [pow_succ', pow_add]; ring
+        _ ≤ (2 : ℝ) ^ 63 := h2H
+    have hpow1 : (1 : ℝ) ≤ (2 : ℝ) ^ params.commitPowBits := by
+      exact_mod_cast Nat.one_le_pow params.commitPowBits 2 two_pos
+    exact (div_le_self (div_nonneg (by linarith) (pow_nonneg (Nat.cast_nonneg _) 3)) hpow1).trans
+      ((div_le_div_of_nonneg_right hnum (pow_nonneg (Nat.cast_nonneg _) 3)).trans h63)
+  have hmain := soundnessTensor_sponge_johnson_of_curveListCA goldilocksExt3_fieldModel params shape
+    wf s₀ curveListCA_fp3 hheight hθ0 hθ1 hgap hcT0 hT
+    (εmax := (3 / 4 : ℝ) / (2 : ℝ) ^ 128) hεα hεβ hq hadv attempt
+  have hNcast : (N : ℝ) = (Q : ℝ) + (P.batches + (P.rounds + 2)) + P.verifierQueries := by
+    dsimp only [N]; push_cast; ring
+  rwa [← hNcast] at hmain
+
+/-- **Master Unconditional 128-Bit Johnson Soundness Schema for `Fri.verifyTensor`
+over `GoldilocksExt3` (`Digest64`, RFC 7693 `BLAKE2b-512`):** discharges
+`CurveListCA` internally via `curveListCA_fp3` (zero unproven assumptions!),
+producing literal `≤ N / 2 ^ 128` executable `Fri.verifyTensor` soundness. -/
+theorem goldilocksExt3_soundnessTensor_sponge_blake2b512_johnson_of_profile
+    (lb p q Rmax Lmax LJ_ub PowExp Hmax ClaimExp : ℕ)
+    (params : FriParams) (shape : ClaimShape)
+    (hbl : params.logBlowup = lb) (hlb : 1 ≤ lb)
+    (hmax : Fri.logMaxHeight params.logBlowup shape ≤ Hmax) (hmax32 : Hmax ≤ 32)
+    (hheight : params.logFinalHeight ≤ Fri.logMaxHeight params.logBlowup shape)
+    (htensor : 2 ^ (Fri.tensorNumChallenges (Fri.maxWidth shape) +
+        Fri.tensorNumChallenges (Fri.maxOpeningsPerHeight params.logBlowup shape)) *
+        2 ^ Fri.logMaxHeight params.logBlowup shape ≤ 2 ^ ClaimExp)
+    (hq : ((p : ℝ) / q) ^ params.numQueries / 2 ^ params.queryPowBits ≤ (3 / 4 : ℝ) / (2 : ℝ) ^ 128)
+    (hq_pos : 0 < q) (hpq : p ≤ q) (hgap_nat : q ^ 2 < 2 ^ lb * p ^ 2)
+    (hR : (2 * q ^ 2) / (2 ^ lb * p ^ 2 - q ^ 2) + 1 ≤ Rmax)
+    (hL : (2 * q ^ 2 * p * 2 ^ lb + q ^ 3 + 2 * (2 ^ lb * p ^ 2 - q ^ 2) * p * 2 ^ lb) /
+      ((2 ^ lb * p ^ 2 - q ^ 2) * q) ≤ Lmax)
+    (hLJ : (((p : ℝ) / q - (1 / 2 : ℝ) ^ lb) /
+        (((p : ℝ) / q) ^ 2 - (1 / 2 : ℝ) ^ lb)) * (1 - (p : ℝ) / q) ≤ LJ_ub)
+    (hCd : curveListRatioBound (2 ^ lb) Rmax Lmax + 2 ^ lb * LJ_ub ≤ 2 ^ lb * 2 ^ PowExp)
+    (hClaimExp : ClaimExp + PowExp ≤ 63)
+    (hHmax : Hmax + PowExp + 1 ≤ 63)
+    (s₀ : Digest64) {A : Type*}
+    {adv : OracleComp (SpongeTensorOracleAnswer (D := Digest64) goldilocksExt3_fieldModel params shape
+      (goldilocksExt3_wellFormed params shape (hmax.trans hmax32))) A}
+    {Q : ℕ} (hadv : adv.QueryBound Q)
+    (hN : Q + ((modelParams goldilocksExt3_fieldModel params shape
+        (goldilocksExt3_wellFormed params shape (hmax.trans hmax32))).batches +
+      ((modelParams goldilocksExt3_fieldModel params shape
+        (goldilocksExt3_wellFormed params shape (hmax.trans hmax32))).rounds + 2)) +
+      (modelParams goldilocksExt3_fieldModel params shape
+        (goldilocksExt3_wellFormed params shape (hmax.trans hmax32))).verifierQueries ≤ 2 ^ 128)
+    (attempt : A → Attempt Goldilocks GoldilocksExt3 Digest64) :
+    let wf := goldilocksExt3_wellFormed params shape (hmax.trans hmax32)
+    let P := modelParams goldilocksExt3_fieldModel params shape wf
+    let N : ℕ := Q + (P.batches + (P.rounds + 2)) + P.verifierQueries
+    prob (fun res l =>
+        (∃ f : ∀ x, SpongeTensorOracleAnswer (D := Digest64) goldilocksExt3_fieldModel params shape wf x,
+          (∀ x y, l.dlookup x = some y → f x = y) ∧
+            spongeAcceptsTensor goldilocksExt3_fieldModel params shape wf s₀ f (attempt res.1) = true) ∧
+        ClaimsFail P.ldt P.shift ((p : ℝ) / q)
+          (P.claims (view goldilocksExt3_fieldModel params shape
+            (Fri.firstMessage (attempt res.1).commitments
+              (attempt res.1).points (attempt res.1).values)) (spongeCommittedRow l)))
+      (spongeExperimentTensor goldilocksExt3_fieldModel params shape wf s₀ adv attempt) [] ≤
+      (N : ℝ) / (2 : ℝ) ^ 128 := by
+  intro wf P N
+  have hmain := goldilocksExt3_soundnessTensor_sponge_johnson_of_profile_aux Digest64
+    lb p q Rmax Lmax LJ_ub PowExp Hmax ClaimExp params shape hbl hlb hmax hmax32 hheight htensor
+    hq hq_pos hpq hgap_nat hR hL hLJ hCd hClaimExp hHmax s₀ hadv attempt
+  dsimp only at hmain
+  have hcol := digest64_sponge_collision_le_quarter_128 (N := N) hN
+  refine hmain.trans ?_
+  calc (N : ℝ) * ((3 / 4 : ℝ) / (2 : ℝ) ^ 128) + 3 * (N : ℝ) ^ 2 / (2 * Fintype.card Digest64)
+      ≤ (N : ℝ) * ((3 / 4 : ℝ) / (2 : ℝ) ^ 128) + (N : ℝ) / (4 * (2 : ℝ) ^ 128) :=
+        add_le_add le_rfl hcol
+    _ = (N : ℝ) / (2 : ℝ) ^ 128 := by ring
+
+/-- **Unconditional 32-byte `BLAKE3-256` (`Digest`) Johnson-regime soundness for
+executable `Fri.verifyTensor` (`lb = 2, q ≥ 128, queryPow = 20, θ = 71 / 128`):**
+ZERO unproven proximity assumptions! Covers all shapes with `logMaxHeight ≤ 32`
+and `2 ^ (kCol + kOpen) * 2 ^ logMaxHeight ≤ 2 ^ 36` (e.g. `d ≤ 2 ^ 23` with
+up to `2048` tensor claims). -/
+theorem goldilocksExt3_soundnessTensor_sponge_johnson_128_blake3_unconditional
+    (params : FriParams) (shape : ClaimShape)
+    (hbl : params.logBlowup = 2) (hqn : 128 ≤ params.numQueries) (hqpow : params.queryPowBits = 20)
+    (hmax : Fri.logMaxHeight params.logBlowup shape ≤ 32)
+    (hheight : params.logFinalHeight ≤ Fri.logMaxHeight params.logBlowup shape)
+    (htensor : 2 ^ (Fri.tensorNumChallenges (Fri.maxWidth shape) +
+        Fri.tensorNumChallenges (Fri.maxOpeningsPerHeight params.logBlowup shape)) *
+        2 ^ Fri.logMaxHeight params.logBlowup shape ≤ 2 ^ 36)
+    (s₀ : Digest) {A : Type*}
+    {adv : OracleComp (SpongeTensorOracleAnswer (D := Digest) goldilocksExt3_fieldModel params shape
+      (goldilocksExt3_wellFormed params shape hmax)) A}
+    {Q : ℕ} (hadv : adv.QueryBound Q) (attempt : A → Attempt Goldilocks GoldilocksExt3 Digest) :
+    let wf := goldilocksExt3_wellFormed params shape hmax
+    let P := modelParams goldilocksExt3_fieldModel params shape wf
+    let N : ℕ := Q + (P.batches + (P.rounds + 2)) + P.verifierQueries
+    prob (fun res l =>
+        (∃ f : ∀ x, SpongeTensorOracleAnswer (D := Digest) goldilocksExt3_fieldModel params shape wf x,
+          (∀ x y, l.dlookup x = some y → f x = y) ∧
+            spongeAcceptsTensor goldilocksExt3_fieldModel params shape wf s₀ f (attempt res.1) = true) ∧
+        ClaimsFail P.ldt P.shift (71 / 128)
+          (P.claims (view goldilocksExt3_fieldModel params shape
+            (Fri.firstMessage (attempt res.1).commitments
+              (attempt res.1).points (attempt res.1).values)) (spongeCommittedRow l)))
+      (spongeExperimentTensor goldilocksExt3_fieldModel params shape wf s₀ adv attempt) [] ≤
+      (N : ℝ) * ((3 / 4 : ℝ) / (2 : ℝ) ^ 128) + 3 * (N : ℝ) ^ 2 / (2 * (2 : ℝ) ^ 256) := by
+  have hcardD : (Fintype.card Digest : ℝ) = (2 : ℝ) ^ 256 := by
+    rw [card_digest, Nat.cast_pow, Nat.cast_ofNat]
+  simpa only [Nat.cast_ofNat, hcardD] using
+    goldilocksExt3_soundnessTensor_sponge_johnson_of_profile_aux Digest
+      2 71 128 9 28 3 27 32 36 params shape hbl (by decide) hmax le_rfl hheight htensor
+      (by rw [hqpow]; exact johnson_71_128_ge_128_pow20_le_three_quarters_128 hqn)
+      (by decide) (by decide) (by decide) (by decide) (by decide)
+      (by norm_num) (by decide) (by decide) (by decide) s₀ hadv attempt
+
+/-- **100% Unconditional 128-Bit Johnson Soundness for `Fri.verifyTensor`
+(`lb = 2, q ≥ 128, queryPow = 20`, `Digest64` `BLAKE2b-512`):**
+ZERO `CurveListCA` / `BatchedLineListCA` hypothesis! Literal `≤ N / 2 ^ 128`
+at `θ = 71 / 128` for `2 ^ (kCol + kOpen) * 2 ^ logMaxHeight ≤ 2 ^ 36` and
+`N ≤ 2 ^ 128`. -/
+theorem goldilocksExt3_soundnessTensor_sponge_blake2b512_johnson_128_unconditional
+    (params : FriParams) (shape : ClaimShape)
+    (hbl : params.logBlowup = 2) (hqn : 128 ≤ params.numQueries) (hqpow : params.queryPowBits = 20)
+    (hmax : Fri.logMaxHeight params.logBlowup shape ≤ 32)
+    (hheight : params.logFinalHeight ≤ Fri.logMaxHeight params.logBlowup shape)
+    (htensor : 2 ^ (Fri.tensorNumChallenges (Fri.maxWidth shape) +
+        Fri.tensorNumChallenges (Fri.maxOpeningsPerHeight params.logBlowup shape)) *
+        2 ^ Fri.logMaxHeight params.logBlowup shape ≤ 2 ^ 36)
+    (s₀ : Digest64) {A : Type*}
+    {adv : OracleComp (SpongeTensorOracleAnswer (D := Digest64) goldilocksExt3_fieldModel params shape
+      (goldilocksExt3_wellFormed params shape hmax)) A}
+    {Q : ℕ} (hadv : adv.QueryBound Q)
+    (hN : Q + ((modelParams goldilocksExt3_fieldModel params shape
+        (goldilocksExt3_wellFormed params shape hmax)).batches +
+      ((modelParams goldilocksExt3_fieldModel params shape
+        (goldilocksExt3_wellFormed params shape hmax)).rounds + 2)) +
+      (modelParams goldilocksExt3_fieldModel params shape
+        (goldilocksExt3_wellFormed params shape hmax)).verifierQueries ≤ 2 ^ 128)
+    (attempt : A → Attempt Goldilocks GoldilocksExt3 Digest64) :
+    let wf := goldilocksExt3_wellFormed params shape hmax
+    let P := modelParams goldilocksExt3_fieldModel params shape wf
+    let N : ℕ := Q + (P.batches + (P.rounds + 2)) + P.verifierQueries
+    prob (fun res l =>
+        (∃ f : ∀ x, SpongeTensorOracleAnswer (D := Digest64) goldilocksExt3_fieldModel params shape wf x,
+          (∀ x y, l.dlookup x = some y → f x = y) ∧
+            spongeAcceptsTensor goldilocksExt3_fieldModel params shape wf s₀ f (attempt res.1) = true) ∧
+        ClaimsFail P.ldt P.shift (71 / 128)
+          (P.claims (view goldilocksExt3_fieldModel params shape
+            (Fri.firstMessage (attempt res.1).commitments
+              (attempt res.1).points (attempt res.1).values)) (spongeCommittedRow l)))
+      (spongeExperimentTensor goldilocksExt3_fieldModel params shape wf s₀ adv attempt) [] ≤
+      (N : ℝ) / (2 : ℝ) ^ 128 := by
+  simpa only [Nat.cast_ofNat] using
+    goldilocksExt3_soundnessTensor_sponge_blake2b512_johnson_of_profile
+      2 71 128 9 28 3 27 32 36 params shape hbl (by decide) hmax le_rfl hheight htensor
+      (by rw [hqpow]; exact johnson_71_128_ge_128_pow20_le_three_quarters_128 hqn)
+      (by decide) (by decide) (by decide) (by decide) (by decide)
+      (by norm_num) (by decide) (by decide) (by decide) s₀ hadv hN attempt
+
+/-- **100% Unconditional 128-Bit Johnson Soundness for `Fri.verifyTensor`
+(`lb = 2, q ≥ 118, queryPow = 20`, `Digest64` `BLAKE2b-512`):**
+literal `≤ N / 2 ^ 128` at `θ = 135 / 256` for `logMaxHeight ≤ 30`,
+`2 ^ (kCol + kOpen) * 2 ^ logMaxHeight ≤ 2 ^ 31`, and `N ≤ 2 ^ 128`. -/
+theorem goldilocksExt3_soundnessTensor_sponge_blake2b512_johnson_118_128_unconditional
+    (params : FriParams) (shape : ClaimShape)
+    (hbl : params.logBlowup = 2) (hqn : 118 ≤ params.numQueries) (hqpow : params.queryPowBits = 20)
+    (hmax : Fri.logMaxHeight params.logBlowup shape ≤ 30)
+    (hheight : params.logFinalHeight ≤ Fri.logMaxHeight params.logBlowup shape)
+    (htensor : 2 ^ (Fri.tensorNumChallenges (Fri.maxWidth shape) +
+        Fri.tensorNumChallenges (Fri.maxOpeningsPerHeight params.logBlowup shape)) *
+        2 ^ Fri.logMaxHeight params.logBlowup shape ≤ 2 ^ 31)
+    (s₀ : Digest64) {A : Type*}
+    {adv : OracleComp (SpongeTensorOracleAnswer (D := Digest64) goldilocksExt3_fieldModel params shape
+      (goldilocksExt3_wellFormed params shape (hmax.trans (by decide)))) A}
+    {Q : ℕ} (hadv : adv.QueryBound Q)
+    (hN : Q + ((modelParams goldilocksExt3_fieldModel params shape
+        (goldilocksExt3_wellFormed params shape (hmax.trans (by decide)))).batches +
+      ((modelParams goldilocksExt3_fieldModel params shape
+        (goldilocksExt3_wellFormed params shape (hmax.trans (by decide)))).rounds + 2)) +
+      (modelParams goldilocksExt3_fieldModel params shape
+        (goldilocksExt3_wellFormed params shape (hmax.trans (by decide)))).verifierQueries ≤ 2 ^ 128)
+    (attempt : A → Attempt Goldilocks GoldilocksExt3 Digest64) :
+    let wf := goldilocksExt3_wellFormed params shape (hmax.trans (by decide))
+    let P := modelParams goldilocksExt3_fieldModel params shape wf
+    let N : ℕ := Q + (P.batches + (P.rounds + 2)) + P.verifierQueries
+    prob (fun res l =>
+        (∃ f : ∀ x, SpongeTensorOracleAnswer (D := Digest64) goldilocksExt3_fieldModel params shape wf x,
+          (∀ x y, l.dlookup x = some y → f x = y) ∧
+            spongeAcceptsTensor goldilocksExt3_fieldModel params shape wf s₀ f (attempt res.1) = true) ∧
+        ClaimsFail P.ldt P.shift (135 / 256)
+          (P.claims (view goldilocksExt3_fieldModel params shape
+            (Fri.firstMessage (attempt res.1).commitments
+              (attempt res.1).points (attempt res.1).values)) (spongeCommittedRow l)))
+      (spongeExperimentTensor goldilocksExt3_fieldModel params shape wf s₀ adv attempt) [] ≤
+      (N : ℝ) / (2 : ℝ) ^ 128 := by
+  simpa only [Nat.cast_ofNat] using
+    goldilocksExt3_soundnessTensor_sponge_blake2b512_johnson_of_profile
+      2 135 256 18 50 5 32 30 31 params shape hbl (by decide) hmax (by decide) hheight htensor
+      (by rw [hqpow]; exact johnson_135_256_ge_118_pow20_le_three_quarters_128 hqn)
+      (by decide) (by decide) (by decide) (by decide) (by decide)
+      (by norm_num) (by decide) (by decide) (by decide) s₀ hadv hN attempt
+
+/-- **100% Unconditional 128-Bit Johnson Soundness for `Fri.verifyTensor`
+(`lb = 3, q ≥ 78, queryPow = 20`, `Digest64` `BLAKE2b-512`):**
+literal `≤ N / 2 ^ 128` at `θ = 19 / 50` for `logMaxHeight ≤ 31`,
+`2 ^ (kCol + kOpen) * 2 ^ logMaxHeight ≤ 2 ^ 32`, and `N ≤ 2 ^ 128`. -/
+theorem goldilocksExt3_soundnessTensor_sponge_blake2b512_johnson_lb3_78_128_unconditional
+    (params : FriParams) (shape : ClaimShape)
+    (hbl : params.logBlowup = 3) (hqn : 78 ≤ params.numQueries) (hqpow : params.queryPowBits = 20)
+    (hmax : Fri.logMaxHeight params.logBlowup shape ≤ 31)
+    (hheight : params.logFinalHeight ≤ Fri.logMaxHeight params.logBlowup shape)
+    (htensor : 2 ^ (Fri.tensorNumChallenges (Fri.maxWidth shape) +
+        Fri.tensorNumChallenges (Fri.maxOpeningsPerHeight params.logBlowup shape)) *
+        2 ^ Fri.logMaxHeight params.logBlowup shape ≤ 2 ^ 32)
+    (s₀ : Digest64) {A : Type*}
+    {adv : OracleComp (SpongeTensorOracleAnswer (D := Digest64) goldilocksExt3_fieldModel params shape
+      (goldilocksExt3_wellFormed params shape (hmax.trans (by decide)))) A}
+    {Q : ℕ} (hadv : adv.QueryBound Q)
+    (hN : Q + ((modelParams goldilocksExt3_fieldModel params shape
+        (goldilocksExt3_wellFormed params shape (hmax.trans (by decide)))).batches +
+      ((modelParams goldilocksExt3_fieldModel params shape
+        (goldilocksExt3_wellFormed params shape (hmax.trans (by decide)))).rounds + 2)) +
+      (modelParams goldilocksExt3_fieldModel params shape
+        (goldilocksExt3_wellFormed params shape (hmax.trans (by decide)))).verifierQueries ≤ 2 ^ 128)
+    (attempt : A → Attempt Goldilocks GoldilocksExt3 Digest64) :
+    let wf := goldilocksExt3_wellFormed params shape (hmax.trans (by decide))
+    let P := modelParams goldilocksExt3_fieldModel params shape wf
+    let N : ℕ := Q + (P.batches + (P.rounds + 2)) + P.verifierQueries
+    prob (fun res l =>
+        (∃ f : ∀ x, SpongeTensorOracleAnswer (D := Digest64) goldilocksExt3_fieldModel params shape wf x,
+          (∀ x y, l.dlookup x = some y → f x = y) ∧
+            spongeAcceptsTensor goldilocksExt3_fieldModel params shape wf s₀ f (attempt res.1) = true) ∧
+        ClaimsFail P.ldt P.shift (19 / 50)
+          (P.claims (view goldilocksExt3_fieldModel params shape
+            (Fri.firstMessage (attempt res.1).commitments
+              (attempt res.1).points (attempt res.1).values)) (spongeCommittedRow l)))
+      (spongeExperimentTensor goldilocksExt3_fieldModel params shape wf s₀ adv attempt) [] ≤
+      (N : ℝ) / (2 : ℝ) ^ 128 := by
+  simpa only [Nat.cast_ofNat] using
+    goldilocksExt3_soundnessTensor_sponge_blake2b512_johnson_of_profile
+      3 19 50 13 51 9 31 31 32 params shape hbl (by decide) hmax (by decide) hheight htensor
+      (by rw [hqpow]; exact johnson_19_50_ge_78_pow20_le_three_quarters_128 hqn)
+      (by decide) (by decide) (by decide) (by decide) (by decide)
+      (by norm_num) (by decide) (by decide) (by decide) s₀ hadv hN attempt
+
+/-- **100% Unconditional 128-Bit Johnson Soundness for `Fri.verifyTensor`
+(`lb = 4, q ≥ 58, queryPow = 20`, `Digest64` `BLAKE2b-512`):**
+literal `≤ N / 2 ^ 128` at `θ = 35 / 128` for `logMaxHeight ≤ 32`,
+`2 ^ (kCol + kOpen) * 2 ^ logMaxHeight ≤ 2 ^ 33`, and `N ≤ 2 ^ 128`. -/
+theorem goldilocksExt3_soundnessTensor_sponge_blake2b512_johnson_lb4_58_128_unconditional
+    (params : FriParams) (shape : ClaimShape)
+    (hbl : params.logBlowup = 4) (hqn : 58 ≤ params.numQueries) (hqpow : params.queryPowBits = 20)
+    (hmax : Fri.logMaxHeight params.logBlowup shape ≤ 32)
+    (hheight : params.logFinalHeight ≤ Fri.logMaxHeight params.logBlowup shape)
+    (htensor : 2 ^ (Fri.tensorNumChallenges (Fri.maxWidth shape) +
+        Fri.tensorNumChallenges (Fri.maxOpeningsPerHeight params.logBlowup shape)) *
+        2 ^ Fri.logMaxHeight params.logBlowup shape ≤ 2 ^ 33)
+    (s₀ : Digest64) {A : Type*}
+    {adv : OracleComp (SpongeTensorOracleAnswer (D := Digest64) goldilocksExt3_fieldModel params shape
+      (goldilocksExt3_wellFormed params shape hmax)) A}
+    {Q : ℕ} (hadv : adv.QueryBound Q)
+    (hN : Q + ((modelParams goldilocksExt3_fieldModel params shape
+        (goldilocksExt3_wellFormed params shape hmax)).batches +
+      ((modelParams goldilocksExt3_fieldModel params shape
+        (goldilocksExt3_wellFormed params shape hmax)).rounds + 2)) +
+      (modelParams goldilocksExt3_fieldModel params shape
+        (goldilocksExt3_wellFormed params shape hmax)).verifierQueries ≤ 2 ^ 128)
+    (attempt : A → Attempt Goldilocks GoldilocksExt3 Digest64) :
+    let wf := goldilocksExt3_wellFormed params shape hmax
+    let P := modelParams goldilocksExt3_fieldModel params shape wf
+    let N : ℕ := Q + (P.batches + (P.rounds + 2)) + P.verifierQueries
+    prob (fun res l =>
+        (∃ f : ∀ x, SpongeTensorOracleAnswer (D := Digest64) goldilocksExt3_fieldModel params shape wf x,
+          (∀ x y, l.dlookup x = some y → f x = y) ∧
+            spongeAcceptsTensor goldilocksExt3_fieldModel params shape wf s₀ f (attempt res.1) = true) ∧
+        ClaimsFail P.ldt P.shift (35 / 128)
+          (P.claims (view goldilocksExt3_fieldModel params shape
+            (Fri.firstMessage (attempt res.1).commitments
+              (attempt res.1).points (attempt res.1).values)) (spongeCommittedRow l)))
+      (spongeExperimentTensor goldilocksExt3_fieldModel params shape wf s₀ adv attempt) [] ≤
+      (N : ℝ) / (2 : ℝ) ^ 128 := by
+  simpa only [Nat.cast_ofNat] using
+    goldilocksExt3_soundnessTensor_sponge_blake2b512_johnson_of_profile
+      4 35 128 11 58 13 30 32 33 params shape hbl (by decide) hmax le_rfl hheight htensor
+      (by rw [hqpow]; exact johnson_35_128_ge_58_pow20_le_three_quarters_128 hqn)
+      (by decide) (by decide) (by decide) (by decide) (by decide)
+      (by norm_num) (by decide) (by decide) (by decide) s₀ hadv hN attempt
 
 end CertiFri.P3.Exec

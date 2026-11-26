@@ -1062,6 +1062,10 @@ private theorem stateRel_checkWitness (P : Compiled.Params K) (bits : ℕ → �
     (1 ≤ ((freeChallenger P bits (liftSpongeOracle P bits s₀ f) m).checkWitness fs powBits w).2.round ∨
       P.batches ≤ ((freeChallenger P bits (liftSpongeOracle P bits s₀ f) m).checkWitness fs powBits w).2.cur.length) := by
   unfold Challenger.checkWitness
+  have hokF : ∀ s, (freeChallenger P bits (liftSpongeOracle P bits s₀ f) m).ok s = true :=
+    fun _ => rfl
+  have hokS : ∀ s, (spongeChallenger P bits f m).ok s = true := fun _ => rfl
+  simp only [hokF, hokS, Bool.not_true, Bool.false_eq_true, ↓reduceIte, Bool.true_and]
   split_ifs with h0
   · exact ⟨rfl, hrel, hready⟩
   · have hobs := stateRel_observe m P bits s₀ f hrel (.base w)

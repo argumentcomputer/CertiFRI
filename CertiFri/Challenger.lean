@@ -36,6 +36,9 @@ structure Challenger (σ F EF D : Type) where
   sampleExt : σ → EF × σ
   /-- Squeeze an integer below `2 ^ bits`. -/
   sampleBits : σ → (bits : Nat) → Nat × σ
+  /-- Whether the challenger state is valid (`false` when bounded rejection
+  sampling has exhausted its fuel). Idealized challengers use the default. -/
+  ok : σ → Bool := fun _ => true
 
 namespace Challenger
 
@@ -48,13 +51,15 @@ def observeAll (chal : Challenger σ F EF D) (s : σ) (obs : List (Observation F
 /-- Check a grinding witness: absorb it, then require the next `bits` sampled
 bits to be zero. Port of `GrindingChallenger::check_witness`.
 
-At zero difficulty nothing is absorbed and every witness passes. -/
+Fails closed (`false`) if `chal.ok` is `false`. At zero difficulty on a valid
+state nothing is absorbed and every witness passes. -/
 def checkWitness (chal : Challenger σ F EF D) (s : σ) (bits : Nat) (witness : F) : Bool × σ :=
-  if bits = 0 then (true, s)
+  if !chal.ok s then (false, s)
+  else if bits = 0 then (true, s)
   else
     let s := chal.observe s (.base witness)
     let sampled := chal.sampleBits s bits
-    (sampled.1 == 0, sampled.2)
+    (chal.ok sampled.2 && (sampled.1 == 0), sampled.2)
 
 /-- Squeeze `count` integers below `2 ^ bits`, one after the other. -/
 def sampleIndices (chal : Challenger σ F EF D) (bits : Nat) : (count : Nat) → σ → List Nat

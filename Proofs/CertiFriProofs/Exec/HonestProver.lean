@@ -123,14 +123,14 @@ theorem honestChallenges_powOk_of_grind
     (fun s => hgrind s _) (fun s => hgrind s _)
 
 omit [DecidableEq D] [Inhabited D] in
-/-- **Without proof of work, the witnesses of the prover pass**, whatever the
-search returns. -/
+/-- **Without proof of work, the witnesses of the prover pass** on any valid
+challenger, whatever the search returns. -/
 theorem honestChallenges_powOk_of_bits_eq_zero (hcommit : params.commitPowBits = 0)
-    (hquery : params.queryPowBits = 0) :
+    (hquery : params.queryPowBits = 0) (hok : ∀ s, chal.ok s = true) :
     (honestChallenges m params shape wf hIn hFri chal init w points values grind).powOk = true :=
   HonestProver.powOk_of_checks m params shape wf hIn hFri chal init w points values grind
-    (fun s => by rw [hcommit]; exact HonestProver.checkWitness_zero chal s _)
-    (fun s => by rw [hquery]; exact HonestProver.checkWitness_zero chal s _)
+    (fun s => by rw [hcommit]; exact HonestProver.checkWitness_zero chal s _ (hok s))
+    (fun s => by rw [hquery]; exact HonestProver.checkWitness_zero chal s _ (hok s))
 
 open HonestProver in
 /-- **The honest prover's proof follows the protocol.**

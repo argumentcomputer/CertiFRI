@@ -1,295 +1,59 @@
-import CertiFri.TensorBatching
-import CertiFriProofs.Theory.ProximityGap.TensorMCA
+import CertiFriProofs.Exec.TensorExec
 import CertiFriProofs.Exec.SoundnessSponge
 
 /-!
 # Executable `FriBatching::Tensor` Refinement & 128-Bit `GoldilocksExt3` Soundness
 
-Bridges the executable `FriBatching::Tensor` implementation
-(`CertiFri/TensorBatching.lean`, matching `multi-stark` `v6`'s
-`src/p3_adapter/fri_batching.rs`) to the mathematical soundness theorems in
-`Proofs/CertiFriProofs/Theory/ProximityGap/TensorMCA.lean`:
+Re-exports the executable `Fri.verifyTensor` refinement and chained-ROM soundness
+theorems from `Proofs/CertiFriProofs/Exec/TensorExec.lean` (`toModel_tensorWeights*`,
+`toModel_reducedOpeningTensor*`, `Exec.run_model_of_acceptsTensor`,
+`Exec.soundnessTensor`, `Exec.soundnessTensor_uniqueDecoding`) and provides
+concrete `GoldilocksExt3` (`Fp3Model`) 128-bit `Tensor2DMCA` bounds.
 
-1. **Exact executable refinement (`CertiFri.Exec`):**
-   * `length_tensorWeightsList`: `(Fri.tensorWeightsList chals len).length = min len (2 ^ chals.length)`.
-   * `toModel_tensorWeightsList_getD`: every entry `j < len` (`len ≤ 2 ^ chals.length`)
-     of executable `Fri.tensorWeightsList` refines to the exact mathematical
-     multilinear monomial `tensorWeight (fun b => r.toModel chals[b]) j`.
-   * `toModel_tensorWeightExplicit`: executable `Fri.tensorWeightExplicit` refines
-     to the exact same `tensorWeight`.
-   * `toModel_tensorColAcc`, `toModel_tensorOpeningTerm`: the executable column
-     accumulation and the term of one opening refine to the exact sums
-     `∑_c w_col[c] * (y_{o,c} - f_{o,c}(x))` and
-     `w_open[o] * (∑_c w_col[c] * (y_{o,c} - f_{o,c}(x))) / (z_o - x)`.
-     No lemma relates the whole reduced opening `Fri.reducedOpeningTensor` to
-     the model, and no verifier or soundness theorem uses `Tensor2DMCA`.
+Incremental-sponge (`c = 3 / 2`) executable `Fri.verifyTensor` soundness for
+both 32-byte `BLAKE3-256` (`Digest`) and 64-byte `BLAKE2b-512` (`Digest64`) is
+proved in `Proofs/CertiFriProofs/Exec/SoundnessTensorSponge.lean` — both
+unconditionally in the unique-decoding regime (for all `W ≤ 2 ^ 16`, `M ≤ 2 ^ 16`,
+`logMaxHeight ≤ 32`) and unconditionally in the Johnson regime (`lb = 2, 3, 4`)
+via the union-bound reduction `tensor2DMCA_of_curveMCA_two` from `curveListCA_fp3`.
 
-2. **Concrete `GoldilocksExt3` 128-bit Tensor batching soundness (`CertiFri.P3.Exec`):**
-   * `goldilocksExt3_tensor2DMCA_ud`: unconditional 2D tensor MCA over `Fp3Model`
-     with error `(kCol + kOpen) * ((1 + δ) * |D|) / Goldilocks.order ^ 3`.
-   * `goldilocksExt3_tensor2DMCA_ud_128`: for ANY width `W ≤ 2 ^ 16`, ANY opening
-     count `M ≤ 2 ^ 16` (up to `2 ^ 32` claims!), ANY domain `|D| ≤ 2 ^ 32`, and
-     blowup `4` (`δ = 3 / 8`), the tensor batching error is strictly `≤ (3 / 4) / 2 ^ 128`
-     (in fact `< 2 ^ (-153)`), with **zero** unproven assumptions.
-   * `goldilocksExt3_tensor2DMCA_johnson_128`: Johnson-regime 2D tensor MCA over
-     `Fp3Model` under `BatchedLineListCA Fp3Model T`, with concrete `≤ (3 / 4) / 2 ^ 128`
-     corollary at `θ = 65 / 128` (`logBlowup = 2`).
+## Technical note: `CurveListCA` constant vs. `M`-independent `BatchedLineListCA`
+
+Two distinct bounds govern Johnson-regime tensor batching over `GoldilocksExt3`
+(`|Fp3Model| = p ^ 3 ≈ 2 ^ 192`):
+
+1. **Unconditional discharge via `CurveListCA` (`m = 2`) union bound (proved in
+   `TensorMCA.lean` / `SoundnessTensorSponge.lean`):**
+   Applying `curveListCA_fp3` at `m = 2` to each of the `2 ^ i` parallel lines
+   in halving round `i` gives `Tensor2DMCA` with error `(2 ^ (kCol + kOpen) - 1) * ε_line`
+   (zero unproven assumptions). In `CurveListCA.lean`, the leading term in
+   `curveListCoeff n d A` is `L_Y * B3 ≈ 2 * (r + 1) * L_Y ^ 5 * d`, coming from
+   the cleared-denominator Hensel residual `henselResidualCoeff` (`D₀ ^ (2 * d * ℓ)`
+   with `deg_Z(D₀) = ((ℓ + 1) * t + 3 * ℓ + 1) * D_Z` in `HenselLift.lean`),
+   whereas the Hasse-multiplicity double-counting term `L_Y * B4 ≈ L_Y * (r + 2) * L_Y * n`
+   is 8.8–10.7 bits smaller:
+
+   * `lb = 2, θ = 71 / 128` (`r = 9, L_Y = 28`): `curveListCoeff / n ≤ 2 ^ 26.58`
+     (`PowExp = 27`, `B4`-only `2 ^ 17.83`, gap `8.75` bits). Unconditionally
+     discharges `2 ^ (kCol + kOpen) * 2 ^ H ≤ 2 ^ 36` (e.g. `d ≤ 2 ^ 23`,
+     `H = 25`, up to `2048` tensor claims).
+   * `lb = 2, θ = 135 / 256` (`r = 18, L_Y = 50`): `2 ^ 31.59` vs `B4`-only `2 ^ 21.22` (`10.37` bits).
+   * `lb = 3, θ = 19 / 50` (`r = 13, L_Y = 51`): `2 ^ 30.29` vs `B4`-only `2 ^ 19.90` (`10.39` bits).
+   * `lb = 4, θ = 35 / 128` (`r = 11, L_Y = 58`): `2 ^ 29.98` vs `B4`-only `2 ^ 19.27` (`10.71` bits).
+
+   Closing this ~9–11 bit gap in `CurveListCA` requires avoiding the linear-in-`d`
+   denominator growth `D₀ ^ (2 * d)` in `HenselLift.lean` (reducing `D₀` alone to
+   `2 * L_Y * D_Z` saves only ~3.7–4.6 bits).
+
+2. **`M`-independent `BatchedLineListCA Fp3Model T` (`(kCol + kOpen) * ε_line`):**
+   Eliminating the exponential `2 ^ (kCol + kOpen)` union-bound factor to achieve
+   `(kCol + kOpen)` logarithmic scaling for arbitrary `W, M ≤ 2 ^ 16` across all
+   rates (`lb = 2, 3, 4` at `d ≤ 2 ^ 23`) requires an interleaved-word Johnson
+   peeling proof (discharging `BatchedLineListCA` simultaneously across `M`
+   parallel lines sharing one challenge `β` over a common extension field
+   `E = F(Z)[T] / (H)` of degree `≤ L_Y`, rather than taking a union bound over
+   `M` independent single-line calls).
 -/
-
-namespace CertiFri.Exec
-
-open Fri
-
-section WeightRefinement
-
-variable {EF K : Type} [FieldOps EF] [Field K] (r : Refines EF K)
-
-/-- Unrolled (untruncated) tensor weight list of length `2 ^ chals.length`. -/
-private def tensorWeightsFull : List EF → List EF
-  | [] => [1]
-  | chals => chals.foldl (fun acc x => acc ++ acc.map (fun w => x * w)) [1]
-
-private theorem tensorWeightsFull_nil : tensorWeightsFull (EF := EF) [] = [1] := rfl
-
-private theorem tensorWeightsFull_snoc (chals : List EF) (x : EF) :
-    tensorWeightsFull (chals ++ [x]) =
-      tensorWeightsFull chals ++ (tensorWeightsFull chals).map (fun w => x * w) := by
-  cases chals with
-  | nil => simp [tensorWeightsFull]
-  | cons c cs =>
-    simp [tensorWeightsFull, List.foldl_append]
-
-private theorem length_tensorWeightsFull :
-    ∀ chals : List EF, (tensorWeightsFull chals).length = 2 ^ chals.length := by
-  intro chals
-  induction chals using List.reverseRecOn with
-  | nil => rfl
-  | append_singleton cs x ih =>
-    rw [tensorWeightsFull_snoc, List.length_append, List.length_map, ih, List.length_append,
-      List.length_singleton, pow_succ, mul_two]
-
-private theorem tensorStep_take_comm (len : ℕ) (acc : List EF) (x : EF) :
-    tensorStep len (acc.take len) x = (acc ++ acc.map (fun w => x * w)).take len := by
-  unfold tensorStep
-  rw [List.take_append, List.take_append, List.take_take, Nat.min_self, List.length_take]
-  by_cases h : len ≤ acc.length
-  · rw [Nat.min_eq_left h, Nat.sub_self, List.take_zero, List.append_nil,
-      Nat.sub_eq_zero_of_le h, List.take_zero, List.append_nil]
-  · have hlt : acc.length < len := Nat.lt_of_not_ge h
-    rw [Nat.min_eq_right (Nat.le_of_lt hlt), List.take_of_length_le (Nat.le_of_lt hlt)]
-
-private theorem tensorWeightsList_eq_take (chals : List EF) (len : ℕ) :
-    tensorWeightsList chals len = (tensorWeightsFull chals).take len := by
-  by_cases h0 : len = 0
-  · subst h0; simp [tensorWeightsList]
-  · unfold tensorWeightsList
-    rw [ite_eq_right h0]
-    induction chals using List.reverseRecOn with
-    | nil =>
-      simp only [List.foldl_nil, tensorWeightsFull_nil]
-      have h1 : 1 ≤ len := Nat.pos_of_ne_zero h0
-      rw [List.take_of_length_le (by simpa using h1)]
-    | append_singleton cs x ih =>
-      rw [List.foldl_append, List.foldl_cons, List.foldl_nil, ih, tensorStep_take_comm,
-        tensorWeightsFull_snoc]
-
-/-- Exact length of `Fri.tensorWeightsList chals len`: `min len (2 ^ chals.length)`. -/
-theorem length_tensorWeightsList (chals : List EF) (len : ℕ) :
-    (tensorWeightsList chals len).length = min len (2 ^ chals.length) := by
-  rw [tensorWeightsList_eq_take, List.length_take, length_tensorWeightsFull]
-
-/-- Under `r : Refines EF K`, every entry `j < 2 ^ chals.length` of `tensorWeightsFull chals`
-equals the mathematical multilinear monomial `tensorWeight (fun b => r.toModel chals[b]) j`. -/
-private theorem toModel_tensorWeightsFull_getElem :
-    ∀ (chals : List EF) (j : ℕ) (hj : j < 2 ^ chals.length),
-      r.toModel ((tensorWeightsFull chals)[j]'(by rw [length_tensorWeightsFull]; exact hj)) =
-        tensorWeight (fun b : Fin chals.length => r.toModel chals[b.val]) ⟨j, hj⟩ := by
-  intro chals
-  induction chals using List.reverseRecOn with
-  | nil =>
-    intro j hj
-    have hj0 : j = 0 := by simp at hj; omega
-    subst hj0
-    simp [tensorWeightsFull, r.map_one, tensorWeight]
-  | append_singleton cs x ih =>
-    intro j hj
-    have hlen : (cs ++ [x]).length = cs.length + 1 := by simp
-    have hj' : j < 2 ^ (cs.length + 1) := by rwa [hlen] at hj
-    have hlen_full : (tensorWeightsFull cs).length = 2 ^ cs.length := length_tensorWeightsFull cs
-    -- Compare via `tensorWeight_succ_lo` / `tensorWeight_succ_hi`.
-    let rVec : Fin (cs.length + 1) → K := fun b =>
-      r.toModel ((cs ++ [x])[b.val]'(by rw [hlen]; exact b.isLt))
-    have hcast : tensorWeight (fun b : Fin (cs ++ [x]).length => r.toModel (cs ++ [x])[b.val]) ⟨j, hj⟩ =
-        tensorWeight rVec ⟨j, hj'⟩ := by
-      unfold tensorWeight
-      refine Finset.prod_bij (fun b _ => ⟨b.val, by rw [← hlen]; exact b.isLt⟩)
-        (fun _ _ => Finset.mem_univ _)
-        (fun a _ b _ h => Fin.ext (by simpa using congrArg Fin.val h))
-        (fun b _ => ⟨⟨b.val, by rw [hlen]; exact b.isLt⟩, Finset.mem_univ _, rfl⟩)
-        (fun b _ => rfl)
-    rw [hcast]
-    have hlo_vec : rVec ∘ Fin.castSucc = fun b : Fin cs.length => r.toModel cs[b.val] := by
-      funext b
-      simp only [Function.comp_apply, rVec, Fin.val_castSucc]
-      rw [List.getElem_append_left b.isLt]
-    have hlast_vec : rVec (Fin.last cs.length) = r.toModel x := by
-      simp only [rVec, Fin.val_last]
-      rw [List.getElem_append_right le_rfl]
-      simp
-    by_cases hlt : j < 2 ^ cs.length
-    · have hget : (tensorWeightsFull (cs ++ [x]))[j]'(by rw [length_tensorWeightsFull]; exact hj) =
-          (tensorWeightsFull cs)[j]'(by rw [hlen_full]; exact hlt) := by
-        simp only [tensorWeightsFull_snoc]
-        exact List.getElem_append_left (by rw [hlen_full]; exact hlt)
-      rw [hget, ih j hlt]
-      have hw := tensorWeight_succ_lo rVec ⟨j, hlt⟩
-      rw [hlo_vec] at hw
-      exact hw.symm
-    · have hge : 2 ^ cs.length ≤ j := Nat.le_of_not_lt hlt
-      have hsub_lt : j - 2 ^ cs.length < 2 ^ cs.length := by
-        rw [pow_succ, mul_two] at hj'; omega
-      have hget : (tensorWeightsFull (cs ++ [x]))[j]'(by rw [length_tensorWeightsFull]; exact hj) =
-          x * (tensorWeightsFull cs)[j - 2 ^ cs.length]'(by rw [hlen_full]; exact hsub_lt) := by
-        simp only [tensorWeightsFull_snoc]
-        rw [List.getElem_append_right (by rw [hlen_full]; exact hge), List.getElem_map]
-        congr 2
-        omega
-      rw [hget, r.map_mul, ih (j - 2 ^ cs.length) hsub_lt]
-      have hw := tensorWeight_succ_hi rVec ⟨j - 2 ^ cs.length, hsub_lt⟩
-      rw [hlo_vec, hlast_vec] at hw
-      have hidx : (⟨j - 2 ^ cs.length + 2 ^ cs.length,
-          by rw [pow_succ, mul_two]; exact Nat.add_lt_add_right hsub_lt _⟩ :
-          Fin (2 ^ (cs.length + 1))) = ⟨j, hj'⟩ := by
-        ext; dsimp only; omega
-      rw [hidx] at hw
-      exact hw.symm
-
-/-- **Exact refinement of executable `Fri.tensorWeightsList` to mathematical `tensorWeight`.** -/
-theorem toModel_tensorWeightsList_getD (chals : List EF) (len j : ℕ)
-    (hj_len : j < len) (hj_pow : j < 2 ^ chals.length) :
-    r.toModel ((tensorWeightsList chals len).getD j 0) =
-      tensorWeight (fun b : Fin chals.length => r.toModel chals[b.val]) ⟨j, hj_pow⟩ := by
-  have hlt : j < (tensorWeightsList chals len).length := by
-    rw [length_tensorWeightsList]
-    exact lt_min hj_len hj_pow
-  rw [List.getD_eq_getElem _ _ hlt]
-  have hget : (tensorWeightsList chals len)[j]'hlt =
-      (tensorWeightsFull chals)[j]'(by rw [length_tensorWeightsFull]; exact hj_pow) := by
-    simp only [tensorWeightsList_eq_take]
-    exact List.getElem_take
-  rw [hget]
-  exact toModel_tensorWeightsFull_getElem r chals j hj_pow
-
-/-- **Exact refinement of executable `Fri.tensorWeights` (Array) to mathematical `tensorWeight`.** -/
-theorem toModel_tensorWeights_getD (chals : Array EF) (len j : ℕ)
-    (hj_len : j < len) (hj_pow : j < 2 ^ chals.size) :
-    r.toModel ((tensorWeights chals len).getD j 0) =
-      tensorWeight (fun b : Fin chals.size => r.toModel chals[b.val]) ⟨j, hj_pow⟩ := by
-  have hget : (tensorWeights chals len).getD j 0 = (tensorWeightsList chals.toList len).getD j 0 := by
-    unfold tensorWeights
-    by_cases hlt : j < (tensorWeightsList chals.toList len).length <;>
-      simp [Array.getD, List.getD_eq_getElem?_getD, hlt]
-  rw [hget]
-  exact toModel_tensorWeightsList_getD r chals.toList len j hj_len (by simpa using hj_pow)
-
-/-- **Exact refinement of executable `Fri.tensorWeightExplicit` to mathematical `tensorWeight`.** -/
-theorem toModel_tensorWeightExplicit (chals : List EF) (j : ℕ) (hj : j < 2 ^ chals.length) :
-    r.toModel (tensorWeightExplicit chals j) =
-      tensorWeight (fun b : Fin chals.length => r.toModel chals[b.val]) ⟨j, hj⟩ := by
-  have hgo : ∀ (cs : List EF) (idx : ℕ) (hidx : idx < 2 ^ cs.length) (acc : EF),
-      r.toModel (tensorWeightExplicit.go cs idx acc) =
-        r.toModel acc * tensorWeight (fun b : Fin cs.length => r.toModel cs[b.val]) ⟨idx, hidx⟩ := by
-    intro cs
-    induction cs with
-    | nil =>
-      intro idx hidx acc
-      simp [tensorWeightExplicit.go, tensorWeight]
-    | cons c cs ih =>
-      intro idx hidx acc
-      have hdiv : idx / 2 < 2 ^ cs.length := by
-        simp only [List.length_cons, pow_succ'] at hidx
-        omega
-      simp only [tensorWeightExplicit.go]
-      rw [ih (idx / 2) hdiv]
-      have hprod : tensorWeight (fun b : Fin (c :: cs).length => r.toModel (c :: cs)[b.val]) ⟨idx, hidx⟩ =
-          (if idx % 2 = 1 then r.toModel c else 1) *
-            tensorWeight (fun b : Fin cs.length => r.toModel cs[b.val]) ⟨idx / 2, hdiv⟩ := by
-        change (∏ b : Fin (cs.length + 1),
-            if idx.testBit b.val then r.toModel (c :: cs)[b.val] else 1) = _
-        rw [Fin.prod_univ_succ]
-        congr 1
-        · have hbit0 : idx.testBit 0 = decide (idx % 2 = 1) := by
-            simp only [Nat.testBit, Nat.shiftRight_zero, Nat.one_and_eq_mod_two]
-            cases hmod : idx % 2 with
-            | zero => rfl
-            | succ m =>
-              have hm : m = 0 := by omega
-              subst hm; rfl
-          simp only [Fin.val_zero, hbit0, decide_eq_true_eq, List.getElem_cons_zero]
-        · refine Finset.prod_congr rfl fun b _ => ?_
-          have hbit : idx.testBit (b.val + 1) = (idx / 2).testBit b.val := by
-            rw [Nat.testBit, Nat.testBit, Nat.shiftRight_eq_div_pow, Nat.shiftRight_eq_div_pow,
-              pow_succ', ← Nat.div_div_eq_div_mul]
-          simp [Fin.val_succ, hbit]
-      rw [hprod]
-      split_ifs with hodd
-      · rw [r.map_mul, mul_assoc]
-      · rw [one_mul]
-  unfold tensorWeightExplicit
-  rw [hgo chals j hj 1, r.map_one, one_mul]
-
-end WeightRefinement
-
-section OpeningRefinement
-
-variable {F EF K : Type} [FieldOps F] [FieldOps EF] [ExtensionOps F EF] [Field K]
-  (m : FieldModel F EF K)
-
-/-- `tensorColAcc` refines to the exact column-weighted sum in `K`. -/
-theorem toModel_tensorColAcc (colWeights : Array EF) (claimed : Array EF) (opened : Array F)
-    (W : ℕ) (hW_c : claimed.size = W) (hW_o : opened.size = W) :
-    m.ext.toModel (tensorColAcc colWeights claimed opened) =
-      ∑ c : Fin W, m.ext.toModel (colWeights.getD c.val 0) *
-        (m.ext.toModel (claimed.getD c.val 0) - m.base.toModel (opened.getD c.val 0)) := by
-  unfold tensorColAcc
-  have hmin : min claimed.size opened.size = W := by rw [hW_c, hW_o, Nat.min_self]
-  rw [hmin]
-  have hfold : ∀ (n : ℕ) (init : EF),
-      m.ext.toModel ((List.range n).foldl (fun acc c =>
-          acc + colWeights.getD c 0 * (claimed.getD c 0 - ExtensionOps.embed (opened.getD c 0))) init) =
-        m.ext.toModel init +
-          ∑ c : Fin n, m.ext.toModel (colWeights.getD c.val 0) *
-            (m.ext.toModel (claimed.getD c.val 0) - m.base.toModel (opened.getD c.val 0)) := by
-    intro n
-    induction n with
-    | zero => intro init; simp
-    | succ n ih =>
-      intro init
-      rw [List.range_succ, List.foldl_append, List.foldl_cons, List.foldl_nil,
-        m.ext.map_add, ih, m.ext.map_mul, m.ext.map_sub, m.embed, Fin.sum_univ_castSucc,
-        add_assoc]
-      rfl
-  rw [hfold W 0, m.ext.map_zero, zero_add]
-
-/-- `tensorOpeningTerm` refines to the exact opening-weighted quotient sum in `K`. -/
-theorem toModel_tensorOpeningTerm (colWeights : Array EF) (openWeight z x : EF)
-    (claimed : Array EF) (opened : Array F) (W : ℕ) (hW_c : claimed.size = W)
-    (hW_o : opened.size = W) :
-    m.ext.toModel (tensorOpeningTerm colWeights openWeight z x claimed opened) =
-      m.ext.toModel openWeight *
-        (∑ c : Fin W, m.ext.toModel (colWeights.getD c.val 0) *
-          ((m.ext.toModel (claimed.getD c.val 0) - m.base.toModel (opened.getD c.val 0)) *
-            (m.ext.toModel z - m.ext.toModel x)⁻¹)) := by
-  unfold tensorOpeningTerm
-  rw [m.ext.map_mul, m.ext.map_mul, m.ext.map_inv, m.ext.map_sub,
-    toModel_tensorColAcc m colWeights claimed opened W hW_c hW_o,
-    mul_assoc, Finset.sum_mul]
-  congr 1
-  refine Finset.sum_congr rfl fun c _ => by ring
-
-end OpeningRefinement
-
-end CertiFri.Exec
 
 /-! ## Concrete `GoldilocksExt3` 128-bit Tensor batching soundness -/
 

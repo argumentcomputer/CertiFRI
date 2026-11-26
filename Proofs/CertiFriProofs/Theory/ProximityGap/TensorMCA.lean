@@ -1124,6 +1124,74 @@ theorem tensor2DMCA_johnson {T : ℕ → ℕ → ℕ → ℕ → ℕ} (hca : Bat
           ((1 - θ) * D.card)) / Fintype.card F)) :=
   tensor2DMCA_of_tensorMCA (tensorMCA_johnson hca D hD d _ hθ0 hθ1 hgap hT)
 
+omit [DecidableEq F] in
+/-- Union-bound reduction from single-line `CurveMCA D d 2 θ ε` to
+`BatchedLineMCA D d M θ (M * ε)`. This discharges Johnson-regime `Tensor2DMCA`
+unconditionally from `CurveListCA` (at `m = 2`) with zero additional proximity
+assumptions. -/
+theorem batchedLineMCA_of_curveMCA_two {D : Finset F} {d : ℕ} {θ ε : ℝ} (M : ℕ)
+    (h1 : CurveMCA D d 2 θ ε) :
+    BatchedLineMCA D d M θ ((M : ℝ) * ε) := by
+  classical
+  intro u₀ u₁
+  have hex : ∀ j : Fin M, ∃ bad : Finset F, (bad.card : ℝ) ≤ ε * Fintype.card F ∧
+      ∀ β ∉ bad, ∀ p : F[X], p.degree < d → ∀ B ⊆ D, θ * D.card ≤ B.card →
+        (∀ x ∈ B, u₀ j x + β * u₁ j x = p.eval x) →
+        ∃ v₀ v₁ : F[X], (v₀.degree < d ∧ v₁.degree < d) ∧
+          ∀ x ∈ B, u₀ j x = v₀.eval x ∧ u₁ j x = v₁.eval x := by
+    intro j
+    let u : Fin 2 → F → F := fun k => if k.val = 0 then u₀ j else u₁ j
+    obtain ⟨bad, hcard, hbad⟩ := h1 u
+    refine ⟨bad, hcard, fun β hβ p hp B hBD hB hagree => ?_⟩
+    obtain ⟨v, hv_deg, hv_ag⟩ := hbad β hβ p hp B hBD hB fun x hx => by
+      rw [Fin.sum_univ_two]
+      simpa [u] using hagree x hx
+    exact ⟨v 0, v 1, ⟨hv_deg 0, hv_deg 1⟩, fun x hx => ⟨hv_ag 0 x hx, hv_ag 1 x hx⟩⟩
+  choose badOf hbad_card hbad using hex
+  refine ⟨Finset.univ.biUnion badOf, ?_, ?_⟩
+  · have hsum : ((Finset.univ.biUnion badOf).card : ℝ) ≤ ∑ j : Fin M, ((badOf j).card : ℝ) := by
+      rw [← Nat.cast_sum]
+      exact_mod_cast Finset.card_biUnion_le
+    calc ((Finset.univ.biUnion badOf).card : ℝ)
+        ≤ ∑ j : Fin M, ((badOf j).card : ℝ) := hsum
+      _ ≤ ∑ _j : Fin M, ε * Fintype.card F := Finset.sum_le_sum fun j _ => hbad_card j
+      _ = (M : ℝ) * ε * Fintype.card F := by simp [mul_assoc]
+  · intro β hβ q hq B hBD hB hagree
+    have hall : ∀ j : Fin M, ∃ v : F[X] × F[X], (v.1.degree < d ∧ v.2.degree < d) ∧
+        ∀ x ∈ B, u₀ j x = v.1.eval x ∧ u₁ j x = v.2.eval x := by
+      intro j
+      have hnot : β ∉ badOf j := fun hm => hβ (Finset.mem_biUnion.mpr ⟨j, Finset.mem_univ j, hm⟩)
+      obtain ⟨v₀, v₁, hdeg, hag⟩ := hbad j β hnot (q j) (hq j) B hBD hB (hagree j)
+      exact ⟨(v₀, v₁), hdeg, hag⟩
+    choose v hv_deg hv_ag using hall
+    exact ⟨fun j => (v j).1, fun j => (v j).2, hv_deg, hv_ag⟩
+
+/-- **Unconditional `TensorMCA` from single-line `CurveMCA D d 2 θ ε`:**
+`k` tensor halving rounds incur error at most `(2 ^ k - 1) * ε`. -/
+theorem tensorMCA_of_curveMCA_two {D : Finset F} {d : ℕ} {θ ε : ℝ}
+    (h1 : CurveMCA D d 2 θ ε) :
+    ∀ k : ℕ, TensorMCA D d k θ (((2 ^ k - 1 : ℕ) : ℝ) * ε)
+  | 0 => by simpa using tensorMCA_zero (F := F) D d θ
+  | k + 1 => by
+    have ih := tensorMCA_of_curveMCA_two h1 k
+    have hstep := tensorMCA_succ (batchedLineMCA_of_curveMCA_two (2 ^ k) h1) ih
+    have hpos : 1 ≤ 2 ^ k := Nat.one_le_two_pow
+    have hpos1 : 1 ≤ 2 ^ (k + 1) := Nat.one_le_two_pow
+    have heq : ((2 ^ k : ℕ) : ℝ) * ε + ((2 ^ k - 1 : ℕ) : ℝ) * ε =
+        ((2 ^ (k + 1) - 1 : ℕ) : ℝ) * ε := by
+      rw [Nat.cast_sub hpos, Nat.cast_sub hpos1]
+      push_cast; rw [pow_succ]; ring
+    rwa [heq] at hstep
+
+/-- **Unconditional `Tensor2DMCA` from single-line `CurveMCA D d 2 θ ε`:**
+`W` columns and `M` opening groups incur error at most
+`(2 ^ (kCol + kOpen) - 1) * ε`. -/
+theorem tensor2DMCA_of_curveMCA_two {D : Finset F} {d W M : ℕ} {θ ε : ℝ}
+    (h1 : CurveMCA D d 2 θ ε) :
+    Tensor2DMCA D d W M θ
+      (((2 ^ (Fri.tensorNumChallenges W + Fri.tensorNumChallenges M) - 1 : ℕ) : ℝ) * ε) :=
+  tensor2DMCA_of_tensorMCA (tensorMCA_of_curveMCA_two h1 _)
+
 end JohnsonTensor
 
 end CertiFri

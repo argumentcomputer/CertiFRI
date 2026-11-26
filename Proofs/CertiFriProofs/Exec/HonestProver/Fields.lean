@@ -443,10 +443,10 @@ variable {σ F EF D K : Type} [FieldOps F] [FieldOps EF] [TwoAdicOps F] [Extensi
   (w : Committed F K) (points values : Array EF) {grind : σ → ℕ → F}
 
 omit [FieldOps F] [FieldOps EF] [TwoAdicOps F] [ExtensionOps F EF] in
-/-- At zero difficulty every witness passes. -/
-theorem checkWitness_zero (chal : Challenger σ F EF D) (s : σ) (x : F) :
-    (chal.checkWitness s 0 x).1 = true :=
-  rfl
+/-- At zero difficulty every witness passes when the challenger state is valid. -/
+theorem checkWitness_zero (chal : Challenger σ F EF D) (s : σ) (x : F) (hok : chal.ok s = true) :
+    (chal.checkWitness s 0 x).1 = true := by
+  simp [Challenger.checkWitness, hok]
 
 /-- If the search finds a passing witness for the difficulty of the folding
 rounds in every state, every witness of the prover's folding rounds passes. -/

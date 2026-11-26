@@ -9,13 +9,13 @@ import CertiFri.Claims
 import CertiFri.Proof
 import CertiFri.Schedule
 import CertiFri.Shape
+import CertiFri.TensorBatching
 import CertiFri.Verifier
 import CertiFri.Pcs
 import CertiFri.Stark.Graph
 import CertiFri.Stark.Logup
 import CertiFri.Stark.System
 import CertiFri.Stark.Verifier
-import CertiFri.TensorBatching
 
 /-!
 # CertiFri

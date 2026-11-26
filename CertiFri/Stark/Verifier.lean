@@ -57,6 +57,16 @@ batch's messages must add up to zero.
 
 ## Differences from multi-stark
 
+* **Protocol `v6` / `v6-zk` is not ported here (audit IX-27):** this verifier
+  ports legacy `multi-stark` at revision `3515632` (Horner FRI batching,
+  quadratic `Fp^2` instantiation, plain unkeyed hashing, `shapeMessage` without
+  `vk_digest`). Protocol `v6` features — multilinear tensor FRI batching
+  (`FriBatching::Tensor`), the cubic trinomial extension (`GoldilocksExt3` /
+  `Fp^3`), BLAKE3 `derive_key` domain-separated transcripts/Merkle hashing, and
+  extension-modulus / `vk_digest` shape observations — as well as `v6-zk`
+  hiding-PCS features (salted Merkle leaves, 2× odd-coset witness blinding,
+  randomizer polynomials, and multi-circuit accumulator masking) are **not**
+  implemented in this module.
 * multi-stark's configuration can omit some openings
   (`omit_unused_next_row_openings`, `omit_inactive_preprocessed_openings`).
   The FRI configuration leaves both off, and so does this port: the main and

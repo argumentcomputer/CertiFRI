@@ -17,12 +17,11 @@ Bridges the executable `FriBatching::Tensor` implementation
      multilinear monomial `tensorWeight (fun b => r.toModel chals[b]) j`.
    * `toModel_tensorWeightExplicit`: executable `Fri.tensorWeightExplicit` refines
      to the exact same `tensorWeight`.
-   * `toModel_tensorColAcc`, `toModel_tensorOpeningTerm`: the executable column
-     accumulation and the term of one opening refine to the exact sums
-     `∑_c w_col[c] * (y_{o,c} - f_{o,c}(x))` and
-     `w_open[o] * (∑_c w_col[c] * (y_{o,c} - f_{o,c}(x))) / (z_o - x)`.
-     No lemma relates the whole reduced opening `Fri.reducedOpeningTensor` to
-     the model, and no verifier or soundness theorem uses `Tensor2DMCA`.
+   * `toModel_tensorColAcc`, `toModel_tensorOpeningTerm`, `toModel_reducedOpeningTensor`,
+     `toModel_reducedOpeningTensor_tensorWeights`: the executable column
+     accumulation, single-opening term, and full level reduced opening
+     `Fri.reducedOpeningTensor` refine to the exact mathematical 2D tensor sum
+     `∑_o w_open[o] * (∑_c w_col[c] * (y_{o,c} - f_{o,c}(x)) * (z_o - x)⁻¹)`.
 
 2. **Concrete `GoldilocksExt3` 128-bit Tensor batching soundness (`CertiFri.P3.Exec`):**
    * `goldilocksExt3_tensor2DMCA_ud`: unconditional 2D tensor MCA over `Fp3Model`
@@ -286,6 +285,104 @@ theorem toModel_tensorOpeningTerm (colWeights : Array EF) (openWeight z x : EF)
     mul_assoc, Finset.sum_mul]
   congr 1
   refine Finset.sum_congr rfl fun c _ => by ring
+
+/-- `reducedOpeningTensor` refines to the exact opening- and column-weighted quotient sum in `K`. -/
+theorem toModel_reducedOpeningTensor (sched : TensorSchedule EF) (x : EF)
+    (openings : List (ℕ × EF × Array EF × Array F))
+    (hsize : ∀ item ∈ openings, item.2.2.1.size = item.2.2.2.size) :
+    m.ext.toModel (reducedOpeningTensor sched x openings) =
+      (openings.map fun (oIdx, z, claimed, opened) =>
+        m.ext.toModel (sched.openWeights.getD oIdx 0) *
+          ∑ c : Fin claimed.size, m.ext.toModel (sched.colWeights.getD c.val 0) *
+            ((m.ext.toModel (claimed.getD c.val 0) - m.base.toModel (opened.getD c.val 0)) *
+              (m.ext.toModel z - m.ext.toModel x)⁻¹)).sum := by
+  unfold reducedOpeningTensor
+  have hfold : ∀ (l : List (ℕ × EF × Array EF × Array F)) (init : EF),
+      (∀ item ∈ l, item.2.2.1.size = item.2.2.2.size) →
+      m.ext.toModel (l.foldl (fun acc (oIdx, z, claimed, opened) =>
+          acc + tensorOpeningTerm sched.colWeights (sched.openWeights.getD oIdx 0) z x claimed opened)
+        init) =
+        m.ext.toModel init +
+          (l.map fun (oIdx, z, claimed, opened) =>
+            m.ext.toModel (sched.openWeights.getD oIdx 0) *
+              ∑ c : Fin claimed.size, m.ext.toModel (sched.colWeights.getD c.val 0) *
+                ((m.ext.toModel (claimed.getD c.val 0) - m.base.toModel (opened.getD c.val 0)) *
+                  (m.ext.toModel z - m.ext.toModel x)⁻¹)).sum := by
+    intro l
+    induction l with
+    | nil => intro init _; simp
+    | cons hd tl ih =>
+      intro init hsz
+      rcases hd with ⟨oIdx, z, claimed, opened⟩
+      have hhd : claimed.size = opened.size := hsz _ (List.mem_cons_self ..)
+      have htl : ∀ item ∈ tl, item.2.2.1.size = item.2.2.2.size :=
+        fun item hm => hsz item (List.mem_cons_of_mem _ hm)
+      simp only [List.foldl_cons, List.map_cons, List.sum_cons]
+      rw [ih _ htl, m.ext.map_add,
+        toModel_tensorOpeningTerm m sched.colWeights (sched.openWeights.getD oIdx 0) z x
+          claimed opened claimed.size rfl hhd.symm,
+        add_assoc]
+  rw [hfold openings 0 hsize, m.ext.map_zero, zero_add]
+
+/-- When `sched` holds `tensorWeights` expanded from `colChals` and `openChals` with
+enough capacity for the openings `ops`, `reducedOpeningTensor` refines to the exact
+2D `tensorWeight` quotient sum in `K` (matching `Tensor2DMCA`). -/
+theorem toModel_reducedOpeningTensor_tensorWeights
+    (colChals openChals : Array EF) (maxW maxM : ℕ)
+    (hmaxW : maxW ≤ 2 ^ colChals.size) (hmaxM : maxM ≤ 2 ^ openChals.size)
+    (x : EF) (ops : List (EF × Array EF × Array F))
+    (hM : ops.length ≤ maxM)
+    (hW : ∀ item ∈ ops, item.2.1.size ≤ maxW ∧ item.2.1.size = item.2.2.size) :
+    let sched : TensorSchedule EF :=
+      { colChallenges := colChals
+        openChallenges := openChals
+        colWeights := tensorWeights colChals maxW
+        openWeights := tensorWeights openChals maxM }
+    let rCol : Fin colChals.size → K := fun b => m.ext.toModel colChals[b.val]
+    let rOpen : Fin openChals.size → K := fun b => m.ext.toModel openChals[b.val]
+    m.ext.toModel (reducedOpeningTensor sched x
+        (ops.zipIdx.map fun ((z, claimed, opened), oIdx) => (oIdx, z, claimed, opened))) =
+      ∑ o : Fin ops.length,
+        tensorWeight rOpen ⟨o.val, lt_of_lt_of_le o.isLt (le_trans hM hmaxM)⟩ *
+          ∑ c : Fin (ops[o.val].2.1.size),
+            tensorWeight rCol ⟨c.val, lt_of_lt_of_le c.isLt
+              (le_trans (hW _ (List.getElem_mem o.isLt)).1 hmaxW)⟩ *
+              ((m.ext.toModel (ops[o.val].2.1.getD c.val 0) -
+                  m.base.toModel (ops[o.val].2.2.getD c.val 0)) *
+                (m.ext.toModel ops[o.val].1 - m.ext.toModel x)⁻¹) := by
+  intro sched rCol rOpen
+  have hsize : ∀ item ∈ (ops.zipIdx.map fun ((z, claimed, opened), oIdx) =>
+      (oIdx, z, claimed, opened)), item.2.2.1.size = item.2.2.2.size := by
+    intro item hm
+    rcases List.mem_map.mp hm with ⟨⟨⟨z, claimed, opened⟩, oIdx⟩, hmem, rfl⟩
+    have hget := List.mem_zipIdx_iff_getElem?.mp hmem
+    exact (hW (z, claimed, opened) (List.mem_of_getElem? hget)).2
+  rw [toModel_reducedOpeningTensor m sched x _ hsize, List.map_map]
+  have hsum_map : ∀ {α : Type} (l : List α) (g : α → K),
+      (l.map g).sum = ∑ i : Fin l.length, g l[i.val] := by
+    intro α l g
+    induction l with
+    | nil => simp
+    | cons a as ih =>
+      rw [List.map_cons, List.sum_cons, ih]
+      exact (Fin.sum_univ_succ (f := fun i : Fin (as.length + 1) => g (a :: as)[i.val])).symm
+  rw [hsum_map]
+  refine Finset.sum_bij (fun (i : Fin ops.zipIdx.length) _ =>
+      (⟨i.val, by simpa using i.isLt⟩ : Fin ops.length))
+    (fun _ _ => Finset.mem_univ _)
+    (fun a _ b _ h => Fin.ext (by simpa using congrArg Fin.val h))
+    (fun o _ => ⟨⟨o.val, by simp⟩, Finset.mem_univ _, Fin.ext rfl⟩)
+    (fun i _ => ?_)
+  have hi : i.val < ops.length := by simpa using i.isLt
+  simp only [Function.comp_apply, List.getElem_zipIdx, zero_add]
+  have ho_m : i.val < maxM := lt_of_lt_of_le hi hM
+  have ho_pow : i.val < 2 ^ openChals.size := lt_of_lt_of_le ho_m hmaxM
+  rw [toModel_tensorWeights_getD m.ext openChals maxM i.val ho_m ho_pow]
+  congr 1
+  refine Finset.sum_congr rfl fun c _ => ?_
+  have hc_w : c.val < maxW := lt_of_lt_of_le c.isLt (hW _ (List.getElem_mem hi)).1
+  have hc_pow : c.val < 2 ^ colChals.size := lt_of_lt_of_le hc_w hmaxW
+  rw [toModel_tensorWeights_getD m.ext colChals maxW c.val hc_w hc_pow]
 
 end OpeningRefinement
 

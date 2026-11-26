@@ -1,6 +1,5 @@
 import CertiFri.Field
 import CertiFri.Challenger
-import CertiFri.Verifier
 
 /-!
 # Tensor FRI Batching (`FriBatching::Tensor`, `multi-stark` `v6`)

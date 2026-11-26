@@ -13,6 +13,7 @@ import CertiFriTest.P3.DomainSep
 import CertiFriTest.P3.TensorBatching
 import CertiFriTest.P3.Pruned
 import CertiFriTest.P3.Fri
+import CertiFriTest.P3.FriTensor
 import CertiFriTest.Stark.Arith
 import CertiFriTest.Stark.MultiStark
 

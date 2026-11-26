@@ -5,6 +5,7 @@ import CertiFri.Poly
 import CertiFri.Challenger
 import CertiFri.Merkle
 import CertiFri.Proof
+import CertiFri.TensorBatching
 
 /-!
 # The FRI verifier
@@ -161,6 +162,49 @@ where `n` is the log of the size of the first domain. They keep the order of
 def levelClaims (logBlowup : Nat) (shape : ClaimShape) (n j : Nat) : List ClaimRef :=
   (claimRefs logBlowup shape).filter fun c => c.logHeight + j == n
 
+/-- One opening group `(matrix, point)` with its flat indices in `points` and `values`. -/
+structure OpeningRef where
+  /-- The batch of the matrix. -/
+  batch : Nat
+  /-- The position of the matrix in its batch. -/
+  matrix : Nat
+  /-- Log of the number of entries of a committed column: `logDegree + logBlowup`. -/
+  logHeight : Nat
+  /-- Number of columns of the matrix. -/
+  width : Nat
+  /-- The position of the opening point in `points`. -/
+  pointIdx : Nat
+  /-- The starting position of this opening's `width` claimed values in `values`. -/
+  valueStart : Nat
+  deriving Repr, DecidableEq
+
+/-- The opening groups of a shape in `(batch, matrix, point)` order, carrying the
+flat position of the opening point in `points` and the starting offset of its
+`width` claimed evaluations in `values`. -/
+def openingRefs (logBlowup : Nat) (shape : ClaimShape) : List OpeningRef :=
+  go (pointRefs logBlowup shape) 0 0
+where
+  go : List PointRef → Nat → Nat → List OpeningRef
+    | [], _, _ => []
+    | p :: ps, pointIdx, valueStart =>
+      ⟨p.batch, p.matrix, p.logHeight, p.width, pointIdx, valueStart⟩ ::
+        go ps (pointIdx + 1) (valueStart + p.width)
+
+/-- The opening groups of level `j` (log-height `n - j`), in `(batch, matrix, point)` order. -/
+def levelOpenings (logBlowup : Nat) (shape : ClaimShape) (n j : Nat) : List OpeningRef :=
+  (openingRefs logBlowup shape).filter fun o => o.logHeight + j == n
+
+/-- Maximum matrix width across all batches of a shape (`0` if empty). -/
+def maxWidth (shape : ClaimShape) : Nat :=
+  (shape.flatten.map (·.width)).foldr max 0
+
+/-- Maximum number of `(matrix, point)` opening groups at any single log-height
+(`0` if there are no opening points). Matches `max_openings_per_height` in
+`multi-stark/src/p3_adapter/fri_batching.rs`. -/
+def maxOpeningsPerHeight (logBlowup : Nat) (shape : ClaimShape) : Nat :=
+  let ps := pointRefs logBlowup shape
+  (ps.map fun p => (ps.filter fun q => q.logHeight == p.logHeight).length).foldr max 0
+
 /-! ## The challenges -/
 
 /-- The challenges of one run. -/
@@ -241,6 +285,56 @@ def transcriptFrom [Inhabited D] (chal : Challenger σ F EF D) (s : σ) (params 
     (shape : ClaimShape) (values : Array EF) {InputProof CommitProof : Type}
     (proof : FriProof F EF D InputProof CommitProof) : Challenges EF :=
   transcriptTail chal (chal.observeAll s (values.toList.map .ext)) params shape proof
+
+/-- The challenges of one tensor-batched run. -/
+structure TensorChallenges (EF : Type) where
+  /-- The sampled column and opening-group batching schedule. -/
+  schedule : TensorSchedule EF
+  /-- The folding challenge of each round. -/
+  betas : Array EF
+  /-- Whether every proof-of-work check passed. -/
+  powOk : Bool
+  /-- The query indices. -/
+  indices : Array Nat
+
+/-- Tensor-batched counterpart of `transcriptTail`: samples a `TensorSchedule`
+(`kCol` column challenges, then `kOpen` opening-group challenges) from `s`, then
+runs the identical FRI commit phase, final polynomial absorption, query PoW check,
+and query index sampling as `transcriptTail` and `multi-stark`'s
+`verify_fri_with_batching_inner`. -/
+def transcriptTailTensor [FieldOps EF] [Inhabited D] (chal : Challenger σ F EF D) (s : σ)
+    (params : FriParams) (shape : ClaimShape) {InputProof CommitProof : Type}
+    (proof : FriProof F EF D InputProof CommitProof) : TensorChallenges EF :=
+  let n := logMaxHeight params.logBlowup shape
+  let rounds := numRounds params shape
+  let sched := TensorSchedule.sample chal s (maxWidth shape)
+    (maxOpeningsPerHeight params.logBlowup shape)
+  let commit := commitPhase chal params.commitPowBits proof.commitPhaseCommits
+    proof.commitPowWitnesses rounds sched.2
+  let s := chal.observeAll commit.2.2 (finalMessage rounds proof.finalPoly)
+  let pow := chal.checkWitness s params.queryPowBits proof.queryPowWitness
+  { schedule := sched.1
+    betas := commit.1
+    powOk := commit.2.1 && pow.1
+    indices := (chal.sampleIndices n params.numQueries pow.2).toArray }
+
+/-- Tensor-batched counterpart of `transcript`: absorbs `firstMessage` (commitments,
+opening points, claimed values) from `init`, then derives tensor batching, folding,
+and query challenges via `transcriptTailTensor`. -/
+def transcriptTensor [FieldOps EF] [Inhabited D] (chal : Challenger σ F EF D) (init : σ)
+    (params : FriParams) (shape : ClaimShape) (commitments : Array D)
+    (points values : Array EF) {InputProof CommitProof : Type}
+    (proof : FriProof F EF D InputProof CommitProof) : TensorChallenges EF :=
+  transcriptTailTensor chal (chal.observeAll init (firstMessage commitments points values))
+    params shape proof
+
+/-- Tensor-batched counterpart of `transcriptFrom`: starting from caller state `s`,
+absorbs `values` and derives challenges via `transcriptTailTensor`. -/
+def transcriptFromTensor [FieldOps EF] [Inhabited D] (chal : Challenger σ F EF D) (s : σ)
+    (params : FriParams) (shape : ClaimShape) (values : Array EF)
+    {InputProof CommitProof : Type} (proof : FriProof F EF D InputProof CommitProof) :
+    TensorChallenges EF :=
+  transcriptTailTensor chal (chal.observeAll s (values.toList.map .ext)) params shape proof
 
 end Transcript
 
@@ -494,6 +588,88 @@ def verifyFrom {σ : Type} [Inhabited D] (inputMmcs : Mmcs F D) (friMmcs : Mmcs 
   shapeOk (F := F) params shape commitments points values proof
     && verifyWith inputMmcs friMmcs params shape commitments points values proof
       (transcriptFrom chal s params shape values proof)
+
+/-! ### Tensor-batched verification (`FriBatching::Tensor`) -/
+
+/-- The opened row of matrix `matrix` in batch `batch` for one query. -/
+def openedRow (rows : Array (Array (Array F))) (batch matrix : Nat) : Array F :=
+  (rows.getD batch #[]).getD matrix #[]
+
+/-- The claimed values of one opening group `o`, sliced from the flat `values` array. -/
+def claimedRow (values : Array EF) (o : OpeningRef) : Array EF :=
+  Array.ofFn (n := o.width) fun c => values.getD (o.valueStart + c.val) 0
+
+/-- The tensor-batched reduced openings of one query, one per level `j ≤ rounds`:
+combines all opening groups of level `j` at `cosetPoint n j (index >>> j)` via
+`reducedOpeningTensor`. -/
+def reducedOpeningsTensor (n rounds : Nat) (levels : Nat → List OpeningRef)
+    (sched : TensorSchedule EF) (points values : Array EF)
+    (rows : Array (Array (Array F))) (index : Nat) : Array EF :=
+  Array.ofFn (n := rounds + 1) fun j =>
+    let x := cosetPoint (F := F) n j.val (index >>> j.val)
+    let ops := (levels j.val).zipIdx.map fun (o, oIdx) =>
+      (oIdx, points.getD o.pointIdx 0, claimedRow values o, openedRow rows o.batch o.matrix)
+    reducedOpeningTensor sched x ops
+
+/-- Tensor-batched counterpart of `checkQuery`. -/
+def checkQueryTensor (params : FriParams) (shape : ClaimShape)
+    (levels : Nat → List OpeningRef) (points values : Array EF)
+    (proof : FriProof F EF D InputProof CommitProof) (ch : TensorChallenges EF)
+    (t index : Nat) : QueryResult EF :=
+  let n := logMaxHeight params.logBlowup shape
+  let rounds := numRounds params shape
+  let rows := queryRows proof t
+  let ros := reducedOpeningsTensor (F := F) n rounds levels ch.schedule points values rows index
+  let chain := foldChain (F := F) n ros (fun i => sibling proof i t) ch.betas index rounds
+  let widthsOk := (openingRefs params.logBlowup shape).all fun o =>
+    (openedRow rows o.batch o.matrix).size == o.width
+  let distinct := (pointRefs params.logBlowup shape).zipIdx.all fun (p, pointIdx) =>
+    !(points.getD pointIdx 0 -
+      cosetPoint (F := F) n (n - p.logHeight) (index >>> (n - p.logHeight)) == 0)
+  let constOk := params.logFinalPolyLen != 0 || ros.getD rounds 0 == 0
+  let finalOk := chain.1 ==
+    horner proof.finalPoly (ExtensionOps.embed (domainPoint (F := F) n rounds (index >>> rounds)))
+  { ok := widthsOk && distinct && constOk && finalOk, rows := chain.2 }
+
+/-- Tensor-batched counterpart of `verifyWith`. -/
+def verifyWithTensor (inputMmcs : Mmcs F D) (friMmcs : Mmcs EF D) (params : FriParams)
+    (shape : ClaimShape) (commitments : Array D) (points values : Array EF)
+    (proof : FriProof F EF D inputMmcs.MultiProof friMmcs.MultiProof)
+    (ch : TensorChallenges EF) : Bool :=
+  let n := logMaxHeight params.logBlowup shape
+  let rounds := numRounds params shape
+  let levelArr := Array.ofFn (n := rounds + 1) fun j => levelOpenings params.logBlowup shape n j.val
+  let results := Array.ofFn (n := params.numQueries) fun t =>
+    checkQueryTensor (F := F) params shape (fun j => levelArr.getD j []) points values proof ch
+      t.val (ch.indices.getD t.val 0)
+  ch.powOk && ch.indices.size == params.numQueries
+    && (List.range params.numQueries).all (fun t => decide (ch.indices.getD t 0 < 2 ^ n))
+    && inputChecks inputMmcs params shape commitments proof.inputOpenings ch.indices
+    && results.all (·.ok)
+    && commitChecks friMmcs params.numQueries n rounds proof.commitPhaseCommits
+        proof.commitPhaseOpenings ch.indices (results.map (·.rows))
+
+/-- **The tensor-batched FRI verifier.** Counterpart of `Fri.verify` using
+`FriBatching::Tensor` (`TensorSchedule.sample` and `reducedOpeningTensor`),
+matching `multi-stark`'s `verify_fri_with_batching_inner(..., FriBatching::Tensor)`
+for arity-2 folding. -/
+def verifyTensor {σ : Type} [Inhabited D] (inputMmcs : Mmcs F D) (friMmcs : Mmcs EF D)
+    (chal : Challenger σ F EF D) (init : σ) (params : FriParams) (shape : ClaimShape)
+    (commitments : Array D) (points values : Array EF)
+    (proof : FriProof F EF D inputMmcs.MultiProof friMmcs.MultiProof) : Bool :=
+  shapeOk (F := F) params shape commitments points values proof
+    && verifyWithTensor inputMmcs friMmcs params shape commitments points values proof
+      (transcriptTensor chal init params shape commitments points values proof)
+
+/-- **The tensor-batched FRI verifier inside a larger protocol.** Counterpart of
+`Fri.verifyFrom` using `FriBatching::Tensor`. -/
+def verifyFromTensor {σ : Type} [Inhabited D] (inputMmcs : Mmcs F D) (friMmcs : Mmcs EF D)
+    (chal : Challenger σ F EF D) (s : σ) (params : FriParams) (shape : ClaimShape)
+    (commitments : Array D) (points values : Array EF)
+    (proof : FriProof F EF D inputMmcs.MultiProof friMmcs.MultiProof) : Bool :=
+  shapeOk (F := F) params shape commitments points values proof
+    && verifyWithTensor inputMmcs friMmcs params shape commitments points values proof
+      (transcriptFromTensor chal s params shape values proof)
 
 end Checks
 

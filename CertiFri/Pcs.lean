@@ -76,4 +76,23 @@ def verifyClaimsFrom {σ F : Type} [FieldOps F] [FieldOps EF] [TwoAdicOps F] [Ex
     && verifyFrom inputMmcs friMmcs chal s params (claimShape claims)
       (claims.map (·.commitment)) (claimPoints claims) (claimValues claims) proof
 
+/-- Tensor-batched counterpart of `verifyClaims`. -/
+def verifyClaimsTensor {σ F : Type} [FieldOps F] [FieldOps EF] [TwoAdicOps F] [ExtensionOps F EF]
+    [Inhabited D] (inputMmcs : Mmcs F D) (friMmcs : Mmcs EF D) (chal : Challenger σ F EF D)
+    (init : σ) (params : FriParams) (claims : Array (CommitmentOpening EF D))
+    (proof : FriProof F EF D inputMmcs.MultiProof friMmcs.MultiProof) : Bool :=
+  widthsUniform claims
+    && verifyTensor inputMmcs friMmcs chal init params (claimShape claims)
+      (claims.map (·.commitment)) (claimPoints claims) (claimValues claims) proof
+
+/-- Tensor-batched counterpart of `verifyClaimsFrom`. -/
+def verifyClaimsFromTensor {σ F : Type} [FieldOps F] [FieldOps EF] [TwoAdicOps F]
+    [ExtensionOps F EF] [Inhabited D] (inputMmcs : Mmcs F D) (friMmcs : Mmcs EF D)
+    (chal : Challenger σ F EF D) (s : σ) (params : FriParams)
+    (claims : Array (CommitmentOpening EF D))
+    (proof : FriProof F EF D inputMmcs.MultiProof friMmcs.MultiProof) : Bool :=
+  widthsUniform claims
+    && verifyFromTensor inputMmcs friMmcs chal s params (claimShape claims)
+      (claims.map (·.commitment)) (claimPoints claims) (claimValues claims) proof
+
 end CertiFri.Fri

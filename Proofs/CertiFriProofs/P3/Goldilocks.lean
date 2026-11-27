@@ -795,6 +795,13 @@ theorem goldilocks_twoAdicGenerator_isPrimitiveRoot (n : ℕ) (hn : n ≤ 32) :
     rw [hpow] at hdvd
     exact (Nat.mul_dvd_mul_iff_left (pow_pos two_pos _)).mp hdvd
 
+/-- **The Goldilocks two-adic generators are compatible: squaring the
+`2^(k + 1)`-th generator gives the `2^k`-th generator for every `k < 32`.** -/
+theorem goldilocks_twoAdicGenerator_sq (k : ℕ) (hk : k < 32) :
+    Goldilocks.toZMod (Goldilocks.twoAdicGenerator (k + 1)) ^ 2 =
+      Goldilocks.toZMod (Goldilocks.twoAdicGenerator k) :=
+  (twoAdicGen_step k hk).symm
+
 /-- **The Goldilocks coset shift (`7`) is nonzero in `ZMod Goldilocks.order`.** -/
 theorem goldilocks_cosetShift_ne_zero :
     Goldilocks.toZMod Goldilocks.generator ≠ 0 := by

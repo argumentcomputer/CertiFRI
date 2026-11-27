@@ -3,6 +3,8 @@ import CertiFriProofs.P3.DigestCard
 import CertiFriProofs.Exec.SoundnessSponge
 import CertiFriProofs.Exec.SoundnessTensor
 import CertiFriProofs.Exec.SoundnessZk
+import CertiFriProofs.P3.GoldilocksExt3Soundness
+import CertiFriProofs.P3.GoldilocksExt3MultiAritySoundness
 
 /-!
 # 128-Bit Formal Security Audit (`Audit128`)
@@ -38,6 +40,22 @@ Mechanically pins (via `#guard_msgs` on `#check` and `#print axioms`) the
 5. Constructive negative controls proving that `Fp2`, `(2, 100, 0, 20)`, and
    32-byte digests at `N = 2 ^ 128` / BHT `Q = 2 ^ 86` strictly violate the
    128-bit target.
+6. Cubic extension (`Fp3Model`) `StarkModel` (`GoldilocksExt3.starkModel`),
+   shape-independent `DynamicRom` `RbrSound` bridge (`rbrSound_starkTensor_ud`,
+   `sdoomedTensor_nil_fp3`, `settles_interpTensor_fp3`), 100% unconditional
+   Johnson-regime tensor PCS `RbrSound` (`rbrSound_pcsTensor_johnson`), and
+   unconditional tensor-batched STARK soundness (`Stark.verifyTensor` /
+   `Stark.verifyBatchTensor`) for both unpruned `merkleMmcs` and Plonky3's
+   `prunedMmcs` (instantiated concretely for `Digest` / `2^256` and `Digest64` / `2^512`).
+7. Multi-arity (`2^a`, `a ≥ 1`, covering `logArity ∈ {1, 2, 3}`, fold factors `2, 4, 8`,
+   and variable per-round schedules `Fri.scheduleOfShape`) tensor-batched FRI &
+   `GoldilocksExt3` STARK soundness: iterated binary fold equivalence
+   (`foldRowMultiM_eq_foldAtPow`), unique-decoding & Johnson multi-arity proximity-gap
+   theorems (`stepMCAArity_ud`, `stepMCAArity_of_curveListCA_rel`), executable sponge
+   chaining (`c = 3 / 2`) literal `≤ N / 2 ^ 128` 100% unconditional Johnson soundness
+   for `FriParams.compact400KBBalanced` (`lb = 4, maxLogArity = 3, q = 58, pow = 28`)
+   and `FriParams.ultraCompact400KBZk` (`lb = 4, maxLogArity = 3, q = 55, pow = 30`),
+   and unpruned & pruned-MMCS multi-arity tensor STARK soundness over `GoldilocksExt3`.
 
 Every theorem audited here depends strictly on standard Lean axioms
 (`propext`, `Classical.choice`, `Quot.sound`) — zero `sorry`, zero custom
@@ -961,5 +979,499 @@ info: 'CertiFri.P3.Exec.goldilocksExt3_v6Zk_soundness_blake2b512_johnson_lb4_58_
 -/
 #guard_msgs in
 #print axioms goldilocksExt3_v6Zk_soundness_blake2b512_johnson_lb4_58_128_unconditional
+
+/-! ## Cubic Extension (`Fp3`) `StarkModel`, Tensor-FRI STARK & `prunedMmcs` Soundness Audit -/
+
+/--
+info: GoldilocksExt3.starkModel : Stark.StarkModel Goldilocks GoldilocksExt3 Fp3Model
+-/
+#guard_msgs in
+#check @CertiFri.P3.GoldilocksExt3.starkModel
+
+/--
+info: 'CertiFri.P3.GoldilocksExt3.starkModel' depends on axioms: [propext, Classical.choice, Quot.sound]
+-/
+#guard_msgs in
+#print axioms CertiFri.P3.GoldilocksExt3.starkModel
+
+/--
+info: 'CertiFri.P3.GoldilocksExt3.soundness_verify' depends on axioms: [propext, Classical.choice, Quot.sound]
+-/
+#guard_msgs in
+#print axioms CertiFri.P3.GoldilocksExt3.soundness_verify
+
+/--
+info: 'CertiFri.P3.GoldilocksExt3.soundness_verifyBatch' depends on axioms: [propext, Classical.choice, Quot.sound]
+-/
+#guard_msgs in
+#print axioms CertiFri.P3.GoldilocksExt3.soundness_verifyBatch
+
+/--
+info: 'CertiFri.P3.GoldilocksExt3.rbrSound_starkTensor_ud' depends on axioms: [propext, Classical.choice, Quot.sound]
+-/
+#guard_msgs in
+#print axioms CertiFri.P3.GoldilocksExt3.rbrSound_starkTensor_ud
+
+/--
+info: 'CertiFri.P3.GoldilocksExt3.sdoomedTensor_nil_fp3' depends on axioms: [propext, Classical.choice, Quot.sound]
+-/
+#guard_msgs in
+#print axioms CertiFri.P3.GoldilocksExt3.sdoomedTensor_nil_fp3
+
+/--
+info: 'CertiFri.P3.GoldilocksExt3.settles_interpTensor_fp3' depends on axioms: [propext, Classical.choice, Quot.sound]
+-/
+#guard_msgs in
+#print axioms CertiFri.P3.GoldilocksExt3.settles_interpTensor_fp3
+
+/--
+info: 'CertiFri.P3.GoldilocksExt3.rbrSound_pcsTensor_johnson' depends on axioms: [propext, Classical.choice, Quot.sound]
+-/
+#guard_msgs in
+#print axioms CertiFri.P3.GoldilocksExt3.rbrSound_pcsTensor_johnson
+
+/--
+info: 'CertiFri.P3.GoldilocksExt3.soundness_verifyTensor' depends on axioms: [propext, Classical.choice, Quot.sound]
+-/
+#guard_msgs in
+#print axioms CertiFri.P3.GoldilocksExt3.soundness_verifyTensor
+
+/--
+info: 'CertiFri.P3.GoldilocksExt3.soundness_verifyBatchTensor' depends on axioms: [propext, Classical.choice, Quot.sound]
+-/
+#guard_msgs in
+#print axioms CertiFri.P3.GoldilocksExt3.soundness_verifyBatchTensor
+
+/--
+info: 'CertiFri.P3.GoldilocksExt3.soundness_verifyTensor_lookups' depends on axioms: [propext, Classical.choice, Quot.sound]
+-/
+#guard_msgs in
+#print axioms CertiFri.P3.GoldilocksExt3.soundness_verifyTensor_lookups
+
+/--
+info: 'CertiFri.P3.GoldilocksExt3.soundness_verifyBatchTensor_lookups' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound]
+-/
+#guard_msgs in
+#print axioms CertiFri.P3.GoldilocksExt3.soundness_verifyBatchTensor_lookups
+
+/--
+info: 'CertiFri.P3.GoldilocksExt3.soundness_verifyTensorPruned' depends on axioms: [propext, Classical.choice, Quot.sound]
+-/
+#guard_msgs in
+#print axioms CertiFri.P3.GoldilocksExt3.soundness_verifyTensorPruned
+
+/--
+info: 'CertiFri.P3.GoldilocksExt3.soundness_verifyBatchTensorPruned' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound]
+-/
+#guard_msgs in
+#print axioms CertiFri.P3.GoldilocksExt3.soundness_verifyBatchTensorPruned
+
+/--
+info: 'CertiFri.P3.GoldilocksExt3.soundness_verifyTensorPruned_lookups' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound]
+-/
+#guard_msgs in
+#print axioms CertiFri.P3.GoldilocksExt3.soundness_verifyTensorPruned_lookups
+
+/--
+info: 'CertiFri.P3.GoldilocksExt3.soundness_verifyBatchTensorPruned_lookups' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound]
+-/
+#guard_msgs in
+#print axioms CertiFri.P3.GoldilocksExt3.soundness_verifyBatchTensorPruned_lookups
+
+/--
+info: 'CertiFri.P3.GoldilocksExt3.soundness_verifyBatchTensorPruned_digest32' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound]
+-/
+#guard_msgs in
+#print axioms CertiFri.P3.GoldilocksExt3.soundness_verifyBatchTensorPruned_digest32
+
+/--
+info: 'CertiFri.P3.GoldilocksExt3.soundness_verifyBatchTensorPruned_digest64' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound]
+-/
+#guard_msgs in
+#print axioms CertiFri.P3.GoldilocksExt3.soundness_verifyBatchTensorPruned_digest64
+
+/--
+info: 'CertiFri.P3.GoldilocksExt3.soundness_verifyBatchTensorPruned_lookups_digest32' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound]
+-/
+#guard_msgs in
+#print axioms CertiFri.P3.GoldilocksExt3.soundness_verifyBatchTensorPruned_lookups_digest32
+
+/--
+info: 'CertiFri.P3.GoldilocksExt3.soundness_verifyBatchTensorPruned_lookups_digest64' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound]
+-/
+#guard_msgs in
+#print axioms CertiFri.P3.GoldilocksExt3.soundness_verifyBatchTensorPruned_lookups_digest64
+
+/-! ## Multi-Arity (`2 ^ a`, `logArity ∈ {1, 2, 3}`) Tensor-FRI & `GoldilocksExt3` STARK Audit -/
+
+/-- info: FriParams.compact400KBBalanced : FriParams -/
+#guard_msgs in
+#check @FriParams.compact400KBBalanced
+
+/-- info: FriParams.ultraCompact400KBZk : FriParams -/
+#guard_msgs in
+#check @FriParams.ultraCompact400KBZk
+
+/--
+info: @johnson_35_128_compact400KB_le : ∀ {q pow : ℕ}, 58 ≤ q → 28 ≤ pow → (35 / 128) ^ q / 2 ^ pow ≤ 3 / 4 / 2 ^ 128
+-/
+#guard_msgs in
+#check @johnson_35_128_compact400KB_le
+
+/--
+info: @johnson_35_128_ultraCompact400KB_le : ∀ {q pow : ℕ}, 55 ≤ q → 30 ≤ pow → (35 / 128) ^ q / 2 ^ pow ≤ 3 / 4 / 2 ^ 128
+-/
+#guard_msgs in
+#check @johnson_35_128_ultraCompact400KB_le
+
+/-- Signature lock: **100% UNCONDITIONAL** literal `≤ N / 2 ^ 128` 8-ary multi-arity tensor-FRI
+Johnson soundness for `FriParams.compact400KBBalanced` (`lb = 4, maxLogArity = 3, logFinalPolyLen = 8,
+queries = 58, queryPow = 28`) under 64B RFC 7693 `BLAKE2b-512` and incremental sponge chaining. -/
+example (shape : ClaimShape) (arities : List ℕ)
+    (hmax : Fri.logMaxHeight FriParams.compact400KBBalanced.logBlowup shape ≤ 32)
+    (hpos : ∀ a ∈ arities, 0 < a)
+    (hsum_eq : arities.sum + FriParams.compact400KBBalanced.logFinalHeight =
+      Fri.logMaxHeight FriParams.compact400KBBalanced.logBlowup shape)
+    (htensor : 2 ^ (Fri.tensorNumChallenges (Fri.maxWidth shape) +
+        Fri.tensorNumChallenges (Fri.maxOpeningsPerHeight
+          FriParams.compact400KBBalanced.logBlowup shape)) *
+        2 ^ Fri.logMaxHeight FriParams.compact400KBBalanced.logBlowup shape ≤ 2 ^ 33)
+    (s₀ : Digest64) {A : Type*}
+    {adv : OracleComp (SpongeTensorMultiOracleAnswer (D := Digest64) goldilocksExt3_fieldModel
+      FriParams.compact400KBBalanced shape arities
+      (goldilocksExt3_wellFormed FriParams.compact400KBBalanced shape hmax) hpos
+      (by omega)) A}
+    {Q : ℕ} (hadv : adv.QueryBound Q)
+    (hN : Q + ((modelParamsMulti goldilocksExt3_fieldModel FriParams.compact400KBBalanced shape
+        arities (goldilocksExt3_wellFormed FriParams.compact400KBBalanced shape hmax) hpos
+        (by omega)).batches +
+      ((modelParamsMulti goldilocksExt3_fieldModel FriParams.compact400KBBalanced shape
+        arities (goldilocksExt3_wellFormed FriParams.compact400KBBalanced shape hmax) hpos
+        (by omega)).rounds + 2)) +
+      (modelParamsMulti goldilocksExt3_fieldModel FriParams.compact400KBBalanced shape
+        arities (goldilocksExt3_wellFormed FriParams.compact400KBBalanced shape hmax) hpos
+        (by omega)).verifierQueries ≤ 2 ^ 128)
+    (attempt : A → Attempt Goldilocks GoldilocksExt3 Digest64) :
+    let wf := goldilocksExt3_wellFormed FriParams.compact400KBBalanced shape hmax
+    let hsum : arities.sum ≤ Fri.logMaxHeight FriParams.compact400KBBalanced.logBlowup shape := by
+      omega
+    let P := modelParamsMulti goldilocksExt3_fieldModel FriParams.compact400KBBalanced shape arities
+      wf hpos hsum
+    let N : ℕ := Q + (P.batches + (P.rounds + 2)) + P.verifierQueries
+    prob (fun res l =>
+        (∃ f : ∀ x, SpongeTensorMultiOracleAnswer (D := Digest64) goldilocksExt3_fieldModel
+            FriParams.compact400KBBalanced shape arities wf hpos hsum x,
+          (∀ x y, l.dlookup x = some y → f x = y) ∧
+            spongeAcceptsTensorMulti goldilocksExt3_fieldModel FriParams.compact400KBBalanced shape
+              arities wf hpos hsum s₀ f (attempt res.1) = true) ∧
+        PcsRbr.ClaimsFailMulti P.ldt P.shift (35 / 128)
+          (P.claims (viewMulti goldilocksExt3_fieldModel FriParams.compact400KBBalanced shape arities
+            (Fri.firstMessage (attempt res.1).commitments
+              (attempt res.1).points (attempt res.1).values)) (spongeCommittedRow l)))
+      (spongeExperimentTensorMulti goldilocksExt3_fieldModel FriParams.compact400KBBalanced shape
+        arities wf hpos hsum s₀ adv attempt) [] ≤
+      (N : ℝ) / (2 : ℝ) ^ 128 :=
+  goldilocksExt3_compact400KBBalanced_sponge_blake2b512 shape arities hmax hpos hsum_eq htensor
+    s₀ hadv hN attempt
+
+/-- Signature lock: **100% UNCONDITIONAL** literal `≤ N / 2 ^ 128` 8-ary multi-arity tensor-FRI
+Johnson soundness for `FriParams.ultraCompact400KBZk` (`lb = 4, maxLogArity = 3, logFinalPolyLen = 8,
+queries = 55, queryPow = 30`) under 64B RFC 7693 `BLAKE2b-512` and incremental sponge chaining. -/
+example (shape : ClaimShape) (arities : List ℕ)
+    (hmax : Fri.logMaxHeight FriParams.ultraCompact400KBZk.logBlowup shape ≤ 32)
+    (hpos : ∀ a ∈ arities, 0 < a)
+    (hsum_eq : arities.sum + FriParams.ultraCompact400KBZk.logFinalHeight =
+      Fri.logMaxHeight FriParams.ultraCompact400KBZk.logBlowup shape)
+    (htensor : 2 ^ (Fri.tensorNumChallenges (Fri.maxWidth shape) +
+        Fri.tensorNumChallenges (Fri.maxOpeningsPerHeight
+          FriParams.ultraCompact400KBZk.logBlowup shape)) *
+        2 ^ Fri.logMaxHeight FriParams.ultraCompact400KBZk.logBlowup shape ≤ 2 ^ 33)
+    (s₀ : Digest64) {A : Type*}
+    {adv : OracleComp (SpongeTensorMultiOracleAnswer (D := Digest64) goldilocksExt3_fieldModel
+      FriParams.ultraCompact400KBZk shape arities
+      (goldilocksExt3_wellFormed FriParams.ultraCompact400KBZk shape hmax) hpos
+      (by omega)) A}
+    {Q : ℕ} (hadv : adv.QueryBound Q)
+    (hN : Q + ((modelParamsMulti goldilocksExt3_fieldModel FriParams.ultraCompact400KBZk shape
+        arities (goldilocksExt3_wellFormed FriParams.ultraCompact400KBZk shape hmax) hpos
+        (by omega)).batches +
+      ((modelParamsMulti goldilocksExt3_fieldModel FriParams.ultraCompact400KBZk shape
+        arities (goldilocksExt3_wellFormed FriParams.ultraCompact400KBZk shape hmax) hpos
+        (by omega)).rounds + 2)) +
+      (modelParamsMulti goldilocksExt3_fieldModel FriParams.ultraCompact400KBZk shape
+        arities (goldilocksExt3_wellFormed FriParams.ultraCompact400KBZk shape hmax) hpos
+        (by omega)).verifierQueries ≤ 2 ^ 128)
+    (attempt : A → Attempt Goldilocks GoldilocksExt3 Digest64) :
+    let wf := goldilocksExt3_wellFormed FriParams.ultraCompact400KBZk shape hmax
+    let hsum : arities.sum ≤ Fri.logMaxHeight FriParams.ultraCompact400KBZk.logBlowup shape := by
+      omega
+    let P := modelParamsMulti goldilocksExt3_fieldModel FriParams.ultraCompact400KBZk shape arities
+      wf hpos hsum
+    let N : ℕ := Q + (P.batches + (P.rounds + 2)) + P.verifierQueries
+    prob (fun res l =>
+        (∃ f : ∀ x, SpongeTensorMultiOracleAnswer (D := Digest64) goldilocksExt3_fieldModel
+            FriParams.ultraCompact400KBZk shape arities wf hpos hsum x,
+          (∀ x y, l.dlookup x = some y → f x = y) ∧
+            spongeAcceptsTensorMulti goldilocksExt3_fieldModel FriParams.ultraCompact400KBZk shape
+              arities wf hpos hsum s₀ f (attempt res.1) = true) ∧
+        PcsRbr.ClaimsFailMulti P.ldt P.shift (35 / 128)
+          (P.claims (viewMulti goldilocksExt3_fieldModel FriParams.ultraCompact400KBZk shape arities
+            (Fri.firstMessage (attempt res.1).commitments
+              (attempt res.1).points (attempt res.1).values)) (spongeCommittedRow l)))
+      (spongeExperimentTensorMulti goldilocksExt3_fieldModel FriParams.ultraCompact400KBZk shape
+        arities wf hpos hsum s₀ adv attempt) [] ≤
+      (N : ℝ) / (2 : ℝ) ^ 128 :=
+  goldilocksExt3_ultraCompact400KBZk_sponge_blake2b512 shape arities hmax hpos hsum_eq htensor
+    s₀ hadv hN attempt
+
+/-- info: 'CertiFri.Fri.scheduleValid_scheduleOfShape' depends on axioms: [propext, Quot.sound] -/
+#guard_msgs in
+#print axioms CertiFri.Fri.scheduleValid_scheduleOfShape
+
+/-- info: 'CertiFri.Fri.scheduleOfShape_binary' depends on axioms: [propext, Quot.sound] -/
+#guard_msgs in
+#print axioms CertiFri.Fri.scheduleOfShape_binary
+
+/-- info: 'CertiFri.foldRowMultiM_eq_foldAtPow' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms CertiFri.foldRowMultiM_eq_foldAtPow
+
+/-- info: 'CertiFri.stepMCAArity_ud' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms CertiFri.stepMCAArity_ud
+
+/--
+info: 'CertiFri.stepMCAArity_of_curveListCA_rel' depends on axioms: [propext, Classical.choice, Quot.sound]
+-/
+#guard_msgs in
+#print axioms CertiFri.stepMCAArity_of_curveListCA_rel
+
+/--
+info: 'CertiFri.Exec.soundnessTensorMulti_uniqueDecoding' depends on axioms: [propext, Classical.choice, Quot.sound]
+-/
+#guard_msgs in
+#print axioms CertiFri.Exec.soundnessTensorMulti_uniqueDecoding
+
+/--
+info: 'CertiFri.Exec.soundnessTensorMulti_sponge_uniqueDecoding' depends on axioms: [propext, Classical.choice, Quot.sound]
+-/
+#guard_msgs in
+#print axioms CertiFri.Exec.soundnessTensorMulti_sponge_uniqueDecoding
+
+/--
+info: 'CertiFri.Exec.soundnessTensorMulti_sponge_johnson_of_curveListCA' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound]
+-/
+#guard_msgs in
+#print axioms CertiFri.Exec.soundnessTensorMulti_sponge_johnson_of_curveListCA
+
+/--
+info: 'CertiFri.P3.Exec.goldilocksExt3_compact400KBBalanced_sponge_blake3' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound]
+-/
+#guard_msgs in
+#print axioms CertiFri.P3.Exec.goldilocksExt3_compact400KBBalanced_sponge_blake3
+
+/--
+info: 'CertiFri.P3.Exec.goldilocksExt3_compact400KBBalanced_sponge_blake2b512' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound]
+-/
+#guard_msgs in
+#print axioms CertiFri.P3.Exec.goldilocksExt3_compact400KBBalanced_sponge_blake2b512
+
+/--
+info: 'CertiFri.P3.Exec.goldilocksExt3_ultraCompact400KBZk_sponge_blake3' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound]
+-/
+#guard_msgs in
+#print axioms CertiFri.P3.Exec.goldilocksExt3_ultraCompact400KBZk_sponge_blake3
+
+/--
+info: 'CertiFri.P3.Exec.goldilocksExt3_ultraCompact400KBZk_sponge_blake2b512' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound]
+-/
+#guard_msgs in
+#print axioms CertiFri.P3.Exec.goldilocksExt3_ultraCompact400KBZk_sponge_blake2b512
+
+/--
+info: 'CertiFri.P3.GoldilocksExt3.rbrSound_starkTensorMulti_ud' depends on axioms: [propext, Classical.choice, Quot.sound]
+-/
+#guard_msgs in
+#print axioms CertiFri.P3.GoldilocksExt3.rbrSound_starkTensorMulti_ud
+
+/--
+info: 'CertiFri.P3.GoldilocksExt3.sdoomedTensorMulti_nil_fp3' depends on axioms: [propext, Classical.choice, Quot.sound]
+-/
+#guard_msgs in
+#print axioms CertiFri.P3.GoldilocksExt3.sdoomedTensorMulti_nil_fp3
+
+/--
+info: 'CertiFri.P3.GoldilocksExt3.rbrSound_pcsTensorMulti_johnson' depends on axioms: [propext, Classical.choice, Quot.sound]
+-/
+#guard_msgs in
+#print axioms CertiFri.P3.GoldilocksExt3.rbrSound_pcsTensorMulti_johnson
+
+/--
+info: 'CertiFri.P3.GoldilocksExt3.rbrSound_pcsTensorMulti_compact400KBBalanced' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound]
+-/
+#guard_msgs in
+#print axioms CertiFri.P3.GoldilocksExt3.rbrSound_pcsTensorMulti_compact400KBBalanced
+
+/--
+info: 'CertiFri.P3.GoldilocksExt3.rbrSound_pcsTensorMulti_ultraCompact400KBZk' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound]
+-/
+#guard_msgs in
+#print axioms CertiFri.P3.GoldilocksExt3.rbrSound_pcsTensorMulti_ultraCompact400KBZk
+
+/--
+info: 'CertiFri.P3.GoldilocksExt3.soundness_verifyTensorMultiArity' depends on axioms: [propext, Classical.choice, Quot.sound]
+-/
+#guard_msgs in
+#print axioms CertiFri.P3.GoldilocksExt3.soundness_verifyTensorMultiArity
+
+/--
+info: 'CertiFri.P3.GoldilocksExt3.soundness_verifyBatchTensorMultiArity' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound]
+-/
+#guard_msgs in
+#print axioms CertiFri.P3.GoldilocksExt3.soundness_verifyBatchTensorMultiArity
+
+/--
+info: 'CertiFri.P3.GoldilocksExt3.soundness_verifyTensorMultiArity_lookups' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound]
+-/
+#guard_msgs in
+#print axioms CertiFri.P3.GoldilocksExt3.soundness_verifyTensorMultiArity_lookups
+
+/--
+info: 'CertiFri.P3.GoldilocksExt3.soundness_verifyBatchTensorMultiArity_lookups' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound]
+-/
+#guard_msgs in
+#print axioms CertiFri.P3.GoldilocksExt3.soundness_verifyBatchTensorMultiArity_lookups
+
+/--
+info: 'CertiFri.P3.GoldilocksExt3.soundness_verifyTensorMultiArityPruned' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound]
+-/
+#guard_msgs in
+#print axioms CertiFri.P3.GoldilocksExt3.soundness_verifyTensorMultiArityPruned
+
+/--
+info: 'CertiFri.P3.GoldilocksExt3.soundness_verifyBatchTensorMultiArityPruned' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound]
+-/
+#guard_msgs in
+#print axioms CertiFri.P3.GoldilocksExt3.soundness_verifyBatchTensorMultiArityPruned
+
+/--
+info: 'CertiFri.P3.GoldilocksExt3.soundness_verifyTensorMultiArityPruned_lookups' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound]
+-/
+#guard_msgs in
+#print axioms CertiFri.P3.GoldilocksExt3.soundness_verifyTensorMultiArityPruned_lookups
+
+/--
+info: 'CertiFri.P3.GoldilocksExt3.soundness_verifyBatchTensorMultiArityPruned_lookups' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound]
+-/
+#guard_msgs in
+#print axioms CertiFri.P3.GoldilocksExt3.soundness_verifyBatchTensorMultiArityPruned_lookups
+
+/--
+info: 'CertiFri.P3.GoldilocksExt3.soundness_verifyBatchTensorMultiArityPruned_digest32' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound]
+-/
+#guard_msgs in
+#print axioms CertiFri.P3.GoldilocksExt3.soundness_verifyBatchTensorMultiArityPruned_digest32
+
+/--
+info: 'CertiFri.P3.GoldilocksExt3.soundness_verifyBatchTensorMultiArityPruned_digest64' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound]
+-/
+#guard_msgs in
+#print axioms CertiFri.P3.GoldilocksExt3.soundness_verifyBatchTensorMultiArityPruned_digest64
+
+/--
+info: 'CertiFri.P3.GoldilocksExt3.soundness_verifyBatchTensorMultiArityPruned_lookups_digest32' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound]
+-/
+#guard_msgs in
+#print axioms CertiFri.P3.GoldilocksExt3.soundness_verifyBatchTensorMultiArityPruned_lookups_digest32
+
+/--
+info: 'CertiFri.P3.GoldilocksExt3.soundness_verifyBatchTensorMultiArityPruned_lookups_digest64' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound]
+-/
+#guard_msgs in
+#print axioms CertiFri.P3.GoldilocksExt3.soundness_verifyBatchTensorMultiArityPruned_lookups_digest64
+
+/--
+info: 'CertiFri.P3.GoldilocksExt3.soundness_verifyBatchTensorMultiArityPruned_compact400KBBalanced_digest32' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound]
+-/
+#guard_msgs in
+#print axioms CertiFri.P3.GoldilocksExt3.soundness_verifyBatchTensorMultiArityPruned_compact400KBBalanced_digest32
+
+/--
+info: 'CertiFri.P3.GoldilocksExt3.soundness_verifyBatchTensorMultiArityPruned_compact400KBBalanced_digest64' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound]
+-/
+#guard_msgs in
+#print axioms CertiFri.P3.GoldilocksExt3.soundness_verifyBatchTensorMultiArityPruned_compact400KBBalanced_digest64
+
+/--
+info: 'CertiFri.P3.GoldilocksExt3.soundness_verifyBatchTensorMultiArityPruned_ultraCompact400KBZk_digest32' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound]
+-/
+#guard_msgs in
+#print axioms CertiFri.P3.GoldilocksExt3.soundness_verifyBatchTensorMultiArityPruned_ultraCompact400KBZk_digest32
+
+/--
+info: 'CertiFri.P3.GoldilocksExt3.soundness_verifyBatchTensorMultiArityPruned_ultraCompact400KBZk_digest64' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound]
+-/
+#guard_msgs in
+#print axioms CertiFri.P3.GoldilocksExt3.soundness_verifyBatchTensorMultiArityPruned_ultraCompact400KBZk_digest64
 
 end CertiFri.Audit128

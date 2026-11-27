@@ -11,6 +11,7 @@ import CertiFri.Schedule
 import CertiFri.Shape
 import CertiFri.TensorBatching
 import CertiFri.Verifier
+import CertiFri.MultiArity
 import CertiFri.Pcs
 import CertiFri.Stark.Graph
 import CertiFri.Stark.Logup

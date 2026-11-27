@@ -482,6 +482,18 @@ def checkAfterChallengesTensor (inputMmcs : Mmcs F D) (friMmcs : Mmcs EF D)
       (openingClaims sys proof ch.zeta) proof.openingProof
     && constraintsOk sys proof beta gamma acc ch.alpha ch.zeta
 
+/-- Multi-arity tensor-batched counterpart of `checkAfterChallenges`, using
+`Fri.verifyClaimsFromTensorMultiArity` for the PCS opening proof. -/
+def checkAfterChallengesTensorMultiArity (inputMmcs : Mmcs F D) (friMmcs : Mmcs EF D)
+    (chal : Challenger σ F EF D) (sys : System F D)
+    (proof : Proof F EF D inputMmcs.MultiProof friMmcs.MultiProof)
+    (s : σ) (beta gamma acc : EF) : Bool :=
+  let ch := mainChallenges chal s proof
+  zetaOk proof ch.zeta
+    && verifyClaimsFromTensorMultiArity inputMmcs friMmcs chal ch.state sys.fri
+      (openingClaims sys proof ch.zeta) proof.openingProof
+    && constraintsOk sys proof beta gamma acc ch.alpha ch.zeta
+
 /-- The lookup sum leaving the last active circuit of a proof; zero if the
 proof has none. -/
 def residual {InputProof CommitProof : Type} (proof : Proof F EF D InputProof CommitProof) :
@@ -589,6 +601,53 @@ def verifyBatchTensor [BEq D] (inputMmcs : Mmcs F D) (friMmcs : Mmcs EF D)
       messages.1
         && (headers.toList.zip batch.proofs.toList).zipIdx.all (fun (hp, shard) =>
           shardOkTensor inputMmcs friMmcs chal sys lc.2.2 lc.1 lc.2.1 shard hp.1 hp.2)
+        && batch.proofs.foldl (fun total proof => total + residual proof) messages.2 == 0
+
+/-- **The multi-arity tensor-batched multi-stark verifier, for one proof.**
+Identical to `verifyTensor`, verifying the PCS opening proof with variable-arity
+folding (`Fri.verifyClaimsFromTensorMultiArity`). -/
+def verifyTensorMultiArity (inputMmcs : Mmcs F D) (friMmcs : Mmcs EF D)
+    (chal : Challenger σ F EF D) (init : σ) (sys : System F D) (claims : Array (Array F))
+    (proof : Proof F EF D inputMmcs.MultiProof friMmcs.MultiProof) : Bool :=
+  shapeOk sys proof
+    && residual proof == 0
+    &&
+      let lc := lookupChallenges chal (chal.observeAll init (firstMessage sys proof claims))
+      let acc := claimsAccumulator lc.1 lc.2.1 claims
+      acc.1 && checkAfterChallengesTensorMultiArity inputMmcs friMmcs chal sys proof
+        lc.2.2 lc.1 lc.2.1 acc.2
+
+/-- Multi-arity tensor-batched counterpart of `shardOkTensor`. -/
+def shardOkTensorMultiArity [BEq D] (inputMmcs : Mmcs F D) (friMmcs : Mmcs EF D)
+    (chal : Challenger σ F EF D) (sys : System F D) (s : σ) (beta gamma : EF) (shard : Nat)
+    (header : ShardHeader F D)
+    (proof : Proof F EF D inputMmcs.MultiProof friMmcs.MultiProof) : Bool :=
+  shapeOk sys proof
+    && header.active == proof.active
+    && header.stage1Commit == proof.stage1Commit
+    && header.logDegrees == proof.logDegrees
+    &&
+      let acc := claimsAccumulator beta gamma header.claims
+      acc.1 && checkAfterChallengesTensorMultiArity inputMmcs friMmcs chal sys proof
+        (chal.observe s (observeNat shard)) beta gamma acc.2
+
+/-- **The multi-arity tensor-batched multi-stark verifier, for a batch.**
+Identical to `verifyBatchTensor`, verifying every shard's PCS opening proof
+with variable-arity folding (`shardOkTensorMultiArity`). -/
+def verifyBatchTensorMultiArity [BEq D] (inputMmcs : Mmcs F D) (friMmcs : Mmcs EF D)
+    (chal : Challenger σ F EF D) (init : σ) (sys : System F D)
+    (batch : BatchProof F EF D inputMmcs.MultiProof friMmcs.MultiProof) : Bool :=
+  let headers := batch.preamble.headers
+  headers.size != 0
+    && headers.size == batch.proofs.size
+    &&
+      let lc := lookupChallenges chal
+        (chal.observeAll init (batchFirstMessage sys batch.preamble))
+      let messages := messagesAccumulator lc.1 lc.2.1
+        (batch.preamble.messages.toList.map fun m => (m.args, m.multiplicity))
+      messages.1
+        && (headers.toList.zip batch.proofs.toList).zipIdx.all (fun (hp, shard) =>
+          shardOkTensorMultiArity inputMmcs friMmcs chal sys lc.2.2 lc.1 lc.2.1 shard hp.1 hp.2)
         && batch.proofs.foldl (fun total proof => total + residual proof) messages.2 == 0
 
 end Verify

@@ -120,4 +120,13 @@ import CertiFriProofs.Exec.Stark.SoundnessTensor
 import CertiFriProofs.Exec.Stark.PrunedTensor
 import CertiFriProofs.P3.GoldilocksExt3Model
 import CertiFriProofs.P3.GoldilocksExt3Soundness
+import CertiFriProofs.Theory.MultiArity.Fold
+import CertiFriProofs.Theory.MultiArity.Ldt
+import CertiFriProofs.Theory.MultiArity.PcsRbrTensor
+import CertiFriProofs.Theory.MultiArity.CompiledTensor
+import CertiFriProofs.Exec.MultiArity.TensorExec
+import CertiFriProofs.Exec.MultiArity.SpongeSoundness
+import CertiFriProofs.Exec.MultiArity.StarkState
+import CertiFriProofs.Exec.MultiArity.StarkSoundness
+import CertiFriProofs.P3.GoldilocksExt3MultiAritySoundness
 import CertiFriProofs.Audit128

@@ -1,5 +1,6 @@
 import CertiFri.Claims
 import CertiFri.Verifier
+import CertiFri.MultiArity
 
 /-!
 # The verifier on Plonky3-shaped claims
@@ -93,6 +94,26 @@ def verifyClaimsFromTensor {σ F : Type} [FieldOps F] [FieldOps EF] [TwoAdicOps 
     (proof : FriProof F EF D inputMmcs.MultiProof friMmcs.MultiProof) : Bool :=
   widthsUniform claims
     && verifyFromTensor inputMmcs friMmcs chal s params (claimShape claims)
+      (claims.map (·.commitment)) (claimPoints claims) (claimValues claims) proof
+
+/-- Multi-arity tensor-batched counterpart of `verifyClaims`. -/
+def verifyClaimsTensorMultiArity {σ F : Type} [FieldOps F] [FieldOps EF] [TwoAdicOps F]
+    [ExtensionOps F EF] [Inhabited D] (inputMmcs : Mmcs F D) (friMmcs : Mmcs EF D)
+    (chal : Challenger σ F EF D) (init : σ) (params : FriParams)
+    (claims : Array (CommitmentOpening EF D))
+    (proof : FriProof F EF D inputMmcs.MultiProof friMmcs.MultiProof) : Bool :=
+  widthsUniform claims
+    && verifyTensorMultiArity inputMmcs friMmcs chal init params (claimShape claims)
+      (claims.map (·.commitment)) (claimPoints claims) (claimValues claims) proof
+
+/-- Multi-arity tensor-batched counterpart of `verifyClaimsFrom`. -/
+def verifyClaimsFromTensorMultiArity {σ F : Type} [FieldOps F] [FieldOps EF] [TwoAdicOps F]
+    [ExtensionOps F EF] [Inhabited D] (inputMmcs : Mmcs F D) (friMmcs : Mmcs EF D)
+    (chal : Challenger σ F EF D) (s : σ) (params : FriParams)
+    (claims : Array (CommitmentOpening EF D))
+    (proof : FriProof F EF D inputMmcs.MultiProof friMmcs.MultiProof) : Bool :=
+  widthsUniform claims
+    && verifyFromTensorMultiArity inputMmcs friMmcs chal s params (claimShape claims)
       (claims.map (·.commitment)) (claimPoints claims) (claimValues claims) proof
 
 end CertiFri.Fri

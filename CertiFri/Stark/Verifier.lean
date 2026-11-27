@@ -470,6 +470,18 @@ def checkAfterChallenges (inputMmcs : Mmcs F D) (friMmcs : Mmcs EF D)
       (openingClaims sys proof ch.zeta) proof.openingProof
     && constraintsOk sys proof beta gamma acc ch.alpha ch.zeta
 
+/-- Tensor-batched counterpart of `checkAfterChallenges`, verifying the PCS
+openings via `Fri.verifyClaimsFromTensor` (`FriBatching::Tensor`). -/
+def checkAfterChallengesTensor (inputMmcs : Mmcs F D) (friMmcs : Mmcs EF D)
+    (chal : Challenger σ F EF D) (sys : System F D)
+    (proof : Proof F EF D inputMmcs.MultiProof friMmcs.MultiProof) (s : σ)
+    (beta gamma acc : EF) : Bool :=
+  let ch := mainChallenges chal s proof
+  zetaOk proof ch.zeta
+    && verifyClaimsFromTensor inputMmcs friMmcs chal ch.state sys.fri
+      (openingClaims sys proof ch.zeta) proof.openingProof
+    && constraintsOk sys proof beta gamma acc ch.alpha ch.zeta
+
 /-- The lookup sum leaving the last active circuit of a proof; zero if the
 proof has none. -/
 def residual {InputProof CommitProof : Type} (proof : Proof F EF D InputProof CommitProof) :
@@ -494,6 +506,19 @@ def verify (inputMmcs : Mmcs F D) (friMmcs : Mmcs EF D) (chal : Challenger σ F 
       let acc := claimsAccumulator lc.1 lc.2.1 claims
       acc.1 && checkAfterChallenges inputMmcs friMmcs chal sys proof lc.2.2 lc.1 lc.2.1 acc.2
 
+/-- **The tensor-batched multi-stark verifier, for one proof.** Identical to
+`verify`, using `FriBatching::Tensor` (`checkAfterChallengesTensor` /
+`Fri.verifyClaimsFromTensor`) for the PCS opening proof. -/
+def verifyTensor (inputMmcs : Mmcs F D) (friMmcs : Mmcs EF D) (chal : Challenger σ F EF D)
+    (init : σ) (sys : System F D) (claims : Array (Array F))
+    (proof : Proof F EF D inputMmcs.MultiProof friMmcs.MultiProof) : Bool :=
+  shapeOk sys proof
+    && residual proof == 0
+    &&
+      let lc := lookupChallenges chal (chal.observeAll init (firstMessage sys proof claims))
+      let acc := claimsAccumulator lc.1 lc.2.1 claims
+      acc.1 && checkAfterChallengesTensor inputMmcs friMmcs chal sys proof lc.2.2 lc.1 lc.2.1 acc.2
+
 /-- The check of shard `shard` of a batch (`verify_batch_shard_from`), from the
 shared state `s` and the shared lookup challenges: the proof has the shape the
 system fixes and is the one its header describes, and it passes the checks that
@@ -509,6 +534,21 @@ def shardOk [BEq D] (inputMmcs : Mmcs F D) (friMmcs : Mmcs EF D) (chal : Challen
     &&
       let acc := claimsAccumulator beta gamma header.claims
       acc.1 && checkAfterChallenges inputMmcs friMmcs chal sys proof
+        (chal.observe s (observeNat shard)) beta gamma acc.2
+
+/-- Tensor-batched counterpart of `shardOk`, verifying each shard's PCS opening
+proof via `Fri.verifyClaimsFromTensor` (`FriBatching::Tensor`). -/
+def shardOkTensor [BEq D] (inputMmcs : Mmcs F D) (friMmcs : Mmcs EF D)
+    (chal : Challenger σ F EF D) (sys : System F D) (s : σ) (beta gamma : EF) (shard : Nat)
+    (header : ShardHeader F D)
+    (proof : Proof F EF D inputMmcs.MultiProof friMmcs.MultiProof) : Bool :=
+  shapeOk sys proof
+    && header.active == proof.active
+    && header.stage1Commit == proof.stage1Commit
+    && header.logDegrees == proof.logDegrees
+    &&
+      let acc := claimsAccumulator beta gamma header.claims
+      acc.1 && checkAfterChallengesTensor inputMmcs friMmcs chal sys proof
         (chal.observe s (observeNat shard)) beta gamma acc.2
 
 /-- **The multi-stark verifier, for a batch.** Accept `batch` as a batch proof
@@ -530,6 +570,25 @@ def verifyBatch [BEq D] (inputMmcs : Mmcs F D) (friMmcs : Mmcs EF D)
       messages.1
         && (headers.toList.zip batch.proofs.toList).zipIdx.all (fun (hp, shard) =>
           shardOk inputMmcs friMmcs chal sys lc.2.2 lc.1 lc.2.1 shard hp.1 hp.2)
+        && batch.proofs.foldl (fun total proof => total + residual proof) messages.2 == 0
+
+/-- **The tensor-batched multi-stark verifier, for a batch.** Identical to
+`verifyBatch`, verifying every shard's PCS opening proof via
+`FriBatching::Tensor` (`shardOkTensor` / `Fri.verifyClaimsFromTensor`). -/
+def verifyBatchTensor [BEq D] (inputMmcs : Mmcs F D) (friMmcs : Mmcs EF D)
+    (chal : Challenger σ F EF D) (init : σ) (sys : System F D)
+    (batch : BatchProof F EF D inputMmcs.MultiProof friMmcs.MultiProof) : Bool :=
+  let headers := batch.preamble.headers
+  headers.size != 0
+    && headers.size == batch.proofs.size
+    &&
+      let lc := lookupChallenges chal
+        (chal.observeAll init (batchFirstMessage sys batch.preamble))
+      let messages := messagesAccumulator lc.1 lc.2.1
+        (batch.preamble.messages.toList.map fun m => (m.args, m.multiplicity))
+      messages.1
+        && (headers.toList.zip batch.proofs.toList).zipIdx.all (fun (hp, shard) =>
+          shardOkTensor inputMmcs friMmcs chal sys lc.2.2 lc.1 lc.2.1 shard hp.1 hp.2)
         && batch.proofs.foldl (fun total proof => total + residual proof) messages.2 == 0
 
 end Verify

@@ -3,6 +3,7 @@ import CertiFriProofs.P3.DigestCard
 import CertiFriProofs.Exec.SoundnessSponge
 import CertiFriProofs.Exec.SoundnessTensor
 import CertiFriProofs.Exec.SoundnessZk
+import CertiFriProofs.P3.GoldilocksExt3Soundness
 
 /-!
 # 128-Bit Formal Security Audit (`Audit128`)
@@ -38,6 +39,13 @@ Mechanically pins (via `#guard_msgs` on `#check` and `#print axioms`) the
 5. Constructive negative controls proving that `Fp2`, `(2, 100, 0, 20)`, and
    32-byte digests at `N = 2 ^ 128` / BHT `Q = 2 ^ 86` strictly violate the
    128-bit target.
+6. Cubic extension (`Fp3Model`) `StarkModel` (`GoldilocksExt3.starkModel`),
+   shape-independent `DynamicRom` `RbrSound` bridge (`rbrSound_starkTensor_ud`,
+   `sdoomedTensor_nil_fp3`, `settles_interpTensor_fp3`), 100% unconditional
+   Johnson-regime tensor PCS `RbrSound` (`rbrSound_pcsTensor_johnson`), and
+   unconditional tensor-batched STARK soundness (`Stark.verifyTensor` /
+   `Stark.verifyBatchTensor`) for both unpruned `merkleMmcs` and Plonky3's
+   `prunedMmcs` (instantiated concretely for `Digest` / `2^256` and `Digest64` / `2^512`).
 
 Every theorem audited here depends strictly on standard Lean axioms
 (`propext`, `Classical.choice`, `Quot.sound`) — zero `sorry`, zero custom
@@ -961,5 +969,143 @@ info: 'CertiFri.P3.Exec.goldilocksExt3_v6Zk_soundness_blake2b512_johnson_lb4_58_
 -/
 #guard_msgs in
 #print axioms goldilocksExt3_v6Zk_soundness_blake2b512_johnson_lb4_58_128_unconditional
+
+/-! ## Cubic Extension (`Fp3`) `StarkModel`, Tensor-FRI STARK & `prunedMmcs` Soundness Audit -/
+
+/--
+info: GoldilocksExt3.starkModel : Stark.StarkModel Goldilocks GoldilocksExt3 Fp3Model
+-/
+#guard_msgs in
+#check @CertiFri.P3.GoldilocksExt3.starkModel
+
+/--
+info: 'CertiFri.P3.GoldilocksExt3.starkModel' depends on axioms: [propext, Classical.choice, Quot.sound]
+-/
+#guard_msgs in
+#print axioms CertiFri.P3.GoldilocksExt3.starkModel
+
+/--
+info: 'CertiFri.P3.GoldilocksExt3.soundness_verify' depends on axioms: [propext, Classical.choice, Quot.sound]
+-/
+#guard_msgs in
+#print axioms CertiFri.P3.GoldilocksExt3.soundness_verify
+
+/--
+info: 'CertiFri.P3.GoldilocksExt3.soundness_verifyBatch' depends on axioms: [propext, Classical.choice, Quot.sound]
+-/
+#guard_msgs in
+#print axioms CertiFri.P3.GoldilocksExt3.soundness_verifyBatch
+
+/--
+info: 'CertiFri.P3.GoldilocksExt3.rbrSound_starkTensor_ud' depends on axioms: [propext, Classical.choice, Quot.sound]
+-/
+#guard_msgs in
+#print axioms CertiFri.P3.GoldilocksExt3.rbrSound_starkTensor_ud
+
+/--
+info: 'CertiFri.P3.GoldilocksExt3.sdoomedTensor_nil_fp3' depends on axioms: [propext, Classical.choice, Quot.sound]
+-/
+#guard_msgs in
+#print axioms CertiFri.P3.GoldilocksExt3.sdoomedTensor_nil_fp3
+
+/--
+info: 'CertiFri.P3.GoldilocksExt3.settles_interpTensor_fp3' depends on axioms: [propext, Classical.choice, Quot.sound]
+-/
+#guard_msgs in
+#print axioms CertiFri.P3.GoldilocksExt3.settles_interpTensor_fp3
+
+/--
+info: 'CertiFri.P3.GoldilocksExt3.rbrSound_pcsTensor_johnson' depends on axioms: [propext, Classical.choice, Quot.sound]
+-/
+#guard_msgs in
+#print axioms CertiFri.P3.GoldilocksExt3.rbrSound_pcsTensor_johnson
+
+/--
+info: 'CertiFri.P3.GoldilocksExt3.soundness_verifyTensor' depends on axioms: [propext, Classical.choice, Quot.sound]
+-/
+#guard_msgs in
+#print axioms CertiFri.P3.GoldilocksExt3.soundness_verifyTensor
+
+/--
+info: 'CertiFri.P3.GoldilocksExt3.soundness_verifyBatchTensor' depends on axioms: [propext, Classical.choice, Quot.sound]
+-/
+#guard_msgs in
+#print axioms CertiFri.P3.GoldilocksExt3.soundness_verifyBatchTensor
+
+/--
+info: 'CertiFri.P3.GoldilocksExt3.soundness_verifyTensor_lookups' depends on axioms: [propext, Classical.choice, Quot.sound]
+-/
+#guard_msgs in
+#print axioms CertiFri.P3.GoldilocksExt3.soundness_verifyTensor_lookups
+
+/--
+info: 'CertiFri.P3.GoldilocksExt3.soundness_verifyBatchTensor_lookups' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound]
+-/
+#guard_msgs in
+#print axioms CertiFri.P3.GoldilocksExt3.soundness_verifyBatchTensor_lookups
+
+/--
+info: 'CertiFri.P3.GoldilocksExt3.soundness_verifyTensorPruned' depends on axioms: [propext, Classical.choice, Quot.sound]
+-/
+#guard_msgs in
+#print axioms CertiFri.P3.GoldilocksExt3.soundness_verifyTensorPruned
+
+/--
+info: 'CertiFri.P3.GoldilocksExt3.soundness_verifyBatchTensorPruned' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound]
+-/
+#guard_msgs in
+#print axioms CertiFri.P3.GoldilocksExt3.soundness_verifyBatchTensorPruned
+
+/--
+info: 'CertiFri.P3.GoldilocksExt3.soundness_verifyTensorPruned_lookups' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound]
+-/
+#guard_msgs in
+#print axioms CertiFri.P3.GoldilocksExt3.soundness_verifyTensorPruned_lookups
+
+/--
+info: 'CertiFri.P3.GoldilocksExt3.soundness_verifyBatchTensorPruned_lookups' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound]
+-/
+#guard_msgs in
+#print axioms CertiFri.P3.GoldilocksExt3.soundness_verifyBatchTensorPruned_lookups
+
+/--
+info: 'CertiFri.P3.GoldilocksExt3.soundness_verifyBatchTensorPruned_digest32' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound]
+-/
+#guard_msgs in
+#print axioms CertiFri.P3.GoldilocksExt3.soundness_verifyBatchTensorPruned_digest32
+
+/--
+info: 'CertiFri.P3.GoldilocksExt3.soundness_verifyBatchTensorPruned_digest64' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound]
+-/
+#guard_msgs in
+#print axioms CertiFri.P3.GoldilocksExt3.soundness_verifyBatchTensorPruned_digest64
+
+/--
+info: 'CertiFri.P3.GoldilocksExt3.soundness_verifyBatchTensorPruned_lookups_digest32' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound]
+-/
+#guard_msgs in
+#print axioms CertiFri.P3.GoldilocksExt3.soundness_verifyBatchTensorPruned_lookups_digest32
+
+/--
+info: 'CertiFri.P3.GoldilocksExt3.soundness_verifyBatchTensorPruned_lookups_digest64' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound]
+-/
+#guard_msgs in
+#print axioms CertiFri.P3.GoldilocksExt3.soundness_verifyBatchTensorPruned_lookups_digest64
 
 end CertiFri.Audit128

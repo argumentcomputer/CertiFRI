@@ -5,6 +5,9 @@ import CertiFriProofs.Exec.SoundnessTensor
 import CertiFriProofs.Exec.SoundnessZk
 import CertiFriProofs.P3.GoldilocksExt3Soundness
 import CertiFriProofs.P3.GoldilocksExt3MultiAritySoundness
+import CertiFriProofs.Theory.Zk.PolyBlinding
+import CertiFriProofs.Theory.Zk.SaltedMerkle
+import CertiFriProofs.Exec.Zk.V6ZkHvzk
 
 /-!
 # 128-Bit Formal Security Audit (`Audit128`)
@@ -32,8 +35,8 @@ Mechanically pins (via `#guard_msgs` on `#check` and `#print axioms`) the
    * Unconditional unique decoding `(logBlowup = 2, numQueries = 160, queryPowBits = 20)`;
    * 100% unconditional Johnson regime (`lb = 2, 3, 4`, zero `CurveListCA` hypothesis),
      together with `ZkGuardrailsOk`-conditioned Horner-FRI corollaries in
-     `SoundnessZk.lean` (note: `SoundnessZk.lean` proves no hiding/ZK property
-     and does not run a salted-leaf or tensor-batched executable verifier).
+     `SoundnessZk.lean` (note: `SoundnessZk.lean` itself proves soundness
+     lemmas/guardrails only; formal hiding and HVZK theorems live in item 8 below).
 4. `FriBatching::Tensor` (`col_weights ⊗ open_weights`) executable refinement
    and unconditional `Tensor2DMCA` soundness (`≤ (3 / 4) / 2 ^ 128` for up to
    `2 ^ 16 × 2 ^ 16 = 2 ^ 32` claims over `GoldilocksExt3`).
@@ -56,6 +59,27 @@ Mechanically pins (via `#guard_msgs` on `#check` and `#print axioms`) the
    for `FriParams.compact400KBBalanced` (`lb = 4, maxLogArity = 3, q = 58, pow = 28`)
    and `FriParams.ultraCompact400KBZk` (`lb = 4, maxLogArity = 3, q = 55, pow = 30`),
    and unpruned & pruned-MMCS multi-arity tensor STARK soundness over `GoldilocksExt3`.
+8. Formal Honest-Verifier Zero-Knowledge (HVZK), polynomial blinding, masked-LogUp,
+   and salted-Merkle hiding for Protocol `v6-zk`:
+   * Algebraic vanishing-polynomial blinding (`eval_vec_uniform_of_blinding`,
+     `eval_ood_and_coset_uniform_of_blinding`), telescoping quotient slicing
+     (`quotient_slices_uniform_of_telescoping`), masked-LogUp running-sum and
+     cross-circuit boundary blinding (`masked_logup_hiding`,
+     `masked_logup_boundary_telescoping`, `masked_logup_boundary_hiding`), and
+     multi-arity FRI randomizer decomposition (`fri_multi_round_randomizer_uniform`).
+   * Salted Merkle leaf hiding in the classical ROM (`salted_leaf_rom_indistinguishable`
+     with bound `≤ N_RO * L_unopened / |Salt|`, plus unindexed `RO(row || salt)`
+     variant `salted_leaf_unindexed_rom_indistinguishable`), concretely instantiated
+     for 16-byte classical (`s = 128`, `DomainSep.Salt16`) and 32-byte post-quantum-margin
+     (`s = 256`, `Salt32`) salts.
+   * Witness-free `v6-zk` simulator (`v6ZkAlgSimulator` / `v6ZkSimulator`), exact zero
+     total-variation algebraic HVZK (`v6Zk_alg_perfect_hvzk`), full ROM HVZK
+     (`v6Zk_hvzk`, `v6Zk_hvzk_unindexed`), and concrete `GoldilocksExt3` /
+     `FriParams.ultraCompact400KBZk` instantiations (`goldilocksExt3_v6Zk_hvzk`,
+     `goldilocksExt3_v6Zk_hvzk_salt32`, `goldilocksExt3_ultraCompact400KBZk_hvzk`,
+     `goldilocksExt3_ultraCompact400KBZk_hvzk_salt32`,
+     `goldilocksExt3_ultraCompact400KBZk_hvzk_logN9`, and
+     `goldilocksExt3_v6Zk_hvzk_with_tensor4_span`).
 
 Every theorem audited here depends strictly on standard Lean axioms
 (`propext`, `Classical.choice`, `Quot.sound`) — zero `sorry`, zero custom
@@ -64,7 +88,7 @@ axioms, zero `native_decide`, zero `bv_decide`.
 
 namespace CertiFri.Audit128
 
-open CertiFri CertiFri.Fri CertiFri.P3 CertiFri.P3.Exec CertiFri.Oracle CertiFri.Oracle.OracleComp CertiFri.Exec
+open CertiFri CertiFri.Zk CertiFri.Fri CertiFri.P3 CertiFri.P3.Exec CertiFri.Oracle CertiFri.Oracle.OracleComp CertiFri.Exec
 
 /-! ## Constructive Negative Controls (Boundary Tightness) -/
 
@@ -1473,5 +1497,658 @@ info: 'CertiFri.P3.GoldilocksExt3.soundness_verifyBatchTensorMultiArityPruned_ul
 -/
 #guard_msgs in
 #print axioms CertiFri.P3.GoldilocksExt3.soundness_verifyBatchTensorMultiArityPruned_ultraCompact400KBZk_digest64
+
+/-! ## Protocol `v6-zk` Formal HVZK, Polynomial Blinding, Masked-LogUp & Salted-Merkle Hiding Audit (`#guard_msgs` + `#print axioms`) -/
+
+/--
+info: @eval_vec_uniform_of_blinding : ∀ {K : Type u_1} [inst : Field K] [inst_1 : Fintype K] [DecidableEq K] (n : ℕ)
+  (f : Polynomial K) {b k : ℕ},
+  k ≤ b →
+    ∀ {xs : Fin k → K},
+      Function.Injective xs →
+        (∀ (i : Fin k), xs i ^ n ≠ 1) → IsUniformPushforward fun r i => Polynomial.eval (xs i) (blindPoly n f r)
+-/
+#guard_msgs in
+#check @eval_vec_uniform_of_blinding
+
+/--
+info: @eval_ood_and_coset_uniform_of_blinding : ∀ {K : Type u_1} [inst : Field K] [inst_1 : Fintype K] [DecidableEq K] (n : ℕ)
+  (f : Polynomial K) {b m : ℕ},
+  m + 2 ≤ b →
+    ∀ {g z : K} {xs : Fin m → K},
+      Function.Injective xs →
+        (∀ (i : Fin m), xs i ^ n ≠ 1) →
+          g ^ n = 1 →
+            g ≠ 1 →
+              z ≠ 0 →
+                z ^ n ≠ 1 →
+                  (∀ (i : Fin m), xs i ≠ z) →
+                    (∀ (i : Fin m), xs i ≠ g * z) →
+                      IsUniformPushforward fun r i => Polynomial.eval (oodAndCosetPoints g z xs i) (blindPoly n f r)
+-/
+#guard_msgs in
+#check @eval_ood_and_coset_uniform_of_blinding
+
+/--
+info: @quotient_slices_uniform_of_telescoping : ∀ {K : Type u_1} [inst : Field K] [inst_1 : Fintype K] [DecidableEq K]
+  (n q : ℕ) (hq : 1 ≤ q) (c : Fin (2 * q) → Polynomial K) {b k : ℕ},
+  k ≤ b →
+    ∀ {xs : Fin k → K},
+      Function.Injective xs →
+        IsUniformPushforward fun ρ j i => Polynomial.eval (xs i) (blindedQuotientSlice n q b c ρ ⟨↑j + 1, ⋯⟩)
+-/
+#guard_msgs in
+#check @quotient_slices_uniform_of_telescoping
+
+/--
+info: @masked_logup_hiding : ∀ {K : Type u_1} [inst : Field K] [inst_1 : Fintype K] [DecidableEq K] (n : ℕ)
+  (φ₁ φ₂ : Polynomial K) {b k : ℕ},
+  k ≤ b →
+    ∀ {xs : Fin k → K},
+      Function.Injective xs →
+        (∀ (i : Fin k), xs i ^ n ≠ 1) →
+          (∀ (r_φ : Fin b → K) (x : K), x ^ n = 1 → Polynomial.eval x (blindPoly n φ₁ r_φ) = Polynomial.eval x φ₁) ∧
+            (IsUniformPushforward fun r_φ i => Polynomial.eval (xs i) (blindPoly n φ₁ r_φ)) ∧
+              (tvDist (fun r_φ i => Polynomial.eval (xs i) (blindPoly n φ₁ r_φ)) fun r_φ i =>
+                  Polynomial.eval (xs i) (blindPoly n φ₂ r_φ)) =
+                0
+-/
+#guard_msgs in
+#check @masked_logup_hiding
+
+/--
+info: @masked_logup_boundary_telescoping : ∀ {K : Type u_1} [inst : Field K] {M : ℕ},
+  1 ≤ M →
+    ∀ (S_init S_final : K) (S μ : Fin (M - 1) → K),
+      (∀ p < M,
+          maskedBoundaryAcc S_init S_final S μ (p + 1) - maskedBoundaryAcc S_init S_final S μ p -
+              (boundaryMaskVal μ (p + 1) - boundaryMaskVal μ p) =
+            trueBoundaryAcc S_init S_final S (p + 1) - trueBoundaryAcc S_init S_final S p) ∧
+        ∑ p ∈ Finset.range M,
+            (maskedBoundaryAcc S_init S_final S μ (p + 1) - maskedBoundaryAcc S_init S_final S μ p -
+              (boundaryMaskVal μ (p + 1) - boundaryMaskVal μ p)) =
+          S_final - S_init
+-/
+#guard_msgs in
+#check @masked_logup_boundary_telescoping
+
+/--
+info: @masked_logup_boundary_hiding : ∀ {K : Type u_1} [inst : Field K] [inst_1 : Fintype K] [DecidableEq K] (n M : ℕ)
+  (S : Fin (M - 1) → K) (U₀ : Fin (M - 1) → K → Polynomial K) {b k : ℕ},
+  k ≤ b →
+    ∀ {xs : Fin k → K},
+      Function.Injective xs →
+        (∀ (i : Fin k), xs i ^ n ≠ 1) →
+          IsUniformPushforward fun rand =>
+            (fun p => S p + rand.1 p, fun p i => Polynomial.eval (xs i) (blindPoly n (U₀ p (rand.1 p)) (rand.2 p)))
+-/
+#guard_msgs in
+#check @masked_logup_boundary_hiding
+
+/--
+info: @fri_multi_round_randomizer_uniform : ∀ {K : Type u_1} [inst : Field K] [inst_1 : Fintype K] [DecidableEq K]
+  (arities : List ℕ) (d_final q : ℕ),
+  q ≤ d_final →
+    ∀ (betas : Fin arities.length → K) (ys : FriRoundQueryPoints K arities q),
+      FriRoundQueryPointsInj arities q ys →
+        ∀ (W : Fin (2 ^ arities.sum * d_final) → K),
+          IsUniformPushforward fun R =>
+            have dec := friMultiDecomp arities d_final betas (W + R);
+            (dec.1, evalFriRoundSiblings arities d_final q ys dec.2)
+-/
+#guard_msgs in
+#check @fri_multi_round_randomizer_uniform
+
+/--
+info: @salted_leaf_rom_indistinguishable : ∀ {L N_RO : ℕ} {Row Salt Digest : Type} [inst : DecidableEq Row]
+  [inst_1 : DecidableEq Salt] [inst_2 : DecidableEq Digest] [inst_3 : Fintype Salt] [Nonempty Salt]
+  [inst_5 : Fintype Digest] [Nonempty Digest] (depth : ℕ) (rows : Fin L → Row) (opened : Finset (Fin L))
+  (D : SaltedMerkleView L Row Salt Digest opened → OracleComp (SaltedMerkleAns L Row Salt Digest) Bool),
+  (∀ (v : SaltedMerkleView L Row Salt Digest opened), (D v).QueryBound N_RO) →
+    |realSaltedMerkleGame depth rows opened D - idealSaltedMerkleGame depth opened (fun i => rows ↑i) D| ≤
+      ↑N_RO * ↑(Finset.univ \ opened).card / ↑(Fintype.card Salt)
+-/
+#guard_msgs in
+#check @salted_leaf_rom_indistinguishable
+
+/--
+info: @salted_leaf_unindexed_rom_indistinguishable : ∀ {L N_RO : ℕ} {Row Salt Digest : Type} [inst : DecidableEq Row]
+  [inst_1 : DecidableEq Salt] [inst_2 : DecidableEq Digest] [inst_3 : Fintype Salt] [Nonempty Salt]
+  [inst_5 : Fintype Digest] [Nonempty Digest] (depth : ℕ) (rows : Fin L → Row) (opened : Finset (Fin L))
+  (D : SaltedMerkleView L Row Salt Digest opened → OracleComp (UnindexedSaltedAns Row Salt Digest) Bool),
+  (∀ (v : SaltedMerkleView L Row Salt Digest opened), (D v).QueryBound N_RO) →
+    |realUnindexedMerkleGame depth rows opened D - idealUnindexedMerkleGame depth opened (fun i => rows ↑i) D| ≤
+      (↑N_RO * ↑(Finset.univ \ opened).card + ↑(Finset.univ \ opened).card * ↑(L - 1)) / ↑(Fintype.card Salt)
+-/
+#guard_msgs in
+#check @salted_leaf_unindexed_rom_indistinguishable
+
+/--
+info: @salted_leaf_rom_128bit : ∀ {L N_RO : ℕ} {Row Digest : Type} [inst : DecidableEq Row] [inst_1 : DecidableEq Digest]
+  [inst_2 : Fintype Digest] [Nonempty Digest] (depth : ℕ) (rows : Fin L → Row) (opened : Finset (Fin L))
+  (D :
+    SaltedMerkleView L Row (Fin (2 ^ 128)) Digest opened →
+      OracleComp (SaltedMerkleAns L Row (Fin (2 ^ 128)) Digest) Bool),
+  (∀ (v : SaltedMerkleView L Row (Fin (2 ^ 128)) Digest opened), (D v).QueryBound N_RO) →
+    |realSaltedMerkleGame depth rows opened D - idealSaltedMerkleGame depth opened (fun i => rows ↑i) D| ≤
+      ↑N_RO * ↑(Finset.univ \ opened).card / 2 ^ 128
+-/
+#guard_msgs in
+#check @salted_leaf_rom_128bit
+
+/--
+info: @salted_leaf_rom_256bit : ∀ {L N_RO : ℕ} {Row Digest : Type} [inst : DecidableEq Row] [inst_1 : DecidableEq Digest]
+  [inst_2 : Fintype Digest] [Nonempty Digest] (depth : ℕ) (rows : Fin L → Row) (opened : Finset (Fin L))
+  (D :
+    SaltedMerkleView L Row (Fin (2 ^ 256)) Digest opened →
+      OracleComp (SaltedMerkleAns L Row (Fin (2 ^ 256)) Digest) Bool),
+  (∀ (v : SaltedMerkleView L Row (Fin (2 ^ 256)) Digest opened), (D v).QueryBound N_RO) →
+    |realSaltedMerkleGame depth rows opened D - idealSaltedMerkleGame depth opened (fun i => rows ↑i) D| ≤
+      ↑N_RO * ↑(Finset.univ \ opened).card / 2 ^ 256
+-/
+#guard_msgs in
+#check @salted_leaf_rom_256bit
+
+/--
+info: @salt128_advantage_le_of_leaves_le_pow32 : ∀ {N_RO L_unopened : ℕ},
+  L_unopened ≤ 2 ^ 32 → ↑N_RO * ↑L_unopened / 2 ^ 128 ≤ ↑N_RO / 2 ^ 96
+-/
+#guard_msgs in
+#check @salt128_advantage_le_of_leaves_le_pow32
+
+/--
+info: @salt256_advantage_le_of_leaves_le_pow32 : ∀ {N_RO L_unopened : ℕ},
+  L_unopened ≤ 2 ^ 32 → N_RO ≤ 2 ^ 128 → ↑N_RO * ↑L_unopened / 2 ^ 256 ≤ 1 / 2 ^ 96
+-/
+#guard_msgs in
+#check @salt256_advantage_le_of_leaves_le_pow32
+
+/--
+info: salt128_vs_salt256_grover_ratio_tradeoff : 1 ≤ ↑(2 ^ 64) ^ 2 * 1 / 2 ^ 128 ∧
+  ↑(2 ^ 96) ^ 2 * ↑(2 ^ 32) / 2 ^ 256 ≤ 1 / 2 ^ 32
+-/
+#guard_msgs in
+#check @salt128_vs_salt256_grover_ratio_tradeoff
+
+/-- info: card_salt16 : Fintype.card DomainSep.Salt16 = 2 ^ 128 -/
+#guard_msgs in
+#check @card_salt16
+
+/-- info: card_salt32 : Fintype.card Salt32 = 2 ^ 256 -/
+#guard_msgs in
+#check @card_salt32
+
+/--
+info: @goldilocks_coset_disjoint_from_trace : ∀ {logN : ℕ},
+  logN ≤ 32 → ∀ {d : GoldilocksField}, d ^ 2 ^ 32 = 1 → (7 * d) ^ 2 ^ logN ≠ 1
+-/
+#guard_msgs in
+#check @goldilocks_coset_disjoint_from_trace
+
+/--
+info: @fp3_coset_disjoint_from_trace : ∀ {logN : ℕ},
+  logN ≤ 32 → ∀ {d : GoldilocksField}, d ^ 2 ^ 32 = 1 → (Fp3Model.embed 7 * Fp3Model.embed d) ^ 2 ^ logN ≠ 1
+-/
+#guard_msgs in
+#check @fp3_coset_disjoint_from_trace
+
+/--
+info: @v6ZkAlgSimulator_ood_check : ∀ {K : Type} [inst : Field K] [inst_1 : DecidableEq K] {P : V6ZkParams}
+  (pub : V6ZkPublic K P) (ch : V6ZkChallenges K P) (hq : 1 ≤ P.halfQuotientSlices) (s : V6ZkCoreSample K P ch),
+  have v := v6ZkAlgSimulator pub ch hq s;
+  ∑ k, ch.z ^ (↑k * P.traceHeight) * v.quotientOodSlices k =
+    pub.evalComposition ch.z v.mainOodCur v.mainOodNext v.logupOodCur v.logupOodNext v.maskedInterAccs v.maskPolyOod *
+      (ch.z ^ P.traceHeight - 1)⁻¹
+-/
+#guard_msgs in
+#check @v6ZkAlgSimulator_ood_check
+
+/--
+info: @v6Zk_alg_perfect_hvzk : ∀ {K : Type} [inst : Field K] [inst_1 : Fintype K] [inst_2 : DecidableEq K] {P : V6ZkParams}
+  (pub : V6ZkPublic K P) (ch : V6ZkChallenges K P) (hB : P.BlindingOk ch.traceEvalSet.card ch.quotEvalSet.card),
+  ch.Ok →
+    ∀ (w : V6ZkWitness K P pub ch) [inst_3 : Fintype (V6ZkAlgView K P ch)],
+      tvDist (v6ZkRealAlgProver pub ch w) (v6ZkAlgSimulator pub ch ⋯) = 0 ∧
+        ∀ (E : V6ZkAlgView K P ch → Prop),
+          unifProb (v6ZkRealAlgProver pub ch w) E = unifProb (v6ZkAlgSimulator pub ch ⋯) E
+-/
+#guard_msgs in
+#check @v6Zk_alg_perfect_hvzk
+
+/--
+info: @v6Zk_hvzk : ∀ {K : Type} [inst : Field K] [inst_1 : Fintype K] [inst_2 : DecidableEq K] {P : V6ZkParams}
+  {L_total N_RO : ℕ} {Row Salt Digest : Type} [inst_3 : DecidableEq Row] [inst_4 : DecidableEq Salt]
+  [inst_5 : DecidableEq Digest] [inst_6 : Fintype Salt] [Nonempty Salt] [inst_8 : Fintype Digest] [Nonempty Digest]
+  (pub : V6ZkPublic K P) (ch : V6ZkChallenges K P) (hB : P.BlindingOk ch.traceEvalSet.card ch.quotEvalSet.card),
+  ch.Ok →
+    ∀ (w : V6ZkWitness K P pub ch) (depth : ℕ) (opened : Finset (Fin L_total))
+      (leafRows : V6ZkProverRand K P → Fin L_total → Row) (openedRowsOf : V6ZkAlgView K P ch → ↥opened → Row),
+      (∀ (rand : V6ZkProverRand K P) (i : ↥opened),
+          leafRows rand ↑i = openedRowsOf (v6ZkRealAlgProver pub ch w rand) i) →
+        ∀
+          (D :
+            V6ZkView K P ch L_total Row Salt Digest opened → OracleComp (SaltedMerkleAns L_total Row Salt Digest) Bool),
+          (∀ (v : V6ZkView K P ch L_total Row Salt Digest opened), (D v).QueryBound N_RO) →
+            |v6ZkRealGame pub ch w depth opened leafRows D - v6ZkSimulator pub ch ⋯ depth opened openedRowsOf D| ≤
+              ↑N_RO * ↑(Finset.univ \ opened).card / ↑(Fintype.card Salt)
+-/
+#guard_msgs in
+#check @v6Zk_hvzk
+
+/--
+info: @v6Zk_hvzk_unindexed : ∀ {K : Type} [inst : Field K] [inst_1 : Fintype K] [inst_2 : DecidableEq K] {P : V6ZkParams}
+  {L_total N_RO : ℕ} {Row Salt Digest : Type} [inst_3 : DecidableEq Row] [inst_4 : DecidableEq Salt]
+  [inst_5 : DecidableEq Digest] [inst_6 : Fintype Salt] [Nonempty Salt] [inst_8 : Fintype Digest] [Nonempty Digest]
+  (pub : V6ZkPublic K P) (ch : V6ZkChallenges K P) (hB : P.BlindingOk ch.traceEvalSet.card ch.quotEvalSet.card),
+  ch.Ok →
+    ∀ (w : V6ZkWitness K P pub ch) (depth : ℕ) (opened : Finset (Fin L_total))
+      (leafRows : V6ZkProverRand K P → Fin L_total → Row) (openedRowsOf : V6ZkAlgView K P ch → ↥opened → Row),
+      (∀ (rand : V6ZkProverRand K P) (i : ↥opened),
+          leafRows rand ↑i = openedRowsOf (v6ZkRealAlgProver pub ch w rand) i) →
+        ∀ (D : V6ZkView K P ch L_total Row Salt Digest opened → OracleComp (UnindexedSaltedAns Row Salt Digest) Bool),
+          (∀ (v : V6ZkView K P ch L_total Row Salt Digest opened), (D v).QueryBound N_RO) →
+            |v6ZkRealGameUnindexed pub ch w depth opened leafRows D -
+                  v6ZkSimulatorUnindexed pub ch ⋯ depth opened openedRowsOf D| ≤
+              (↑N_RO * ↑(Finset.univ \ opened).card + ↑(Finset.univ \ opened).card * ↑(L_total - 1)) /
+                ↑(Fintype.card Salt)
+-/
+#guard_msgs in
+#check @v6Zk_hvzk_unindexed
+
+/--
+info: @goldilocksExt3_v6Zk_hvzk : ∀ {P : V6ZkParams} {L_total N_RO : ℕ} {Row Digest : Type} [inst : DecidableEq Row]
+  [inst_1 : DecidableEq Digest] [inst_2 : Fintype Digest] [Nonempty Digest] (pub : V6ZkPublic Fp3Model P)
+  (ch : V6ZkChallenges Fp3Model P) (hB : P.BlindingOk ch.traceEvalSet.card ch.quotEvalSet.card),
+  ch.Ok →
+    ∀ (w : V6ZkWitness Fp3Model P pub ch) (depth : ℕ) (opened : Finset (Fin L_total))
+      (leafRows : V6ZkProverRand Fp3Model P → Fin L_total → Row)
+      (openedRowsOf : V6ZkAlgView Fp3Model P ch → ↥opened → Row),
+      (∀ (rand : V6ZkProverRand Fp3Model P) (i : ↥opened),
+          leafRows rand ↑i = openedRowsOf (v6ZkRealAlgProver pub ch w rand) i) →
+        ∀
+          (D :
+            V6ZkView Fp3Model P ch L_total Row DomainSep.Salt16 Digest opened →
+              OracleComp (SaltedMerkleAns L_total Row DomainSep.Salt16 Digest) Bool),
+          (∀ (v : V6ZkView Fp3Model P ch L_total Row DomainSep.Salt16 Digest opened), (D v).QueryBound N_RO) →
+            |v6ZkRealGame pub ch w depth opened leafRows D - v6ZkSimulator pub ch ⋯ depth opened openedRowsOf D| ≤
+              ↑N_RO * ↑(Finset.univ \ opened).card / 2 ^ 128
+-/
+#guard_msgs in
+#check @goldilocksExt3_v6Zk_hvzk
+
+/--
+info: @goldilocksExt3_v6Zk_hvzk_salt32 : ∀ {P : V6ZkParams} {L_total N_RO : ℕ} {Row Digest : Type} [inst : DecidableEq Row]
+  [inst_1 : DecidableEq Digest] [inst_2 : Fintype Digest] [Nonempty Digest] (pub : V6ZkPublic Fp3Model P)
+  (ch : V6ZkChallenges Fp3Model P) (hB : P.BlindingOk ch.traceEvalSet.card ch.quotEvalSet.card),
+  ch.Ok →
+    ∀ (w : V6ZkWitness Fp3Model P pub ch) (depth : ℕ) (opened : Finset (Fin L_total))
+      (leafRows : V6ZkProverRand Fp3Model P → Fin L_total → Row)
+      (openedRowsOf : V6ZkAlgView Fp3Model P ch → ↥opened → Row),
+      (∀ (rand : V6ZkProverRand Fp3Model P) (i : ↥opened),
+          leafRows rand ↑i = openedRowsOf (v6ZkRealAlgProver pub ch w rand) i) →
+        ∀
+          (D :
+            V6ZkView Fp3Model P ch L_total Row Salt32 Digest opened →
+              OracleComp (SaltedMerkleAns L_total Row Salt32 Digest) Bool),
+          (∀ (v : V6ZkView Fp3Model P ch L_total Row Salt32 Digest opened), (D v).QueryBound N_RO) →
+            |v6ZkRealGame pub ch w depth opened leafRows D - v6ZkSimulator pub ch ⋯ depth opened openedRowsOf D| ≤
+              ↑N_RO * ↑(Finset.univ \ opened).card / 2 ^ 256
+-/
+#guard_msgs in
+#check @goldilocksExt3_v6Zk_hvzk_salt32
+
+/--
+info: goldilocksExt3_ultraCompact400KBZk_hvzk : ∀ (logTraceHeight : ℕ),
+  10 ≤ logTraceHeight →
+    ∀ (arities : List ℕ) (numMainCols numLogupCols numCircuits halfQuotientSlices randomizerWidth : ℕ)
+      (hq1 : 1 ≤ halfQuotientSlices) {L_total N_RO : ℕ} {Row : Type} [inst : DecidableEq Row]
+      (pub :
+        V6ZkPublic Fp3Model
+          (ultraCompact400KBZkV6Params logTraceHeight arities numMainCols numLogupCols numCircuits halfQuotientSlices
+            randomizerWidth))
+      (ch :
+        V6ZkChallenges Fp3Model
+          (ultraCompact400KBZkV6Params logTraceHeight arities numMainCols numLogupCols numCircuits halfQuotientSlices
+            randomizerWidth)),
+      ch.numOpenings ≤
+          (ultraCompact400KBZkV6Params logTraceHeight arities numMainCols numLogupCols numCircuits halfQuotientSlices
+                randomizerWidth).numQueries *
+            (ultraCompact400KBZkV6Params logTraceHeight arities numMainCols numLogupCols numCircuits halfQuotientSlices
+                randomizerWidth).maxArity →
+        ch.Ok →
+          ∀
+            (w :
+              V6ZkWitness Fp3Model
+                (ultraCompact400KBZkV6Params logTraceHeight arities numMainCols numLogupCols numCircuits
+                  halfQuotientSlices randomizerWidth)
+                pub ch)
+            (depth : ℕ) (opened : Finset (Fin L_total))
+            (leafRows :
+              V6ZkProverRand Fp3Model
+                  (ultraCompact400KBZkV6Params logTraceHeight arities numMainCols numLogupCols numCircuits
+                    halfQuotientSlices randomizerWidth) →
+                Fin L_total → Row)
+            (openedRowsOf :
+              V6ZkAlgView Fp3Model
+                  (ultraCompact400KBZkV6Params logTraceHeight arities numMainCols numLogupCols numCircuits
+                    halfQuotientSlices randomizerWidth)
+                  ch →
+                ↥opened → Row),
+            (∀
+                (rand :
+                  V6ZkProverRand Fp3Model
+                    (ultraCompact400KBZkV6Params logTraceHeight arities numMainCols numLogupCols numCircuits
+                      halfQuotientSlices randomizerWidth))
+                (i : ↥opened), leafRows rand ↑i = openedRowsOf (v6ZkRealAlgProver pub ch w rand) i) →
+              ∀
+                (D :
+                  V6ZkView Fp3Model
+                      (ultraCompact400KBZkV6Params logTraceHeight arities numMainCols numLogupCols numCircuits
+                        halfQuotientSlices randomizerWidth)
+                      ch L_total Row DomainSep.Salt16 Digest64 opened →
+                    OracleComp (SaltedMerkleAns L_total Row DomainSep.Salt16 Digest64) Bool),
+                (∀
+                    (v :
+                      V6ZkView Fp3Model
+                        (ultraCompact400KBZkV6Params logTraceHeight arities numMainCols numLogupCols numCircuits
+                          halfQuotientSlices randomizerWidth)
+                        ch L_total Row DomainSep.Salt16 Digest64 opened),
+                    (D v).QueryBound N_RO) →
+                  |v6ZkRealGame pub ch w depth opened leafRows D -
+                        v6ZkSimulator pub ch hq1 depth opened openedRowsOf D| ≤
+                    ↑N_RO * ↑(Finset.univ \ opened).card / 2 ^ 128
+-/
+#guard_msgs in
+#check @goldilocksExt3_ultraCompact400KBZk_hvzk
+
+/--
+info: goldilocksExt3_ultraCompact400KBZk_hvzk_salt32 : ∀ (logTraceHeight : ℕ),
+  10 ≤ logTraceHeight →
+    ∀ (arities : List ℕ) (numMainCols numLogupCols numCircuits halfQuotientSlices randomizerWidth : ℕ)
+      (hq1 : 1 ≤ halfQuotientSlices) {L_total N_RO : ℕ} {Row : Type} [inst : DecidableEq Row]
+      (pub :
+        V6ZkPublic Fp3Model
+          (ultraCompact400KBZkV6Params logTraceHeight arities numMainCols numLogupCols numCircuits halfQuotientSlices
+            randomizerWidth))
+      (ch :
+        V6ZkChallenges Fp3Model
+          (ultraCompact400KBZkV6Params logTraceHeight arities numMainCols numLogupCols numCircuits halfQuotientSlices
+            randomizerWidth)),
+      ch.numOpenings ≤
+          (ultraCompact400KBZkV6Params logTraceHeight arities numMainCols numLogupCols numCircuits halfQuotientSlices
+                randomizerWidth).numQueries *
+            (ultraCompact400KBZkV6Params logTraceHeight arities numMainCols numLogupCols numCircuits halfQuotientSlices
+                randomizerWidth).maxArity →
+        ch.Ok →
+          ∀
+            (w :
+              V6ZkWitness Fp3Model
+                (ultraCompact400KBZkV6Params logTraceHeight arities numMainCols numLogupCols numCircuits
+                  halfQuotientSlices randomizerWidth)
+                pub ch)
+            (depth : ℕ) (opened : Finset (Fin L_total))
+            (leafRows :
+              V6ZkProverRand Fp3Model
+                  (ultraCompact400KBZkV6Params logTraceHeight arities numMainCols numLogupCols numCircuits
+                    halfQuotientSlices randomizerWidth) →
+                Fin L_total → Row)
+            (openedRowsOf :
+              V6ZkAlgView Fp3Model
+                  (ultraCompact400KBZkV6Params logTraceHeight arities numMainCols numLogupCols numCircuits
+                    halfQuotientSlices randomizerWidth)
+                  ch →
+                ↥opened → Row),
+            (∀
+                (rand :
+                  V6ZkProverRand Fp3Model
+                    (ultraCompact400KBZkV6Params logTraceHeight arities numMainCols numLogupCols numCircuits
+                      halfQuotientSlices randomizerWidth))
+                (i : ↥opened), leafRows rand ↑i = openedRowsOf (v6ZkRealAlgProver pub ch w rand) i) →
+              ∀
+                (D :
+                  V6ZkView Fp3Model
+                      (ultraCompact400KBZkV6Params logTraceHeight arities numMainCols numLogupCols numCircuits
+                        halfQuotientSlices randomizerWidth)
+                      ch L_total Row Salt32 Digest64 opened →
+                    OracleComp (SaltedMerkleAns L_total Row Salt32 Digest64) Bool),
+                (∀
+                    (v :
+                      V6ZkView Fp3Model
+                        (ultraCompact400KBZkV6Params logTraceHeight arities numMainCols numLogupCols numCircuits
+                          halfQuotientSlices randomizerWidth)
+                        ch L_total Row Salt32 Digest64 opened),
+                    (D v).QueryBound N_RO) →
+                  |v6ZkRealGame pub ch w depth opened leafRows D -
+                        v6ZkSimulator pub ch hq1 depth opened openedRowsOf D| ≤
+                    ↑N_RO * ↑(Finset.univ \ opened).card / 2 ^ 256
+-/
+#guard_msgs in
+#check @goldilocksExt3_ultraCompact400KBZk_hvzk_salt32
+
+/--
+info: goldilocksExt3_ultraCompact400KBZk_hvzk_logN9 : ∀ (logTraceHeight : ℕ),
+  9 ≤ logTraceHeight →
+    ∀ (arities : List ℕ) (numMainCols numLogupCols numCircuits halfQuotientSlices randomizerWidth : ℕ)
+      (hq1 : 1 ≤ halfQuotientSlices) {L_total N_RO : ℕ} {Row : Type} [inst : DecidableEq Row]
+      (pub :
+        V6ZkPublic Fp3Model
+          (ultraCompact400KBZkV6Params logTraceHeight arities numMainCols numLogupCols numCircuits halfQuotientSlices
+            randomizerWidth))
+      (ch :
+        V6ZkChallenges Fp3Model
+          (ultraCompact400KBZkV6Params logTraceHeight arities numMainCols numLogupCols numCircuits halfQuotientSlices
+            randomizerWidth)),
+      ch.numOpenings ≤
+          (ultraCompact400KBZkV6Params logTraceHeight arities numMainCols numLogupCols numCircuits halfQuotientSlices
+                randomizerWidth).numQueries *
+            (ultraCompact400KBZkV6Params logTraceHeight arities numMainCols numLogupCols numCircuits halfQuotientSlices
+                randomizerWidth).maxArity →
+        (∀ (i : Fin ch.numOpenings), ∃ j, ch.g * ch.queryPoints i = ch.queryPoints j) →
+          ch.Ok →
+            ∀
+              (w :
+                V6ZkWitness Fp3Model
+                  (ultraCompact400KBZkV6Params logTraceHeight arities numMainCols numLogupCols numCircuits
+                    halfQuotientSlices randomizerWidth)
+                  pub ch)
+              (depth : ℕ) (opened : Finset (Fin L_total))
+              (leafRows :
+                V6ZkProverRand Fp3Model
+                    (ultraCompact400KBZkV6Params logTraceHeight arities numMainCols numLogupCols numCircuits
+                      halfQuotientSlices randomizerWidth) →
+                  Fin L_total → Row)
+              (openedRowsOf :
+                V6ZkAlgView Fp3Model
+                    (ultraCompact400KBZkV6Params logTraceHeight arities numMainCols numLogupCols numCircuits
+                      halfQuotientSlices randomizerWidth)
+                    ch →
+                  ↥opened → Row),
+              (∀
+                  (rand :
+                    V6ZkProverRand Fp3Model
+                      (ultraCompact400KBZkV6Params logTraceHeight arities numMainCols numLogupCols numCircuits
+                        halfQuotientSlices randomizerWidth))
+                  (i : ↥opened), leafRows rand ↑i = openedRowsOf (v6ZkRealAlgProver pub ch w rand) i) →
+                ∀
+                  (D :
+                    V6ZkView Fp3Model
+                        (ultraCompact400KBZkV6Params logTraceHeight arities numMainCols numLogupCols numCircuits
+                          halfQuotientSlices randomizerWidth)
+                        ch L_total Row DomainSep.Salt16 Digest opened →
+                      OracleComp (SaltedMerkleAns L_total Row DomainSep.Salt16 Digest) Bool),
+                  (∀
+                      (v :
+                        V6ZkView Fp3Model
+                          (ultraCompact400KBZkV6Params logTraceHeight arities numMainCols numLogupCols numCircuits
+                            halfQuotientSlices randomizerWidth)
+                          ch L_total Row DomainSep.Salt16 Digest opened),
+                      (D v).QueryBound N_RO) →
+                    |v6ZkRealGame pub ch w depth opened leafRows D -
+                          v6ZkSimulator pub ch hq1 depth opened openedRowsOf D| ≤
+                      ↑N_RO * ↑(Finset.univ \ opened).card / 2 ^ 128
+-/
+#guard_msgs in
+#check @goldilocksExt3_ultraCompact400KBZk_hvzk_logN9
+
+/--
+info: @goldilocksExt3_v6Zk_hvzk_with_tensor4_span : ∀ {P : V6ZkParams} {L_total N_RO : ℕ} {Row Digest : Type}
+  [inst : DecidableEq Row] [inst_1 : DecidableEq Digest] [inst_2 : Fintype Digest] [Nonempty Digest]
+  (pub : V6ZkPublic Fp3Model P) (ch : V6ZkChallenges Fp3Model P)
+  (hB : P.BlindingOk ch.traceEvalSet.card ch.quotEvalSet.card),
+  ch.Ok →
+    ∀ (w : V6ZkWitness Fp3Model P pub ch) (depth : ℕ) (opened : Finset (Fin L_total))
+      (leafRows : V6ZkProverRand Fp3Model P → Fin L_total → Row)
+      (openedRowsOf : V6ZkAlgView Fp3Model P ch → ↥opened → Row),
+      (∀ (rand : V6ZkProverRand Fp3Model P) (i : ↥opened),
+          leafRows rand ↑i = openedRowsOf (v6ZkRealAlgProver pub ch w rand) i) →
+        ∀
+          (D :
+            V6ZkView Fp3Model P ch L_total Row DomainSep.Salt16 Digest opened →
+              OracleComp (SaltedMerkleAns L_total Row DomainSep.Salt16 Digest) Bool),
+          (∀ (v : V6ZkView Fp3Model P ch L_total Row DomainSep.Salt16 Digest opened), (D v).QueryBound N_RO) →
+            |v6ZkRealGame pub ch w depth opened leafRows D - v6ZkSimulator pub ch ⋯ depth opened openedRowsOf D| +
+                ↑(Nat.card { p // ¬FpSpan3 ![1, p.1, p.2, p.1 * p.2] }) / ↑(Nat.card (Fp3Model × Fp3Model)) ≤
+              ↑N_RO * ↑(Finset.univ \ opened).card / 2 ^ 128 + 1 / 2 ^ 126
+-/
+#guard_msgs in
+#check @goldilocksExt3_v6Zk_hvzk_with_tensor4_span
+
+/-- info: 'CertiFri.Zk.eval_vec_uniform_of_blinding' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms eval_vec_uniform_of_blinding
+
+/--
+info: 'CertiFri.Zk.eval_ood_and_coset_uniform_of_blinding' depends on axioms: [propext, Classical.choice, Quot.sound]
+-/
+#guard_msgs in
+#print axioms eval_ood_and_coset_uniform_of_blinding
+
+/--
+info: 'CertiFri.Zk.quotient_slices_uniform_of_telescoping' depends on axioms: [propext, Classical.choice, Quot.sound]
+-/
+#guard_msgs in
+#print axioms quotient_slices_uniform_of_telescoping
+
+/-- info: 'CertiFri.Zk.masked_logup_hiding' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms masked_logup_hiding
+
+/-- info: 'CertiFri.Zk.masked_logup_boundary_telescoping' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms masked_logup_boundary_telescoping
+
+/-- info: 'CertiFri.Zk.masked_logup_boundary_hiding' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms masked_logup_boundary_hiding
+
+/-- info: 'CertiFri.Zk.fri_multi_round_randomizer_uniform' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms fri_multi_round_randomizer_uniform
+
+/-- info: 'CertiFri.Zk.salted_leaf_rom_indistinguishable' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms salted_leaf_rom_indistinguishable
+
+/--
+info: 'CertiFri.Zk.salted_leaf_unindexed_rom_indistinguishable' depends on axioms: [propext, Classical.choice, Quot.sound]
+-/
+#guard_msgs in
+#print axioms salted_leaf_unindexed_rom_indistinguishable
+
+/-- info: 'CertiFri.Zk.salted_leaf_rom_128bit' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms salted_leaf_rom_128bit
+
+/-- info: 'CertiFri.Zk.salted_leaf_rom_256bit' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms salted_leaf_rom_256bit
+
+/--
+info: 'CertiFri.Zk.salt128_advantage_le_of_leaves_le_pow32' depends on axioms: [propext, Classical.choice, Quot.sound]
+-/
+#guard_msgs in
+#print axioms salt128_advantage_le_of_leaves_le_pow32
+
+/--
+info: 'CertiFri.Zk.salt256_advantage_le_of_leaves_le_pow32' depends on axioms: [propext, Classical.choice, Quot.sound]
+-/
+#guard_msgs in
+#print axioms salt256_advantage_le_of_leaves_le_pow32
+
+/--
+info: 'CertiFri.Zk.salt128_vs_salt256_grover_ratio_tradeoff' depends on axioms: [propext, Classical.choice, Quot.sound]
+-/
+#guard_msgs in
+#print axioms salt128_vs_salt256_grover_ratio_tradeoff
+
+/-- info: 'CertiFri.P3.Exec.card_salt16' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms card_salt16
+
+/-- info: 'CertiFri.P3.Exec.card_salt32' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms card_salt32
+
+/--
+info: 'CertiFri.P3.Exec.goldilocks_coset_disjoint_from_trace' depends on axioms: [propext, Classical.choice, Quot.sound]
+-/
+#guard_msgs in
+#print axioms goldilocks_coset_disjoint_from_trace
+
+/-- info: 'CertiFri.P3.Exec.fp3_coset_disjoint_from_trace' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms fp3_coset_disjoint_from_trace
+
+/-- info: 'CertiFri.P3.Exec.v6ZkAlgSimulator_ood_check' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms v6ZkAlgSimulator_ood_check
+
+/-- info: 'CertiFri.P3.Exec.v6Zk_alg_perfect_hvzk' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms v6Zk_alg_perfect_hvzk
+
+/-- info: 'CertiFri.P3.Exec.v6Zk_hvzk' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms v6Zk_hvzk
+
+/-- info: 'CertiFri.P3.Exec.v6Zk_hvzk_unindexed' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms v6Zk_hvzk_unindexed
+
+/-- info: 'CertiFri.P3.Exec.goldilocksExt3_v6Zk_hvzk' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms goldilocksExt3_v6Zk_hvzk
+
+/-- info: 'CertiFri.P3.Exec.goldilocksExt3_v6Zk_hvzk_salt32' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms goldilocksExt3_v6Zk_hvzk_salt32
+
+/--
+info: 'CertiFri.P3.Exec.goldilocksExt3_ultraCompact400KBZk_hvzk' depends on axioms: [propext, Classical.choice, Quot.sound]
+-/
+#guard_msgs in
+#print axioms goldilocksExt3_ultraCompact400KBZk_hvzk
+
+/--
+info: 'CertiFri.P3.Exec.goldilocksExt3_ultraCompact400KBZk_hvzk_salt32' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound]
+-/
+#guard_msgs in
+#print axioms goldilocksExt3_ultraCompact400KBZk_hvzk_salt32
+
+/--
+info: 'CertiFri.P3.Exec.goldilocksExt3_ultraCompact400KBZk_hvzk_logN9' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound]
+-/
+#guard_msgs in
+#print axioms goldilocksExt3_ultraCompact400KBZk_hvzk_logN9
+
+/--
+info: 'CertiFri.P3.Exec.goldilocksExt3_v6Zk_hvzk_with_tensor4_span' depends on axioms: [propext, Classical.choice, Quot.sound]
+-/
+#guard_msgs in
+#print axioms goldilocksExt3_v6Zk_hvzk_with_tensor4_span
 
 end CertiFri.Audit128

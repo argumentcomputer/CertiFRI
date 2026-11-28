@@ -5,15 +5,18 @@ import CertiFriProofs.Exec.SoundnessTensor
 /-!
 # Algebraic Lemmas, Parameter Guardrails, and Horner-FRI Soundness Corollaries for `multi-stark/v6-zk`
 
-**Scope notice:** This module does **not** certify the
-`multi-stark/v6-zk` zero-knowledge hiding-PCS end-to-end, and it proves **no**
-hiding or zero-knowledge property (no HVZK simulator or transcript
-indistinguishability theorem). In particular, the executable soundness theorems
-in Section 5 (`goldilocksExt3_v6Zk_soundness_blake2b512_*`) call the non-ZK
-Horner-batching `spongeAccepts` verifier (`SoundnessSponge.lean`) conditioned
-on `ZkGuardrailsOk` parameter bounds — they do not run a salted-leaf or
-tensor-batched executable verifier, and they are proved in the **classical**
-random oracle model (not QROM).
+**Scope notice:** This module focuses on algebraic soundness lemmas, parameter
+guardrails, and Horner-FRI soundness corollaries for `multi-stark/v6-zk`; it
+does not itself prove hiding or zero-knowledge properties — see
+`CertiFriProofs.Theory.Zk.PolyBlinding`, `CertiFriProofs.Theory.Zk.SaltedMerkle`,
+and `CertiFriProofs.Exec.Zk.V6ZkHvzk` for the formal Honest-Verifier
+Zero-Knowledge (HVZK) simulator, polynomial blinding, masked-LogUp hiding, and
+ROM salted-Merkle hiding theorems for `v6-zk`. In particular, the executable
+soundness theorems in Section 5 (`goldilocksExt3_v6Zk_soundness_blake2b512_*`)
+call the non-ZK Horner-batching `spongeAccepts` verifier (`SoundnessSponge.lean`)
+conditioned on `ZkGuardrailsOk` parameter bounds — they do not run a
+salted-leaf or tensor-batched executable verifier, and they are proved in the
+**classical** random oracle model (not QROM).
 
 What this module proves over `GoldilocksExt3` (`Fp3Model`, `p^3 ≈ 2^192`) and
 64-byte RFC 7693 `BLAKE2b-512` (`Digest64`):

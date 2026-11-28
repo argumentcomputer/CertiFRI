@@ -129,4 +129,7 @@ import CertiFriProofs.Exec.MultiArity.SpongeSoundness
 import CertiFriProofs.Exec.MultiArity.StarkState
 import CertiFriProofs.Exec.MultiArity.StarkSoundness
 import CertiFriProofs.P3.GoldilocksExt3MultiAritySoundness
+import CertiFriProofs.Theory.Zk.PolyBlinding
+import CertiFriProofs.Theory.Zk.SaltedMerkle
+import CertiFriProofs.Exec.Zk.V6ZkHvzk
 import CertiFriProofs.Audit128
